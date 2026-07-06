@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useParams, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
+import { useActiveUser } from "@/lib/user-context";
 import {
   Line,
   LineChart,
@@ -71,22 +72,24 @@ export default function ProgressPage() {
 
   const activeId = params.exerciseId ?? selectedId;
 
+  const { activeUserId } = useActiveUser();
+
   const { data: history, isLoading: historyLoading } = useQuery<HistorySet[]>({
-    queryKey: ["/api/exercises", activeId, "sets"],
+    queryKey: ["/api/exercises", activeId, "sets", activeUserId],
     queryFn: async () => {
       const res = await apiRequest("GET", `/api/exercises/${activeId}/sets`);
       return res.json();
     },
-    enabled: !!activeId,
+    enabled: !!activeId && activeUserId != null,
   });
 
   const { data: records, isLoading: recordsLoading } = useQuery<PersonalRecord[]>({
-    queryKey: ["/api/exercises", activeId, "records"],
+    queryKey: ["/api/exercises", activeId, "records", activeUserId],
     queryFn: async () => {
       const res = await apiRequest("GET", `/api/exercises/${activeId}/records`);
       return res.json();
     },
-    enabled: !!activeId,
+    enabled: !!activeId && activeUserId != null,
   });
 
   const selectedExercise = exercises?.find((e) => String(e.id) === activeId);

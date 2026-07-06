@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronsUpDown, Plus, Trash2, X, ClipboardList } from "lucide-react";
 import { apiRequest, queryClient as qc } from "@/lib/queryClient";
+import { useActiveUser } from "@/lib/user-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -105,12 +106,14 @@ interface HistorySet {
 }
 
 function ExerciseHistory({ exerciseId }: { exerciseId: number }) {
+  const { activeUserId } = useActiveUser();
   const { data, isLoading } = useQuery<HistorySet[]>({
-    queryKey: ["/api/exercises", String(exerciseId), "sets"],
+    queryKey: ["/api/exercises", String(exerciseId), "sets", activeUserId],
     queryFn: async () => {
       const res = await apiRequest("GET", `/api/exercises/${exerciseId}/sets`);
       return res.json();
     },
+    enabled: activeUserId != null,
   });
 
   if (isLoading) return <Skeleton className="h-16 w-full" />;
@@ -452,8 +455,10 @@ export default function LogWorkout() {
   const { data: muscleGroups } = useQuery<MuscleGroup[]>({
     queryKey: ["/api/muscle-groups"],
   });
+  const { activeUserId } = useActiveUser();
   const { data: templates } = useQuery<WorkoutTemplateLite[]>({
     queryKey: ["/api/workout-templates"],
+    enabled: activeUserId != null,
   });
 
   const exerciseMap = useMemo(() => {

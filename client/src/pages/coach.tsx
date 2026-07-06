@@ -22,6 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { apiRequest } from "@/lib/queryClient";
+import { useActiveUser } from "@/lib/user-context";
 import type { WorkoutExerciseSuggestion, FatigueSignal } from "@shared/coaching";
 
 interface Suggestion extends WorkoutExerciseSuggestion {
@@ -66,13 +67,15 @@ const RECOVERY_STATUS_STYLE: Record<string, string> = {
 
 export default function Coach() {
   const [templateId, setTemplateId] = useState<string>("all");
+  const { activeUserId } = useActiveUser();
 
   const { data: templates } = useQuery<WorkoutTemplateLite[]>({
     queryKey: ["/api/workout-templates"],
+    enabled: activeUserId != null,
   });
 
   const { data: suggestions, isLoading: suggestionsLoading } = useQuery<Suggestion[]>({
-    queryKey: ["/api/coach/suggestions", templateId],
+    queryKey: ["/api/coach/suggestions", templateId, activeUserId],
     queryFn: async () => {
       const url =
         templateId === "all"
@@ -81,10 +84,12 @@ export default function Coach() {
       const res = await apiRequest("GET", url);
       return res.json();
     },
+    enabled: activeUserId != null,
   });
 
   const { data: fatigue, isLoading: fatigueLoading } = useQuery<FatigueSignal>({
     queryKey: ["/api/coach/fatigue-trend"],
+    enabled: activeUserId != null,
   });
 
   return (

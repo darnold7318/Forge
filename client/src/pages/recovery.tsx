@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { HeartPulse } from "lucide-react";
+import { useActiveUser } from "@/lib/user-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -50,8 +51,10 @@ function MuscleCard({ state }: { state: MuscleRecoveryState }) {
 }
 
 export default function RecoveryMap() {
+  const { activeUserId } = useActiveUser();
   const { data, isLoading } = useQuery<MuscleRecoveryState[]>({
     queryKey: ["/api/recovery"],
+    enabled: activeUserId != null,
   });
 
   const sorted = (data ?? []).slice().sort((a, b) => b.fatiguePercent - a.fatiguePercent);
