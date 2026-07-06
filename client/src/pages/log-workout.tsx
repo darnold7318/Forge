@@ -457,7 +457,11 @@ export default function LogWorkout() {
   });
   const { activeUserId } = useActiveUser();
   const { data: templates } = useQuery<WorkoutTemplateLite[]>({
-    queryKey: ["/api/workout-templates"],
+    queryKey: ["/api/workout-templates", activeUserId],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/workout-templates");
+      return res.json();
+    },
     enabled: activeUserId != null,
   });
 

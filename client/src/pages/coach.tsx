@@ -70,7 +70,11 @@ export default function Coach() {
   const { activeUserId } = useActiveUser();
 
   const { data: templates } = useQuery<WorkoutTemplateLite[]>({
-    queryKey: ["/api/workout-templates"],
+    queryKey: ["/api/workout-templates", activeUserId],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/workout-templates");
+      return res.json();
+    },
     enabled: activeUserId != null,
   });
 
@@ -88,7 +92,11 @@ export default function Coach() {
   });
 
   const { data: fatigue, isLoading: fatigueLoading } = useQuery<FatigueSignal>({
-    queryKey: ["/api/coach/fatigue-trend"],
+    queryKey: ["/api/coach/fatigue-trend", activeUserId],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/coach/fatigue-trend");
+      return res.json();
+    },
     enabled: activeUserId != null,
   });
 

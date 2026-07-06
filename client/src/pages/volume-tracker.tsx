@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useActiveUser } from "@/lib/user-context";
+import { apiRequest } from "@/lib/queryClient";
 import {
   Line,
   LineChart,
@@ -126,7 +127,11 @@ function MuscleGroupCard({ entry }: { entry: VolumeTrackerEntry }) {
 export default function VolumeTracker() {
   const { activeUserId } = useActiveUser();
   const { data, isLoading } = useQuery<VolumeTrackerEntry[]>({
-    queryKey: ["/api/volume-tracker"],
+    queryKey: ["/api/volume-tracker", activeUserId],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/volume-tracker");
+      return res.json();
+    },
     enabled: activeUserId != null,
   });
 

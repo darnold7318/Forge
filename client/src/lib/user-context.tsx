@@ -24,17 +24,23 @@ export function UserProvider({ children }: { children: ReactNode }) {
 
   const [activeUserId, setActiveUserIdState] = useState<number | null>(null);
 
+  // Keep the module-level holder (read synchronously by apiRequest/getQueryFn)
+  // in sync on every render — NOT via useEffect. Child components' queries
+  // can fire their queryFn as soon as `enabled` flips true, which happens
+  // during the same commit as this component's state update; a useEffect
+  // here would run too late (parent effects fire after child effects/query
+  // observers react to the new render), causing a request to go out with a
+  // stale (null) header. Calling this during render is safe: it's an
+  // idempotent write to a module-level variable, not a side effect that
+  // needs cleanup.
+  setActiveUserIdForRequests(activeUserId);
+
   // Default to the first user once the list loads (only if nothing selected yet).
   useEffect(() => {
     if (activeUserId == null && users.length > 0) {
       setActiveUserIdState(users[0].id);
     }
   }, [users, activeUserId]);
-
-  // Keep the module-level holder (read by apiRequest/getQueryFn) in sync.
-  useEffect(() => {
-    setActiveUserIdForRequests(activeUserId);
-  }, [activeUserId]);
 
   const setActiveUserId = (id: number) => {
     setActiveUserIdState(id);

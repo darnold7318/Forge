@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { useActiveUser } from "@/lib/user-context";
+import { apiRequest } from "@/lib/queryClient";
 import { AlertTriangle, Plus, ChevronRight, Dumbbell, Flame, TrendingUp, Trophy, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -33,7 +34,11 @@ function recommendationStyle(rec: string) {
 export default function Dashboard() {
   const { activeUserId } = useActiveUser();
   const { data: snapshot, isLoading } = useQuery<DashboardSnapshot>({
-    queryKey: ["/api/dashboard"],
+    queryKey: ["/api/dashboard", activeUserId],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/dashboard");
+      return res.json();
+    },
     enabled: activeUserId != null,
   });
 

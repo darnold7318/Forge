@@ -156,7 +156,11 @@ export default function WorkoutTemplates() {
   const otherUser = users.find((u) => u.id !== activeUserId);
 
   const { data: templates, isLoading } = useQuery<WorkoutTemplateFull[]>({
-    queryKey: ["/api/workout-templates"],
+    queryKey: ["/api/workout-templates", activeUserId],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/workout-templates");
+      return res.json();
+    },
     enabled: activeUserId != null,
   });
   const { data: otherTemplates, isLoading: otherLoading } = useQuery<WorkoutTemplateFull[]>({

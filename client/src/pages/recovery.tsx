@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { HeartPulse } from "lucide-react";
 import { useActiveUser } from "@/lib/user-context";
+import { apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -53,7 +54,11 @@ function MuscleCard({ state }: { state: MuscleRecoveryState }) {
 export default function RecoveryMap() {
   const { activeUserId } = useActiveUser();
   const { data, isLoading } = useQuery<MuscleRecoveryState[]>({
-    queryKey: ["/api/recovery"],
+    queryKey: ["/api/recovery", activeUserId],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/recovery");
+      return res.json();
+    },
     enabled: activeUserId != null,
   });
 
