@@ -1,4 +1,4 @@
-import type { Express } from "express";
+import type { Express, Request, Response } from "express";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import { storage, parseExercise } from "./storage";
@@ -10,6 +10,7 @@ import {
   insertBodyweightLogSchema,
   insertWorkoutTemplateSchema,
   insertWorkoutTemplateExerciseSchema,
+  insertUserSchema,
   muscleGroupNames,
   muscleGroupDisplayNames,
   type MuscleGroupName,
@@ -37,6 +38,21 @@ import {
 } from "@shared/coaching";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Active-user resolution — reads the `X-User-Id` header set by the frontend's
+// apiRequest helper. No session/cookie infra; this is profile separation for
+// shared-device convenience only, not a security boundary.
+// ---------------------------------------------------------------------------
+function getUserId(req: Request, res: Response): number | null {
+  const header = req.header("x-user-id");
+  const id = header ? Number(header) : NaN;
+  if (!header || Number.isNaN(id)) {
+    res.status(400).json({ message: "Missing or invalid X-User-Id header" });
+    return null;
+  }
+  return id;
+}
 
 function startOfWeekWindow(referenceDate: Date, weeksAgo: number): { start: Date; end: Date } {
   const end = new Date(referenceDate.getTime() - weeksAgo * 7 * DAY_MS);
@@ -73,10 +89,10 @@ function toHistorySet(s: SetWithExercise): HistorySetInput {
   };
 }
 
-/** Build full workout history (most-recent-first) as HistorySessionInput[]. */
-async function buildHistory(): Promise<HistorySessionInput[]> {
-  const workoutsList = await storage.getWorkouts(); // already ordered desc by date, id
-  const allSets = await storage.getAllSets();
+/** Build full workout history (most-recent-first) as HistorySessionInput[] for a specific user. */
+async function buildHistory(userId: number): Promise<HistorySessionInput[]> {
+  const workoutsList = await storage.getWorkouts(userId); // already ordered desc by date, id
+  const allSets = await storage.getAllSets(userId);
 
   const setsByWorkout = new Map<number, SetWithExercise[]>();
   for (const s of allSets) {
@@ -117,11 +133,39 @@ async function buildHistory(): Promise<HistorySessionInput[]> {
   });
 }
 
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express,
 ): Promise<Server> {
-  // ---------------- Muscle Groups ----------------
+  // ---------------- Users (profiles) ----------------
+  app.get("/api/users", async (_req, res) => {
+    const list = await storage.getUsers();
+    res.json(list);
+  });
+
+  app.post("/api/users", async (req, res) => {
+    const parsed = insertUserSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.message });
+    }
+    const created = await storage.createUser(parsed.data);
+    res.status(201).json(created);
+  });
+
+  app.patch("/api/users/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    const nameSchema = insertUserSchema.pick({ name: true });
+    const parsed = nameSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.message });
+    }
+    const updated = await storage.renameUser(id, parsed.data.name);
+    if (!updated) return res.status(404).json({ message: "User not found" });
+    res.json(updated);
+  });
+
+  // ---------------- Muscle Groups (shared/global) ----------------
   app.get("/api/muscle-groups", async (_req, res) => {
     const groups = await storage.getMuscleGroups();
     const enriched = groups.map((g) => ({
@@ -131,7 +175,7 @@ export async function registerRoutes(
     res.json(enriched);
   });
 
-  // ---------------- Exercises ----------------
+  // ---------------- Exercises (shared/global) ----------------
   app.get("/api/exercises", async (_req, res) => {
     const list = await storage.getExercises();
     res.json(list.map(parseExercise));
@@ -147,9 +191,11 @@ export async function registerRoutes(
   });
 
   app.get("/api/exercises/:id/sets", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const id = Number(req.params.id);
-    const list = await storage.getSetsForExercise(id);
-    const workoutsList = await storage.getWorkouts();
+    const list = await storage.getSetsForExercise(id, userId);
+    const workoutsList = await storage.getWorkouts(userId);
     const workoutDateMap = new Map(workoutsList.map((w) => [w.id, w.date]));
     const enriched = list
       .map((s) => ({ ...s, workoutDate: workoutDateMap.get(s.workoutId) ?? "" }))
@@ -159,8 +205,10 @@ export async function registerRoutes(
 
   // Personal records for a specific exercise
   app.get("/api/exercises/:id/records", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const id = Number(req.params.id);
-    const history = await buildHistory();
+    const history = await buildHistory(userId);
     const filtered = history
       .map((h) => ({ ...h, exercises: h.exercises.filter((e) => e.exerciseId === id) }))
       .filter((h) => h.exercises.length > 0);
@@ -168,9 +216,18 @@ export async function registerRoutes(
     res.json(records.map((r) => ({ ...r, summary: personalRecordSummary(r) })));
   });
 
-  // ---------------- Workout Templates ----------------
-  app.get("/api/workout-templates", async (_req, res) => {
-    const templates = await storage.getAllWorkoutTemplatesWithExercises();
+  // ---------------- Workout Templates (scoped per user) ----------------
+  app.get("/api/workout-templates", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const templates = await storage.getAllWorkoutTemplatesWithExercises(userId);
+    res.json(templates);
+  });
+
+  // Browse another user's templates, read-only (for cross-user template copying UI)
+  app.get("/api/workout-templates/shared/:userId", async (req, res) => {
+    const targetUserId = Number(req.params.userId);
+    const templates = await storage.getAllWorkoutTemplatesWithExercises(targetUserId);
     res.json(templates);
   });
 
@@ -182,7 +239,9 @@ export async function registerRoutes(
   });
 
   app.post("/api/workout-templates", async (req, res) => {
-    const parsed = insertWorkoutTemplateSchema.safeParse(req.body);
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = insertWorkoutTemplateSchema.safeParse({ ...req.body, userId });
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
@@ -198,6 +257,18 @@ export async function registerRoutes(
     }
     const created = await storage.createWorkoutTemplateExercise(parsed.data);
     res.status(201).json(created);
+  });
+
+  // Deep-copy another user's template into the requesting (or specified target) user's library.
+  app.post("/api/workout-templates/:id/copy", async (req, res) => {
+    const id = Number(req.params.id);
+    const bodyTargetUserId = req.body?.targetUserId != null ? Number(req.body.targetUserId) : undefined;
+    const headerUserId = getUserId(req, res);
+    const targetUserId = bodyTargetUserId ?? headerUserId;
+    if (targetUserId == null) return; // getUserId already responded with 400 if header missing/invalid
+    const copy = await storage.copyWorkoutTemplate(id, targetUserId);
+    if (!copy) return res.status(404).json({ message: "Template not found" });
+    res.status(201).json(copy);
   });
 
   app.delete("/api/workout-templates/:id", async (req, res) => {
@@ -233,9 +304,11 @@ export async function registerRoutes(
     res.json(analyzeWorkoutComposition(rows));
   });
 
-  // ---------------- Workouts ----------------
-  app.get("/api/workouts", async (_req, res) => {
-    const list = await storage.getWorkouts();
+  // ---------------- Workouts (scoped per user) ----------------
+  app.get("/api/workouts", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const list = await storage.getWorkouts(userId);
     res.json(list);
   });
 
@@ -247,7 +320,9 @@ export async function registerRoutes(
   });
 
   app.post("/api/workouts", async (req, res) => {
-    const parsed = insertWorkoutSchema.safeParse(req.body);
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = insertWorkoutSchema.safeParse({ ...req.body, userId });
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
@@ -272,11 +347,19 @@ export async function registerRoutes(
     res.status(204).end();
   });
 
-  // ---------------- Sets ----------------
+  // ---------------- Sets (scope inherited via workoutId -> workouts.userId) ----------------
   app.post("/api/sets", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const parsed = insertSetSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
+    }
+    // Verify the parent workout belongs to the requesting user before allowing insert.
+    const parentWorkout = await storage.getWorkout(parsed.data.workoutId);
+    if (!parentWorkout) return res.status(404).json({ message: "Workout not found" });
+    if (parentWorkout.userId !== userId) {
+      return res.status(403).json({ message: "Workout does not belong to the active user" });
     }
     const created = await storage.createSet(parsed.data);
     res.status(201).json(created);
@@ -299,14 +382,18 @@ export async function registerRoutes(
     res.status(204).end();
   });
 
-  // ---------------- Bodyweight logs ----------------
-  app.get("/api/bodyweight-logs", async (_req, res) => {
-    const list = await storage.getBodyweightLogs();
+  // ---------------- Bodyweight logs (scoped per user) ----------------
+  app.get("/api/bodyweight-logs", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const list = await storage.getBodyweightLogs(userId);
     res.json(list);
   });
 
   app.post("/api/bodyweight-logs", async (req, res) => {
-    const parsed = insertBodyweightLogSchema.safeParse(req.body);
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = insertBodyweightLogSchema.safeParse({ ...req.body, userId });
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
@@ -316,10 +403,12 @@ export async function registerRoutes(
 
   // ---------------- Dashboard: weekly volume per muscle group (19 groups) ----------------
   app.get("/api/dashboard/volume", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const muscleGroupsList = await storage.getMuscleGroups();
-    const workoutsList = await storage.getWorkouts();
+    const workoutsList = await storage.getWorkouts(userId);
     const workoutMap = new Map(workoutsList.map((w) => [w.id, w]));
-    const allSets = await storage.getAllSets();
+    const allSets = await storage.getAllSets(userId);
 
     const now = new Date();
     const weeksBack = req.query.weeksBack ? Number(req.query.weeksBack) : 0;
@@ -358,11 +447,13 @@ export async function registerRoutes(
   });
 
   // ---------------- Volume tracker: current vs last week + trend (19 groups) ----------------
-  app.get("/api/volume-tracker", async (_req, res) => {
+  app.get("/api/volume-tracker", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const muscleGroupsList = await storage.getMuscleGroups();
-    const workoutsList = await storage.getWorkouts();
+    const workoutsList = await storage.getWorkouts(userId);
     const workoutMap = new Map(workoutsList.map((w) => [w.id, w]));
-    const allSets = await storage.getAllSets();
+    const allSets = await storage.getAllSets(userId);
 
     const now = new Date();
 
@@ -412,33 +503,41 @@ export async function registerRoutes(
   });
 
   // ---------------- Muscle Recovery Map ----------------
-  app.get("/api/recovery", async (_req, res) => {
-    const history = await buildHistory();
+  app.get("/api/recovery", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const history = await buildHistory(userId);
     const { lookup } = await buildMuscleGroupLookup();
     const states = evaluateRecovery(history, lookup);
     res.json(states);
   });
 
   // ---------------- Fatigue trend ----------------
-  app.get("/api/coach/fatigue-trend", async (_req, res) => {
-    const history = await buildHistory();
+  app.get("/api/coach/fatigue-trend", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const history = await buildHistory(userId);
     const signal = evaluateFatigueTrend(history);
     res.json(signal);
   });
 
-  // ---------------- Personal records (global recent) ----------------
+  // ---------------- Personal records (recent, for active user) ----------------
   app.get("/api/coach/personal-records", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const take = req.query.take ? Number(req.query.take) : 5;
-    const history = await buildHistory();
+    const history = await buildHistory(userId);
     const records = getPersonalRecords(history, take);
     res.json(records.map((r) => ({ ...r, summary: personalRecordSummary(r) })));
   });
 
   // ---------------- Coach: full suggestion detail per exercise ----------------
   app.get("/api/coach/suggestions", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const exercisesList = await storage.getExercises();
     const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
-    const history = await buildHistory();
+    const history = await buildHistory(userId);
     const { lookup, nameById } = await buildMuscleGroupLookup();
     const recoveryStates = evaluateRecovery(history, lookup);
 
@@ -488,8 +587,10 @@ export async function registerRoutes(
   });
 
   // ---------------- Dashboard snapshot ----------------
-  app.get("/api/dashboard", async (_req, res) => {
-    const templates = await storage.getAllWorkoutTemplatesWithExercises();
+  app.get("/api/dashboard", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const templates = await storage.getAllWorkoutTemplatesWithExercises(userId);
     const exercisesList = await storage.getExercises();
     const exerciseNameLookup = new Map(exercisesList.map((e) => [e.id, e.name]));
     const { lookup, nameById } = await buildMuscleGroupLookup();
@@ -499,7 +600,7 @@ export async function registerRoutes(
       if (name) exercisePrimaryMuscleLookup.set(e.id, name);
     }
 
-    const history = (await buildHistory()).slice(0, 50);
+    const history = (await buildHistory(userId)).slice(0, 50);
 
     const dashboardTemplates: DashboardTemplateInput[] = templates.map((t) => ({
       id: t.id,
