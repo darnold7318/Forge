@@ -1,4 +1,4 @@
-import { LayoutDashboard, Dumbbell, LineChart, Sparkles, BarChart3 } from "lucide-react";
+import { LayoutDashboard, Dumbbell, LineChart, Sparkles, BarChart3, ClipboardList, HeartPulse } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import {
   Sidebar,
@@ -18,9 +18,11 @@ import { ThemeToggle } from "@/components/theme-toggle";
 const items = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
   { title: "Log Workout", url: "/log", icon: Dumbbell },
+  { title: "Templates", url: "/templates", icon: ClipboardList },
   { title: "Progress", url: "/progress", icon: LineChart },
   { title: "Coach", url: "/coach", icon: Sparkles },
   { title: "Volume Tracker", url: "/volume", icon: BarChart3 },
+  { title: "Recovery Map", url: "/recovery", icon: HeartPulse },
 ];
 
 export function AppSidebar() {

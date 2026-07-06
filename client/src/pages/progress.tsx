@@ -11,9 +11,10 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
-import { TrendingUp } from "lucide-react";
+import { TrendingUp, Trophy } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -38,15 +39,26 @@ interface HistorySet {
   workoutId: number;
   weight: number;
   reps: number;
-  rpe: number | null;
+  rir: number | null;
   isWarmup: boolean;
   workoutDate: string;
+}
+
+interface PersonalRecord {
+  exerciseId: number;
+  exerciseName: string;
+  recordType: "Heaviest Set" | "Estimated 1RM" | "Best Set Volume" | "Exercise Volume";
+  value: number;
+  achievedAt: string;
+  summary: string;
 }
 
 function estimate1RM(weight: number, reps: number): number {
   if (weight <= 0 || reps <= 0) return 0;
   return weight * (1 + reps / 30);
 }
+
+const RECORD_TYPE_ICON_CLASS = "h-3.5 w-3.5";
 
 export default function ProgressPage() {
   const params = useParams<{ exerciseId?: string }>();
@@ -63,6 +75,15 @@ export default function ProgressPage() {
     queryKey: ["/api/exercises", activeId, "sets"],
     queryFn: async () => {
       const res = await apiRequest("GET", `/api/exercises/${activeId}/sets`);
+      return res.json();
+    },
+    enabled: !!activeId,
+  });
+
+  const { data: records, isLoading: recordsLoading } = useQuery<PersonalRecord[]>({
+    queryKey: ["/api/exercises", activeId, "records"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/exercises/${activeId}/records`);
       return res.json();
     },
     enabled: !!activeId,
@@ -116,7 +137,7 @@ export default function ProgressPage() {
         <h1 className="text-xl font-display font-bold" data-testid="text-page-title">
           Exercise Progress
         </h1>
-        <p className="text-sm text-muted-foreground">Track top set weight and estimated 1RM over time</p>
+        <p className="text-sm text-muted-foreground">Track top set weight, estimated 1RM, and personal records</p>
       </div>
 
       <Card>
@@ -145,6 +166,36 @@ export default function ProgressPage() {
           <TrendingUp className="h-8 w-8 text-muted-foreground/60" />
           <p>Select an exercise to view its progress chart.</p>
         </div>
+      )}
+
+      {activeId && !recordsLoading && (records?.length ?? 0) > 0 && (
+        <Card data-testid="card-personal-records">
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Trophy className="h-4 w-4 text-primary" />
+              Personal Records
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {records!.map((r, i) => (
+                <div
+                  key={`${r.recordType}-${i}`}
+                  className="rounded-md border p-3 space-y-1"
+                  data-testid={`row-pr-${r.recordType.toLowerCase().replace(/\s+/g, "-")}`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <Badge variant="outline" className={RECORD_TYPE_ICON_CLASS}>
+                      {r.recordType}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">{formatDate(r.achievedAt)}</span>
+                  </div>
+                  <p className="text-sm">{r.summary}</p>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {activeId && historyLoading && <Skeleton className="h-72 w-full" />}
@@ -235,7 +286,7 @@ export default function ProgressPage() {
                                   className="text-xs font-mono tabular-nums bg-muted rounded px-1.5 py-0.5"
                                 >
                                   {s.weight}×{s.reps}
-                                  {s.rpe ? `@${s.rpe}` : ""}
+                                  {s.rir != null ? ` @${s.rir}RIR` : ""}
                                 </span>
                               ))}
                             </div>

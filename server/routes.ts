@@ -1,27 +1,120 @@
 import type { Express } from "express";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
-import { storage } from "./storage";
-import { insertExerciseSchema, insertWorkoutSchema, insertSetSchema, insertBodyweightLogSchema } from "@shared/schema";
-import type { SetWithExercise } from "@shared/schema";
+import { storage, parseExercise } from "./storage";
+import type { SetWithExercise } from "./storage";
 import {
-  estimate1RM,
-  suggestNextSession,
+  insertExerciseSchema,
+  insertWorkoutSchema,
+  insertSetSchema,
+  insertBodyweightLogSchema,
+  insertWorkoutTemplateSchema,
+  insertWorkoutTemplateExerciseSchema,
+  muscleGroupNames,
+  muscleGroupDisplayNames,
+  type MuscleGroupName,
+  type Exercise,
+  type Workout,
+} from "@shared/schema";
+import {
   categorizeVolume,
   computeWeeklyVolumeByMuscleGroup,
-  detectStalledLifts,
-  detectDeload,
-  DEFAULT_REP_RANGE,
-  type WorkingSetInput,
+  evaluateProgression,
+  evaluateRecovery,
+  evaluateFatigueTrend,
+  getPersonalRecords,
+  buildWorkoutSuggestion,
+  getDashboardSnapshot,
+  analyzeWorkoutComposition,
+  getPreviousExercisePerformance,
+  getPrimaryRecovery,
+  personalRecordSummary,
+  type HistorySessionInput,
+  type HistoryExerciseInput,
+  type HistorySetInput,
+  type MuscleGroupLookup,
+  type DashboardTemplateInput,
 } from "@shared/coaching";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function startOfWeekWindow(referenceDate: Date, weeksAgo: number): { start: Date; end: Date } {
-  // Rolling 7-day windows counting back from referenceDate.
   const end = new Date(referenceDate.getTime() - weeksAgo * 7 * DAY_MS);
   const start = new Date(end.getTime() - 7 * DAY_MS);
   return { start, end };
+}
+
+// ---------------------------------------------------------------------------
+// Build coaching-engine input shapes from raw DB rows
+// ---------------------------------------------------------------------------
+async function buildMuscleGroupLookup(): Promise<{
+  lookup: MuscleGroupLookup;
+  idByName: Map<MuscleGroupName, number>;
+  nameById: Map<number, MuscleGroupName>;
+}> {
+  const groups = await storage.getMuscleGroups();
+  const idToName = new Map<number, MuscleGroupName>();
+  const idByName = new Map<MuscleGroupName, number>();
+  for (const g of groups) {
+    idToName.set(g.id, g.name as MuscleGroupName);
+    idByName.set(g.name as MuscleGroupName, g.id);
+  }
+  return { lookup: { idToName }, idByName, nameById: idToName };
+}
+
+function toHistorySet(s: SetWithExercise): HistorySetInput {
+  return {
+    setNumber: s.setNumber,
+    setType: s.isWarmup ? "Warmup" : "Working",
+    weight: s.weight,
+    reps: s.reps,
+    rir: s.rir ?? null,
+    completed: true, // all logged sets are considered completed (no partial-set concept in this app)
+  };
+}
+
+/** Build full workout history (most-recent-first) as HistorySessionInput[]. */
+async function buildHistory(): Promise<HistorySessionInput[]> {
+  const workoutsList = await storage.getWorkouts(); // already ordered desc by date, id
+  const allSets = await storage.getAllSets();
+
+  const setsByWorkout = new Map<number, SetWithExercise[]>();
+  for (const s of allSets) {
+    if (!setsByWorkout.has(s.workoutId)) setsByWorkout.set(s.workoutId, []);
+    setsByWorkout.get(s.workoutId)!.push(s);
+  }
+
+  return workoutsList.map((w) => {
+    const workoutSets = setsByWorkout.get(w.id) ?? [];
+    const byExercise = new Map<number, SetWithExercise[]>();
+    for (const s of workoutSets) {
+      if (!byExercise.has(s.exerciseId)) byExercise.set(s.exerciseId, []);
+      byExercise.get(s.exerciseId)!.push(s);
+    }
+
+    const exercisesForSession: HistoryExerciseInput[] = Array.from(byExercise.entries()).map(
+      ([exerciseId, exSets], idx) => {
+        const exercise = exSets[0].exercise;
+        return {
+          exerciseId,
+          exerciseOrder: idx,
+          exerciseName: exercise.name,
+          primaryMuscleGroupId: exercise.primaryMuscleGroupId,
+          intensityTechnique: "Normal",
+          failureTarget: "Never",
+          sets: exSets.sort((a, b) => a.setNumber - b.setNumber).map(toHistorySet),
+        };
+      },
+    );
+
+    return {
+      id: w.id,
+      workoutTemplateId: w.workoutTemplateId ?? null,
+      workoutName: w.name ?? "Workout",
+      startedAt: new Date(w.date),
+      exercises: exercisesForSession,
+    };
+  });
 }
 
 export async function registerRoutes(
@@ -31,13 +124,17 @@ export async function registerRoutes(
   // ---------------- Muscle Groups ----------------
   app.get("/api/muscle-groups", async (_req, res) => {
     const groups = await storage.getMuscleGroups();
-    res.json(groups);
+    const enriched = groups.map((g) => ({
+      ...g,
+      displayName: muscleGroupDisplayNames[g.name as MuscleGroupName] ?? g.name,
+    }));
+    res.json(enriched);
   });
 
   // ---------------- Exercises ----------------
   app.get("/api/exercises", async (_req, res) => {
     const list = await storage.getExercises();
-    res.json(list);
+    res.json(list.map(parseExercise));
   });
 
   app.post("/api/exercises", async (req, res) => {
@@ -46,19 +143,94 @@ export async function registerRoutes(
       return res.status(400).json({ message: parsed.error.message });
     }
     const created = await storage.createExercise(parsed.data);
-    res.status(201).json(created);
+    res.status(201).json(parseExercise(created));
   });
 
   app.get("/api/exercises/:id/sets", async (req, res) => {
     const id = Number(req.params.id);
     const list = await storage.getSetsForExercise(id);
-    // chronological order oldest -> newest via workout date lookups
-    const workouts = await storage.getWorkouts();
-    const workoutDateMap = new Map(workouts.map((w) => [w.id, w.date]));
+    const workoutsList = await storage.getWorkouts();
+    const workoutDateMap = new Map(workoutsList.map((w) => [w.id, w.date]));
     const enriched = list
       .map((s) => ({ ...s, workoutDate: workoutDateMap.get(s.workoutId) ?? "" }))
       .sort((a, b) => a.workoutDate.localeCompare(b.workoutDate) || a.id - b.id);
     res.json(enriched);
+  });
+
+  // Personal records for a specific exercise
+  app.get("/api/exercises/:id/records", async (req, res) => {
+    const id = Number(req.params.id);
+    const history = await buildHistory();
+    const filtered = history
+      .map((h) => ({ ...h, exercises: h.exercises.filter((e) => e.exerciseId === id) }))
+      .filter((h) => h.exercises.length > 0);
+    const records = getPersonalRecords(filtered, 50);
+    res.json(records.map((r) => ({ ...r, summary: personalRecordSummary(r) })));
+  });
+
+  // ---------------- Workout Templates ----------------
+  app.get("/api/workout-templates", async (_req, res) => {
+    const templates = await storage.getAllWorkoutTemplatesWithExercises();
+    res.json(templates);
+  });
+
+  app.get("/api/workout-templates/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    const template = await storage.getWorkoutTemplateWithExercises(id);
+    if (!template) return res.status(404).json({ message: "Template not found" });
+    res.json(template);
+  });
+
+  app.post("/api/workout-templates", async (req, res) => {
+    const parsed = insertWorkoutTemplateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.message });
+    }
+    const created = await storage.createWorkoutTemplate(parsed.data);
+    res.status(201).json(created);
+  });
+
+  app.post("/api/workout-templates/:id/exercises", async (req, res) => {
+    const workoutTemplateId = Number(req.params.id);
+    const parsed = insertWorkoutTemplateExerciseSchema.safeParse({ ...req.body, workoutTemplateId });
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.message });
+    }
+    const created = await storage.createWorkoutTemplateExercise(parsed.data);
+    res.status(201).json(created);
+  });
+
+  app.delete("/api/workout-templates/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    await storage.deleteWorkoutTemplate(id);
+    res.status(204).end();
+  });
+
+  // Workout composition analysis for a template (or ad-hoc exercise list)
+  app.get("/api/workout-templates/:id/analysis", async (req, res) => {
+    const id = Number(req.params.id);
+    const template = await storage.getWorkoutTemplateWithExercises(id);
+    if (!template) return res.status(404).json({ message: "Template not found" });
+    const exercisesList = await storage.getExercises();
+    const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
+    const { nameById } = await buildMuscleGroupLookup();
+
+    const rows = template.exercises.map((te) => {
+      const exercise = exerciseMap.get(te.exerciseId);
+      const primaryMuscleName = exercise
+        ? muscleGroupDisplayNames[nameById.get(exercise.primaryMuscleGroupId) as MuscleGroupName] ?? ""
+        : "";
+      return {
+        targetSets: te.targetSets,
+        restSeconds: te.restSeconds,
+        isCompound: exercise?.isCompound ?? false,
+        exerciseRole: te.exerciseRole,
+        failureTarget: te.failureTarget,
+        primaryMuscleName,
+      };
+    });
+
+    res.json(analyzeWorkoutComposition(rows));
   });
 
   // ---------------- Workouts ----------------
@@ -142,11 +314,9 @@ export async function registerRoutes(
     res.status(201).json(created);
   });
 
-  // ---------------- Dashboard: weekly volume per muscle group ----------------
+  // ---------------- Dashboard: weekly volume per muscle group (19 groups) ----------------
   app.get("/api/dashboard/volume", async (req, res) => {
-    const muscleGroups = await storage.getMuscleGroups();
-    const exercisesList = await storage.getExercises();
-    const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
+    const muscleGroupsList = await storage.getMuscleGroups();
     const workoutsList = await storage.getWorkouts();
     const workoutMap = new Map(workoutsList.map((w) => [w.id, w]));
     const allSets = await storage.getAllSets();
@@ -164,31 +334,32 @@ export async function registerRoutes(
 
     const tagged = inWindow.map((s) => ({
       primaryMuscleGroupId: s.exercise.primaryMuscleGroupId,
-      secondaryMuscleGroupId: s.exercise.secondaryMuscleGroupId,
+      secondaryMuscleGroupIds: JSON.parse(s.exercise.secondaryMuscles ?? "[]") as number[],
       isWarmup: s.isWarmup,
     }));
 
     const volumeMap = computeWeeklyVolumeByMuscleGroup(tagged);
 
-    const result = muscleGroups.map((mg) => {
-      const sets = volumeMap.get(mg.id) ?? 0;
+    const result = muscleGroupsList.map((mg) => {
+      const setCount = volumeMap.get(mg.id) ?? 0;
       return {
         muscleGroupId: mg.id,
         muscleGroupName: mg.name,
-        sets,
+        displayName: muscleGroupDisplayNames[mg.name as MuscleGroupName] ?? mg.name,
+        sets: setCount,
         mev: mg.mev,
         mav: mg.mav,
         mrv: mg.mrv,
-        status: categorizeVolume(sets, mg),
+        status: categorizeVolume(setCount, mg),
       };
     });
 
     res.json(result);
   });
 
-  // ---------------- Volume tracker: current vs last week + trend ----------------
+  // ---------------- Volume tracker: current vs last week + trend (19 groups) ----------------
   app.get("/api/volume-tracker", async (_req, res) => {
-    const muscleGroups = await storage.getMuscleGroups();
+    const muscleGroupsList = await storage.getMuscleGroups();
     const workoutsList = await storage.getWorkouts();
     const workoutMap = new Map(workoutsList.map((w) => [w.id, w]));
     const allSets = await storage.getAllSets();
@@ -205,7 +376,7 @@ export async function registerRoutes(
       });
       const tagged = inWindow.map((s) => ({
         primaryMuscleGroupId: s.exercise.primaryMuscleGroupId,
-        secondaryMuscleGroupId: s.exercise.secondaryMuscleGroupId,
+        secondaryMuscleGroupIds: JSON.parse(s.exercise.secondaryMuscles ?? "[]") as number[],
         isWarmup: s.isWarmup,
       }));
       return computeWeeklyVolumeByMuscleGroup(tagged);
@@ -213,19 +384,19 @@ export async function registerRoutes(
 
     const thisWeek = volumeForWeeksBack(0);
     const lastWeek = volumeForWeeksBack(1);
-    // 6-week trend, oldest -> newest
     const trendWeeks: Map<number, number>[] = [];
     for (let i = 5; i >= 0; i--) {
       trendWeeks.push(volumeForWeeksBack(i));
     }
 
-    const result = muscleGroups.map((mg) => {
+    const result = muscleGroupsList.map((mg) => {
       const current = thisWeek.get(mg.id) ?? 0;
       const previous = lastWeek.get(mg.id) ?? 0;
       const trend = trendWeeks.map((w) => w.get(mg.id) ?? 0);
       return {
         muscleGroupId: mg.id,
         muscleGroupName: mg.name,
+        displayName: muscleGroupDisplayNames[mg.name as MuscleGroupName] ?? mg.name,
         currentWeekSets: current,
         lastWeekSets: previous,
         delta: current - previous,
@@ -240,141 +411,122 @@ export async function registerRoutes(
     res.json(result);
   });
 
-  // ---------------- Coach suggestions ----------------
-  app.get("/api/coach/suggestions", async (_req, res) => {
+  // ---------------- Muscle Recovery Map ----------------
+  app.get("/api/recovery", async (_req, res) => {
+    const history = await buildHistory();
+    const { lookup } = await buildMuscleGroupLookup();
+    const states = evaluateRecovery(history, lookup);
+    res.json(states);
+  });
+
+  // ---------------- Fatigue trend ----------------
+  app.get("/api/coach/fatigue-trend", async (_req, res) => {
+    const history = await buildHistory();
+    const signal = evaluateFatigueTrend(history);
+    res.json(signal);
+  });
+
+  // ---------------- Personal records (global recent) ----------------
+  app.get("/api/coach/personal-records", async (req, res) => {
+    const take = req.query.take ? Number(req.query.take) : 5;
+    const history = await buildHistory();
+    const records = getPersonalRecords(history, take);
+    res.json(records.map((r) => ({ ...r, summary: personalRecordSummary(r) })));
+  });
+
+  // ---------------- Coach: full suggestion detail per exercise ----------------
+  app.get("/api/coach/suggestions", async (req, res) => {
     const exercisesList = await storage.getExercises();
-    const workoutsList = await storage.getWorkouts();
-    const workoutMap = new Map(workoutsList.map((w) => [w.id, w]));
-    const allSets = await storage.getAllSets();
+    const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
+    const history = await buildHistory();
+    const { lookup, nameById } = await buildMuscleGroupLookup();
+    const recoveryStates = evaluateRecovery(history, lookup);
+
+    // Optional filter by template
+    const templateId = req.query.templateId ? Number(req.query.templateId) : undefined;
+    let targetExercises = exercisesList;
+    let prescriptionByExercise = new Map<number, { targetRepsMin: number; targetRepsMax: number; targetRir: number }>();
+
+    if (templateId) {
+      const template = await storage.getWorkoutTemplateWithExercises(templateId);
+      if (template) {
+        targetExercises = template.exercises
+          .map((te) => exerciseMap.get(te.exerciseId))
+          .filter((e): e is Exercise => !!e);
+        for (const te of template.exercises) {
+          prescriptionByExercise.set(te.exerciseId, {
+            targetRepsMin: te.targetRepsMin,
+            targetRepsMax: te.targetRepsMax,
+            targetRir: te.targetRir,
+          });
+        }
+      }
+    }
 
     const suggestions = [];
+    for (const exercise of targetExercises) {
+      const prescription = prescriptionByExercise.get(exercise.id) ?? {
+        targetRepsMin: 8,
+        targetRepsMax: 12,
+        targetRir: 2,
+      };
+      const previous = getPreviousExercisePerformance(history, exercise.id, exercise.name);
+      if (previous.lastSets.length === 0 && !templateId) continue; // skip untrained exercises in the "all" view
 
-    for (const exercise of exercisesList) {
-      const exerciseSets = allSets.filter((s) => s.exerciseId === exercise.id);
-      if (exerciseSets.length === 0) continue;
-
-      // group by workoutId, find most recent workout (by date) that has sets for this exercise
-      const workoutIds = Array.from(new Set(exerciseSets.map((s) => s.workoutId)));
-      const sortedWorkoutIds = workoutIds
-        .map((id) => ({ id, date: workoutMap.get(id)?.date ?? "" }))
-        .sort((a, b) => b.date.localeCompare(a.date));
-
-      if (sortedWorkoutIds.length === 0) continue;
-      const mostRecentWorkoutId = sortedWorkoutIds[0].id;
-      const mostRecentSets = exerciseSets.filter((s) => s.workoutId === mostRecentWorkoutId);
-
-      const workingSets: WorkingSetInput[] = mostRecentSets.map((s) => ({
-        weight: s.weight,
-        reps: s.reps,
-        rpe: s.rpe,
-        isWarmup: s.isWarmup,
-      }));
-
-      const suggestion = suggestNextSession(workingSets, DEFAULT_REP_RANGE);
-      if (!suggestion) continue;
+      const evaluation = evaluateProgression(prescription, previous);
+      const primaryMuscle = nameById.get(exercise.primaryMuscleGroupId);
+      const recovery = primaryMuscle ? getPrimaryRecovery(recoveryStates, primaryMuscle) : recoveryStates[0];
+      const suggestion = buildWorkoutSuggestion(prescription, previous, evaluation, recovery);
 
       suggestions.push({
         exerciseId: exercise.id,
-        exerciseName: exercise.name,
-        lastSessionDate: sortedWorkoutIds[0].date,
         ...suggestion,
       });
     }
 
-    // sort by most recently trained
-    suggestions.sort((a, b) => b.lastSessionDate.localeCompare(a.lastSessionDate));
-
     res.json(suggestions);
   });
 
-  // ---------------- Deload detection ----------------
-  app.get("/api/coach/deload", async (_req, res) => {
+  // ---------------- Dashboard snapshot ----------------
+  app.get("/api/dashboard", async (_req, res) => {
+    const templates = await storage.getAllWorkoutTemplatesWithExercises();
     const exercisesList = await storage.getExercises();
-    const muscleGroupsList = await storage.getMuscleGroups();
-    const workoutsList = await storage.getWorkouts();
-    const workoutMap = new Map(workoutsList.map((w) => [w.id, w]));
-    const allSets = await storage.getAllSets();
-
-    // Build per-exercise chronological e1RM session history (top set per session)
-    const sessionsByExercise = new Map<number, { name: string; e1RMs: number[] }>();
-
-    for (const exercise of exercisesList) {
-      const exerciseSets = allSets.filter((s) => s.exerciseId === exercise.id && !s.isWarmup);
-      if (exerciseSets.length === 0) continue;
-
-      const byWorkout = new Map<number, SetWithExercise[]>();
-      for (const s of exerciseSets) {
-        if (!byWorkout.has(s.workoutId)) byWorkout.set(s.workoutId, []);
-        byWorkout.get(s.workoutId)!.push(s);
-      }
-
-      const sessionEntries = Array.from(byWorkout.entries())
-        .map(([workoutId, setsInWorkout]) => {
-          const date = workoutMap.get(workoutId)?.date ?? "";
-          const topE1RM = Math.max(...setsInWorkout.map((s) => estimate1RM(s.weight, s.reps)));
-          return { date, topE1RM };
-        })
-        .sort((a, b) => a.date.localeCompare(b.date));
-
-      if (sessionEntries.length >= 4) {
-        sessionsByExercise.set(exercise.id, {
-          name: exercise.name,
-          e1RMs: sessionEntries.map((s) => s.topE1RM),
-        });
-      }
+    const exerciseNameLookup = new Map(exercisesList.map((e) => [e.id, e.name]));
+    const { lookup, nameById } = await buildMuscleGroupLookup();
+    const exercisePrimaryMuscleLookup = new Map<number, MuscleGroupName>();
+    for (const e of exercisesList) {
+      const name = nameById.get(e.primaryMuscleGroupId);
+      if (name) exercisePrimaryMuscleLookup.set(e.id, name);
     }
 
-    const stalledLifts = detectStalledLifts(sessionsByExercise);
+    const history = (await buildHistory()).slice(0, 50);
 
-    // Per muscle group: avg RPE last 2 weeks + weekly volume history (6 weeks)
-    const now = new Date();
-    const muscleGroupInputs = muscleGroupsList.map((mg) => {
-      // RPE: sets on exercises where this mg is primary, within last 14 days, non-warmup, rpe not null
-      const twoWeeksAgo = new Date(now.getTime() - 14 * DAY_MS);
-      const relevantExerciseIds = new Set(
-        exercisesList.filter((e) => e.primaryMuscleGroupId === mg.id).map((e) => e.id),
-      );
-      const rpeSets = allSets.filter((s) => {
-        if (s.isWarmup || s.rpe == null) return false;
-        if (!relevantExerciseIds.has(s.exerciseId)) return false;
-        const w = workoutMap.get(s.workoutId);
-        if (!w) return false;
-        const d = new Date(w.date);
-        return d >= twoWeeksAgo && d <= now;
-      });
-      const avgRpe =
-        rpeSets.length > 0 ? rpeSets.reduce((sum, s) => sum + (s.rpe ?? 0), 0) / rpeSets.length : null;
+    const dashboardTemplates: DashboardTemplateInput[] = templates.map((t) => ({
+      id: t.id,
+      name: t.name,
+      exercises: t.exercises.map((te) => ({
+        exerciseId: te.exerciseId,
+        exerciseOrder: te.exerciseOrder,
+        targetSets: te.targetSets,
+        targetRepsMin: te.targetRepsMin,
+        targetRepsMax: te.targetRepsMax,
+        targetRir: te.targetRir,
+        warmupSets: te.warmupSets,
+        topSets: te.topSets,
+        backoffSets: te.backoffSets,
+        restSeconds: te.restSeconds,
+      })),
+    }));
 
-      // Volume: 6-week trend
-      const weeklyVolumes: number[] = [];
-      for (let i = 5; i >= 0; i--) {
-        const { start, end } = startOfWeekWindow(now, i);
-        const inWindow = allSets.filter((s) => {
-          const w = workoutMap.get(s.workoutId);
-          if (!w) return false;
-          const d = new Date(w.date);
-          return d >= start && d < end;
-        });
-        const tagged = inWindow.map((s) => ({
-          primaryMuscleGroupId: s.exercise.primaryMuscleGroupId,
-          secondaryMuscleGroupId: s.exercise.secondaryMuscleGroupId,
-          isWarmup: s.isWarmup,
-        }));
-        const vol = computeWeeklyVolumeByMuscleGroup(tagged).get(mg.id) ?? 0;
-        weeklyVolumes.push(vol);
-      }
-
-      return {
-        muscleGroupId: mg.id,
-        muscleGroupName: mg.name,
-        avgRpeLastTwoWeeks: avgRpe,
-        weeklyVolumes,
-        mrv: mg.mrv,
-      };
+    const snapshot = getDashboardSnapshot({
+      templates: dashboardTemplates,
+      history,
+      exerciseNameLookup,
+      exercisePrimaryMuscleLookup,
+      muscleGroupLookup: lookup,
     });
 
-    const result = detectDeload(stalledLifts, muscleGroupInputs);
-    res.json(result);
+    res.json(snapshot);
   });
 
   return httpServer;

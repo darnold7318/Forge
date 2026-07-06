@@ -4,25 +4,30 @@ import {
   workouts,
   sets,
   bodyweightLogs,
+  workoutTemplates,
+  workoutTemplateExercises,
 } from "@shared/schema";
 import type {
   MuscleGroup,
   InsertMuscleGroup,
   Exercise,
   InsertExercise,
+  ExerciseWithParsedMuscles,
   Workout,
   InsertWorkout,
   Set,
   InsertSet,
   BodyweightLog,
   InsertBodyweightLog,
-  SetWithExercise,
-  WorkoutWithSets,
+  WorkoutTemplate,
+  InsertWorkoutTemplate,
+  WorkoutTemplateExercise,
+  InsertWorkoutTemplateExercise,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq, desc } from "drizzle-orm";
-import { MUSCLE_GROUPS, EXERCISES } from "./seed-data";
+import { MUSCLE_GROUPS, EXERCISES, WORKOUT_TEMPLATES } from "./seed-data";
 
 const sqlite = new Database("data.db");
 sqlite.pragma("journal_mode = WAL");
@@ -30,10 +35,7 @@ sqlite.pragma("journal_mode = WAL");
 export const db = drizzle(sqlite);
 
 // ---------------------------------------------------------------------------
-// Schema bootstrap (no auth/users table needed; template's users table
-// is unused. We create our own tables directly via drizzle push semantics
-// at runtime using raw SQL for simplicity, since this project has no
-// migration pipeline wired up separately.)
+// Schema bootstrap — raw SQL DDL (no migration pipeline wired up).
 // ---------------------------------------------------------------------------
 function ensureTables() {
   sqlite.exec(`
@@ -49,15 +51,46 @@ function ensureTables() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       primary_muscle_group_id INTEGER NOT NULL REFERENCES muscle_groups(id),
-      secondary_muscle_group_id INTEGER REFERENCES muscle_groups(id),
-      equipment TEXT NOT NULL
+      secondary_muscles TEXT NOT NULL DEFAULT '[]',
+      equipment TEXT NOT NULL,
+      movement_pattern TEXT,
+      is_compound INTEGER NOT NULL DEFAULT 0,
+      is_unilateral INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS workout_templates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      notes TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS workout_template_exercises (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workout_template_id INTEGER NOT NULL REFERENCES workout_templates(id),
+      exercise_id INTEGER NOT NULL REFERENCES exercises(id),
+      exercise_order INTEGER NOT NULL,
+      exercise_role TEXT NOT NULL DEFAULT 'Isolation',
+      warmup_sets INTEGER NOT NULL DEFAULT 0,
+      top_sets INTEGER NOT NULL DEFAULT 0,
+      backoff_sets INTEGER NOT NULL DEFAULT 0,
+      backoff_reduction_percent REAL NOT NULL DEFAULT 0,
+      target_sets INTEGER NOT NULL DEFAULT 3,
+      target_reps_min INTEGER NOT NULL DEFAULT 8,
+      target_reps_max INTEGER NOT NULL DEFAULT 12,
+      tempo TEXT,
+      target_rir INTEGER NOT NULL DEFAULT 2,
+      failure_target TEXT NOT NULL DEFAULT 'Never',
+      intensity_technique TEXT,
+      rest_seconds INTEGER NOT NULL DEFAULT 90,
+      notes TEXT
     );
 
     CREATE TABLE IF NOT EXISTS workouts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       date TEXT NOT NULL,
       name TEXT,
-      notes TEXT
+      notes TEXT,
+      workout_template_id INTEGER REFERENCES workout_templates(id)
     );
 
     CREATE TABLE IF NOT EXISTS sets (
@@ -67,7 +100,7 @@ function ensureTables() {
       set_number INTEGER NOT NULL,
       weight REAL NOT NULL,
       reps INTEGER NOT NULL,
-      rpe REAL,
+      rir REAL,
       is_warmup INTEGER NOT NULL DEFAULT 0
     );
 
@@ -91,24 +124,90 @@ function seedIfEmpty() {
     nameToId.set(row.name, row.id);
   }
 
+  const exerciseNameToId = new Map<string, number>();
   for (const ex of EXERCISES) {
     const primaryId = nameToId.get(ex.primaryMuscleGroup);
-    const secondaryId = ex.secondaryMuscleGroup
-      ? nameToId.get(ex.secondaryMuscleGroup)
-      : null;
     if (!primaryId) continue;
-    db.insert(exercises)
+    const secondaryIds = ex.secondaryMuscleGroups
+      .map((name) => nameToId.get(name))
+      .filter((id): id is number => id != null);
+    const row = db
+      .insert(exercises)
       .values({
         name: ex.name,
         primaryMuscleGroupId: primaryId,
-        secondaryMuscleGroupId: secondaryId ?? null,
+        secondaryMuscles: JSON.stringify(secondaryIds),
         equipment: ex.equipment,
+        movementPattern: ex.movementPattern,
+        isCompound: ex.isCompound,
+        isUnilateral: ex.isUnilateral,
       })
-      .run();
+      .returning()
+      .get();
+    exerciseNameToId.set(ex.name, row.id);
+  }
+
+  for (const template of WORKOUT_TEMPLATES) {
+    const templateRow = db
+      .insert(workoutTemplates)
+      .values({ name: template.name, notes: template.notes })
+      .returning()
+      .get();
+
+    for (const te of template.exercises) {
+      const exerciseId = exerciseNameToId.get(te.exerciseName);
+      if (!exerciseId) continue;
+      db.insert(workoutTemplateExercises)
+        .values({
+          workoutTemplateId: templateRow.id,
+          exerciseId,
+          exerciseOrder: te.exerciseOrder,
+          exerciseRole: te.exerciseRole,
+          warmupSets: te.warmupSets,
+          topSets: te.topSets,
+          backoffSets: te.backoffSets,
+          backoffReductionPercent: te.backoffReductionPercent,
+          targetSets: te.targetSets,
+          targetRepsMin: te.targetRepsMin,
+          targetRepsMax: te.targetRepsMax,
+          tempo: te.tempo ?? null,
+          targetRir: te.targetRir,
+          failureTarget: te.failureTarget,
+          intensityTechnique: te.intensityTechnique ?? null,
+          restSeconds: te.restSeconds,
+          notes: te.notes ?? null,
+        })
+        .run();
+    }
   }
 }
 
 seedIfEmpty();
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+export function parseExercise(ex: Exercise): ExerciseWithParsedMuscles {
+  let secondary: number[] = [];
+  try {
+    secondary = JSON.parse(ex.secondaryMuscles ?? "[]");
+  } catch {
+    secondary = [];
+  }
+  return { ...ex, secondaryMuscles: secondary };
+}
+
+export interface SetWithExercise extends Set {
+  exercise: Exercise;
+}
+
+export interface WorkoutWithSets extends Workout {
+  sets: SetWithExercise[];
+}
+
+export interface WorkoutTemplateWithExercises extends WorkoutTemplate {
+  exercises: WorkoutTemplateExercise[];
+}
 
 // ---------------------------------------------------------------------------
 // Storage interface
@@ -122,6 +221,15 @@ export interface IStorage {
   getExercises(): Promise<Exercise[]>;
   getExercise(id: number): Promise<Exercise | undefined>;
   createExercise(exercise: InsertExercise): Promise<Exercise>;
+
+  // Workout templates
+  getWorkoutTemplates(): Promise<WorkoutTemplate[]>;
+  getWorkoutTemplate(id: number): Promise<WorkoutTemplate | undefined>;
+  getWorkoutTemplateWithExercises(id: number): Promise<WorkoutTemplateWithExercises | undefined>;
+  getAllWorkoutTemplatesWithExercises(): Promise<WorkoutTemplateWithExercises[]>;
+  createWorkoutTemplate(template: InsertWorkoutTemplate): Promise<WorkoutTemplate>;
+  createWorkoutTemplateExercise(te: InsertWorkoutTemplateExercise): Promise<WorkoutTemplateExercise>;
+  deleteWorkoutTemplate(id: number): Promise<void>;
 
   // Workouts
   getWorkouts(): Promise<Workout[]>;
@@ -163,6 +271,49 @@ export class DatabaseStorage implements IStorage {
 
   async createExercise(exercise: InsertExercise): Promise<Exercise> {
     return db.insert(exercises).values(exercise).returning().get();
+  }
+
+  async getWorkoutTemplates(): Promise<WorkoutTemplate[]> {
+    return db.select().from(workoutTemplates).all();
+  }
+
+  async getWorkoutTemplate(id: number): Promise<WorkoutTemplate | undefined> {
+    return db.select().from(workoutTemplates).where(eq(workoutTemplates.id, id)).get();
+  }
+
+  async getWorkoutTemplateWithExercises(id: number): Promise<WorkoutTemplateWithExercises | undefined> {
+    const template = await this.getWorkoutTemplate(id);
+    if (!template) return undefined;
+    const exerciseRows = db
+      .select()
+      .from(workoutTemplateExercises)
+      .where(eq(workoutTemplateExercises.workoutTemplateId, id))
+      .all();
+    exerciseRows.sort((a, b) => a.exerciseOrder - b.exerciseOrder);
+    return { ...template, exercises: exerciseRows };
+  }
+
+  async getAllWorkoutTemplatesWithExercises(): Promise<WorkoutTemplateWithExercises[]> {
+    const templates = await this.getWorkoutTemplates();
+    const result: WorkoutTemplateWithExercises[] = [];
+    for (const t of templates) {
+      const withExercises = await this.getWorkoutTemplateWithExercises(t.id);
+      if (withExercises) result.push(withExercises);
+    }
+    return result;
+  }
+
+  async createWorkoutTemplate(template: InsertWorkoutTemplate): Promise<WorkoutTemplate> {
+    return db.insert(workoutTemplates).values(template).returning().get();
+  }
+
+  async createWorkoutTemplateExercise(te: InsertWorkoutTemplateExercise): Promise<WorkoutTemplateExercise> {
+    return db.insert(workoutTemplateExercises).values(te).returning().get();
+  }
+
+  async deleteWorkoutTemplate(id: number): Promise<void> {
+    db.delete(workoutTemplateExercises).where(eq(workoutTemplateExercises.workoutTemplateId, id)).run();
+    db.delete(workoutTemplates).where(eq(workoutTemplates.id, id)).run();
   }
 
   async getWorkouts(): Promise<Workout[]> {

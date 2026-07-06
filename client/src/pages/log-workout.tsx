@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronsUpDown, Plus, Trash2, X } from "lucide-react";
+import { Check, ChevronsUpDown, Plus, Trash2, X, ClipboardList } from "lucide-react";
 import { apiRequest, queryClient as qc } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useLocation } from "wouter";
 import {
   Popover,
   PopoverContent,
@@ -46,11 +47,33 @@ import type {
 } from "@shared/schema";
 import { equipmentTypes } from "@shared/schema";
 
+interface WorkoutTemplateExerciseLite {
+  id: number;
+  exerciseId: number;
+  exerciseOrder: number;
+  targetSets: number;
+  targetRepsMin: number;
+  targetRepsMax: number;
+  targetRir: number;
+  warmupSets: number;
+  topSets: number;
+  backoffSets: number;
+  restSeconds: number;
+  failureTarget: string;
+}
+
+interface WorkoutTemplateLite {
+  id: number;
+  name: string;
+  notes: string | null;
+  exercises: WorkoutTemplateExerciseLite[];
+}
+
 interface DraftSet {
   key: string;
   weight: string;
   reps: string;
-  rpe: string;
+  rir: string;
   isWarmup: boolean;
 }
 
@@ -58,6 +81,7 @@ interface DraftExercise {
   key: string;
   exercise: Exercise;
   sets: DraftSet[];
+  prescription?: WorkoutTemplateExerciseLite;
 }
 
 function newSet(): DraftSet {
@@ -65,7 +89,7 @@ function newSet(): DraftSet {
     key: Math.random().toString(36).slice(2),
     weight: "",
     reps: "",
-    rpe: "",
+    rir: "",
     isWarmup: false,
   };
 }
@@ -75,7 +99,7 @@ interface HistorySet {
   workoutId: number;
   weight: number;
   reps: number;
-  rpe: number | null;
+  rir: number | null;
   isWarmup: boolean;
   workoutDate: string;
 }
@@ -120,7 +144,7 @@ function ExerciseHistory({ exerciseId }: { exerciseId: number }) {
               .map((s) => (
                 <span key={s.id} className="tabular-nums font-mono bg-muted rounded px-1.5 py-0.5">
                   {s.weight}×{s.reps}
-                  {s.rpe ? `@${s.rpe}` : ""}
+                  {s.rir != null ? ` @${s.rir}RIR` : ""}
                 </span>
               ))}
           </div>
@@ -224,16 +248,27 @@ function CreateExerciseDialog({
     if (open) setName(initialName);
   }, [open, initialName]);
   const [primaryId, setPrimaryId] = useState<string>("");
-  const [secondaryId, setSecondaryId] = useState<string>("");
-  const [equipment, setEquipment] = useState<Equipment>("barbell");
+  const [secondaryIds, setSecondaryIds] = useState<number[]>([]);
+  const [equipment, setEquipment] = useState<Equipment>("Barbell");
+  const [isCompound, setIsCompound] = useState(false);
+  const [isUnilateral, setIsUnilateral] = useState(false);
+
+  const toggleSecondary = (id: number) => {
+    setSecondaryIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  };
 
   const createMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/exercises", {
         name,
         primaryMuscleGroupId: Number(primaryId),
-        secondaryMuscleGroupId: secondaryId ? Number(secondaryId) : null,
+        secondaryMuscles: secondaryIds,
         equipment,
+        movementPattern: null,
+        isCompound,
+        isUnilateral,
       });
       return res.json();
     },
@@ -243,8 +278,10 @@ function CreateExerciseDialog({
       onCreated(ex);
       setName("");
       setPrimaryId("");
-      setSecondaryId("");
-      setEquipment("barbell");
+      setSecondaryIds([]);
+      setEquipment("Barbell");
+      setIsCompound(false);
+      setIsUnilateral(false);
       onOpenChange(false);
     },
     onError: () => {
@@ -254,7 +291,7 @@ function CreateExerciseDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent data-testid="dialog-create-exercise">
+      <DialogContent data-testid="dialog-create-exercise" className="max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Create new exercise</DialogTitle>
         </DialogHeader>
@@ -285,19 +322,22 @@ function CreateExerciseDialog({
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label>Secondary muscle group (optional)</Label>
-            <Select value={secondaryId} onValueChange={setSecondaryId}>
-              <SelectTrigger data-testid="select-secondary-muscle">
-                <SelectValue placeholder="None" />
-              </SelectTrigger>
-              <SelectContent>
-                {muscleGroups.map((mg) => (
-                  <SelectItem key={mg.id} value={String(mg.id)}>
+            <Label>Secondary muscles (optional)</Label>
+            <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto p-2 border rounded-md">
+              {muscleGroups
+                .filter((mg) => String(mg.id) !== primaryId)
+                .map((mg) => (
+                  <Badge
+                    key={mg.id}
+                    variant={secondaryIds.includes(mg.id) ? "default" : "outline"}
+                    className="cursor-pointer select-none"
+                    onClick={() => toggleSecondary(mg.id)}
+                    data-testid={`badge-secondary-muscle-${mg.id}`}
+                  >
                     {mg.name}
-                  </SelectItem>
+                  </Badge>
                 ))}
-              </SelectContent>
-            </Select>
+            </div>
           </div>
           <div className="space-y-1.5">
             <Label>Equipment</Label>
@@ -308,11 +348,31 @@ function CreateExerciseDialog({
               <SelectContent>
                 {equipmentTypes.map((eq) => (
                   <SelectItem key={eq} value={eq}>
-                    {eq[0].toUpperCase() + eq.slice(1)}
+                    {eq}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
+          </div>
+          <div className="flex items-center gap-6">
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="is-compound"
+                checked={isCompound}
+                onCheckedChange={(v) => setIsCompound(Boolean(v))}
+                data-testid="checkbox-is-compound"
+              />
+              <Label htmlFor="is-compound" className="cursor-pointer">Compound</Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="is-unilateral"
+                checked={isUnilateral}
+                onCheckedChange={(v) => setIsUnilateral(Boolean(v))}
+                data-testid="checkbox-is-unilateral"
+              />
+              <Label htmlFor="is-unilateral" className="cursor-pointer">Unilateral</Label>
+            </div>
           </div>
         </div>
         <DialogFooter>
@@ -329,14 +389,62 @@ function CreateExerciseDialog({
   );
 }
 
+function TemplateStartPicker({
+  templates,
+  onStart,
+}: {
+  templates: WorkoutTemplateLite[];
+  onStart: (t: WorkoutTemplateLite) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (templates.length === 0) return null;
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent data-testid="dialog-start-template">
+        <DialogHeader>
+          <DialogTitle>Start from a template</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-2">
+          {templates.map((t) => (
+            <button
+              key={t.id}
+              className="w-full text-left p-3 rounded-md border hover-elevate active-elevate-2"
+              onClick={() => {
+                onStart(t);
+                setOpen(false);
+              }}
+              data-testid={`button-select-template-${t.id}`}
+            >
+              <p className="font-medium text-sm">{t.name}</p>
+              <p className="text-xs text-muted-foreground">{t.exercises.length} exercises</p>
+            </button>
+          ))}
+        </div>
+      </DialogContent>
+      <Button
+        variant="outline"
+        className="w-full"
+        onClick={() => setOpen(true)}
+        data-testid="button-open-template-picker"
+      >
+        <ClipboardList className="h-4 w-4" />
+        Start from template
+      </Button>
+    </Dialog>
+  );
+}
+
 export default function LogWorkout() {
   const { toast } = useToast();
+  const [location] = useLocation();
   const [workoutName, setWorkoutName] = useState("");
   const [date, setDate] = useState(todayIso());
   const [draftExercises, setDraftExercises] = useState<DraftExercise[]>([]);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [newExerciseName, setNewExerciseName] = useState("");
   const [saved, setSaved] = useState(false);
+  const [activeTemplateId, setActiveTemplateId] = useState<number | null>(null);
 
   const { data: exercises, isLoading: exercisesLoading } = useQuery<Exercise[]>({
     queryKey: ["/api/exercises"],
@@ -344,6 +452,49 @@ export default function LogWorkout() {
   const { data: muscleGroups } = useQuery<MuscleGroup[]>({
     queryKey: ["/api/muscle-groups"],
   });
+  const { data: templates } = useQuery<WorkoutTemplateLite[]>({
+    queryKey: ["/api/workout-templates"],
+  });
+
+  const exerciseMap = useMemo(() => {
+    const m = new Map<number, Exercise>();
+    for (const e of exercises ?? []) m.set(e.id, e);
+    return m;
+  }, [exercises]);
+
+  // Auto-start from template if navigated with ?template=<id>
+  useEffect(() => {
+    const hash = window.location.hash;
+    const qIndex = hash.indexOf("?");
+    if (qIndex === -1 || !templates || exercisesLoading) return;
+    const params = new URLSearchParams(hash.slice(qIndex + 1));
+    const templateId = params.get("template");
+    if (templateId && activeTemplateId === null) {
+      const t = templates.find((tpl) => tpl.id === Number(templateId));
+      if (t) startFromTemplate(t);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templates, exercisesLoading, location]);
+
+  const startFromTemplate = (template: WorkoutTemplateLite) => {
+    const sorted = [...template.exercises].sort((a, b) => a.exerciseOrder - b.exerciseOrder);
+    const newDrafts: DraftExercise[] = [];
+    for (const te of sorted) {
+      const ex = exerciseMap.get(te.exerciseId);
+      if (!ex) continue;
+      const totalSets = Math.max(1, te.warmupSets + te.topSets + te.backoffSets || te.targetSets);
+      const sets: DraftSet[] = [];
+      for (let i = 0; i < totalSets; i++) {
+        const isWarmup = i < te.warmupSets;
+        sets.push({ ...newSet(), isWarmup });
+      }
+      newDrafts.push({ key: Math.random().toString(36).slice(2), exercise: ex, sets, prescription: te });
+    }
+    setDraftExercises(newDrafts);
+    setWorkoutName(template.name);
+    setActiveTemplateId(template.id);
+    toast({ title: `Started ${template.name}`, description: `${newDrafts.length} exercises loaded.` });
+  };
 
   const addExercise = (ex: Exercise) => {
     setDraftExercises((prev) => [
@@ -398,6 +549,7 @@ export default function LogWorkout() {
         date,
         name: workoutName || null,
         notes: null,
+        workoutTemplateId: activeTemplateId,
       });
       const workout = await workoutRes.json();
 
@@ -411,7 +563,7 @@ export default function LogWorkout() {
             setNumber: setNumber++,
             weight: Number(s.weight),
             reps: Number(s.reps),
-            rpe: s.rpe === "" ? null : Number(s.rpe),
+            rir: s.rir === "" ? null : Number(s.rir),
             isWarmup: s.isWarmup,
           });
         }
@@ -423,11 +575,13 @@ export default function LogWorkout() {
       qc.invalidateQueries({ queryKey: ["/api/dashboard/volume"] });
       qc.invalidateQueries({ queryKey: ["/api/volume-tracker"] });
       qc.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
-      qc.invalidateQueries({ queryKey: ["/api/coach/deload"] });
+      qc.invalidateQueries({ queryKey: ["/api/recovery"] });
+      qc.invalidateQueries({ queryKey: ["/api/dashboard"] });
       toast({ title: "Workout saved", description: `Logged ${totalValidSets} ${totalValidSets === 1 ? "set" : "sets"}.` });
       setDraftExercises([]);
       setWorkoutName("");
       setDate(todayIso());
+      setActiveTemplateId(null);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     },
@@ -444,6 +598,10 @@ export default function LogWorkout() {
         </h1>
         <p className="text-sm text-muted-foreground">Record today's session</p>
       </div>
+
+      {draftExercises.length === 0 && (
+        <TemplateStartPicker templates={templates ?? []} onStart={startFromTemplate} />
+      )}
 
       <Card>
         <CardContent className="p-4 space-y-4">
@@ -469,6 +627,11 @@ export default function LogWorkout() {
               />
             </div>
           </div>
+          {activeTemplateId != null && (
+            <Badge variant="secondary" className="text-xs" data-testid="badge-active-template">
+              From template
+            </Badge>
+          )}
         </CardContent>
       </Card>
 
@@ -477,9 +640,26 @@ export default function LogWorkout() {
           <CardHeader className="flex flex-row items-start justify-between gap-2 space-y-0">
             <div>
               <CardTitle className="text-base">{d.exercise.name}</CardTitle>
-              <Badge variant="outline" className="mt-1 text-xs capitalize">
-                {d.exercise.equipment}
-              </Badge>
+              <div className="flex flex-wrap gap-1.5 mt-1">
+                <Badge variant="outline" className="text-xs">
+                  {d.exercise.equipment}
+                </Badge>
+                {d.prescription && (
+                  <>
+                    <Badge variant="secondary" className="text-xs" data-testid={`badge-prescription-reps-${d.exercise.id}`}>
+                      {d.prescription.targetRepsMin}-{d.prescription.targetRepsMax} reps
+                    </Badge>
+                    <Badge variant="secondary" className="text-xs" data-testid={`badge-prescription-rir-${d.exercise.id}`}>
+                      {d.prescription.targetRir} RIR target
+                    </Badge>
+                    {d.prescription.failureTarget !== "Never" && (
+                      <Badge variant="destructive" className="text-xs">
+                        {d.prescription.failureTarget}
+                      </Badge>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
             <Button
               variant="ghost"
@@ -498,7 +678,7 @@ export default function LogWorkout() {
                 <span>#</span>
                 <span>Weight</span>
                 <span>Reps</span>
-                <span>RPE</span>
+                <span>RIR</span>
                 <span className="text-center">Warm</span>
                 <span />
               </div>
@@ -528,12 +708,12 @@ export default function LogWorkout() {
                   <Input
                     type="number"
                     inputMode="decimal"
-                    placeholder="RPE"
-                    min={1}
-                    max={10}
-                    value={s.rpe}
-                    onChange={(e) => updateSet(d.key, s.key, { rpe: e.target.value })}
-                    data-testid={`input-rpe-${d.exercise.id}-${idx}`}
+                    placeholder="RIR"
+                    min={0}
+                    max={5}
+                    value={s.rir}
+                    onChange={(e) => updateSet(d.key, s.key, { rir: e.target.value })}
+                    data-testid={`input-rir-${d.exercise.id}-${idx}`}
                   />
                   <div className="flex justify-center">
                     <Checkbox

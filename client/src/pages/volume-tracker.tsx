@@ -18,6 +18,7 @@ import { VOLUME_STATUS_LABEL } from "@/lib/format";
 interface VolumeTrackerEntry {
   muscleGroupId: number;
   muscleGroupName: string;
+  displayName: string;
   currentWeekSets: number;
   lastWeekSets: number;
   delta: number;
@@ -64,7 +65,7 @@ function MuscleGroupCard({ entry }: { entry: VolumeTrackerEntry }) {
   return (
     <Card data-testid={`card-muscle-group-${entry.muscleGroupId}`}>
       <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
-        <CardTitle className="text-base">{entry.muscleGroupName}</CardTitle>
+        <CardTitle className="text-base">{entry.displayName ?? entry.muscleGroupName}</CardTitle>
         <Badge variant="outline" className={`text-xs ${STATUS_BORDER[entry.status]}`}>
           {VOLUME_STATUS_LABEL[entry.status]}
         </Badge>
@@ -133,7 +134,7 @@ export default function VolumeTracker() {
           Volume Tracker
         </h1>
         <p className="text-sm text-muted-foreground">
-          Weekly sets per muscle group vs MEV / MAV / MRV landmarks, with 6-week trend
+          Weekly sets across 19 muscle groups vs MEV / MAV / MRV landmarks, with 6-week trend
         </p>
       </div>
 

@@ -1,54 +1,90 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { AlertTriangle, ArrowUp, ArrowRight, Minus, Sparkles } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowUp,
+  ArrowRight,
+  Minus,
+  Sparkles,
+  Flame,
+  ShieldAlert,
+  Gauge,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatDate } from "@/lib/format";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { apiRequest } from "@/lib/queryClient";
+import type { WorkoutExerciseSuggestion, FatigueSignal } from "@shared/coaching";
 
-interface Suggestion {
+interface Suggestion extends WorkoutExerciseSuggestion {
   exerciseId: number;
-  exerciseName: string;
-  lastSessionDate: string;
-  action: "increase_weight" | "add_rep" | "hold_weight";
-  suggestedWeight: number;
-  suggestedRepTarget: number;
-  reasoning: string;
 }
 
-interface DeloadResult {
-  shouldDeload: boolean;
-  reasons: { reason: string; detail: string }[];
+interface WorkoutTemplateLite {
+  id: number;
+  name: string;
 }
 
-const ACTION_META: Record<
-  Suggestion["action"],
-  { label: string; icon: typeof ArrowUp; className: string }
+const RECOMMENDATION_META: Record<
+  string,
+  { icon: typeof ArrowUp; className: string }
 > = {
-  increase_weight: {
-    label: "Increase weight",
-    icon: ArrowUp,
-    className: "border-volume-optimal text-volume-optimal",
-  },
-  add_rep: {
-    label: "Add a rep",
-    icon: ArrowRight,
-    className: "border-volume-under text-volume-under",
-  },
-  hold_weight: {
-    label: "Hold weight",
-    icon: Minus,
-    className: "border-volume-high text-volume-high",
-  },
+  "Increase Weight": { icon: ArrowUp, className: "border-volume-optimal text-volume-optimal" },
+  "Optional Increase": { icon: ArrowUp, className: "border-volume-optimal text-volume-optimal" },
+  "Repeat Weight": { icon: Minus, className: "border-muted-foreground/40 text-muted-foreground" },
+  "Repeat Or Reduce": { icon: ArrowRight, className: "border-volume-high text-volume-high" },
+  "Hold Weight": { icon: Minus, className: "border-volume-high text-volume-high" },
+  "Hold Progression": { icon: Minus, className: "border-volume-high text-volume-high" },
+  "Reduce Or Delay": { icon: AlertTriangle, className: "border-destructive text-destructive" },
+  "Start Conservative": { icon: ArrowRight, className: "border-muted-foreground/40 text-muted-foreground" },
+};
+
+function recommendationMeta(rec: string) {
+  return RECOMMENDATION_META[rec] ?? { icon: ArrowRight, className: "border-muted-foreground/40 text-muted-foreground" };
+}
+
+const FATIGUE_STATUS_STYLE: Record<string, string> = {
+  Learning: "border-muted-foreground/40 text-muted-foreground",
+  Stable: "border-volume-optimal text-volume-optimal",
+  "Watch Trend": "border-volume-high text-volume-high",
+  "Fatigue Risk": "border-destructive text-destructive",
+};
+
+const RECOVERY_STATUS_STYLE: Record<string, string> = {
+  Recovered: "text-volume-optimal",
+  Recovering: "text-volume-high",
+  "Needs Rest": "text-destructive",
 };
 
 export default function Coach() {
-  const { data: suggestions, isLoading: suggestionsLoading } = useQuery<Suggestion[]>({
-    queryKey: ["/api/coach/suggestions"],
+  const [templateId, setTemplateId] = useState<string>("all");
+
+  const { data: templates } = useQuery<WorkoutTemplateLite[]>({
+    queryKey: ["/api/workout-templates"],
   });
 
-  const { data: deload, isLoading: deloadLoading } = useQuery<DeloadResult>({
-    queryKey: ["/api/coach/deload"],
+  const { data: suggestions, isLoading: suggestionsLoading } = useQuery<Suggestion[]>({
+    queryKey: ["/api/coach/suggestions", templateId],
+    queryFn: async () => {
+      const url =
+        templateId === "all"
+          ? "/api/coach/suggestions"
+          : `/api/coach/suggestions?templateId=${templateId}`;
+      const res = await apiRequest("GET", url);
+      return res.json();
+    },
+  });
+
+  const { data: fatigue, isLoading: fatigueLoading } = useQuery<FatigueSignal>({
+    queryKey: ["/api/coach/fatigue-trend"],
   });
 
   return (
@@ -57,54 +93,74 @@ export default function Coach() {
         <h1 className="text-xl font-display font-bold" data-testid="text-page-title">
           Coach
         </h1>
-        <p className="text-sm text-muted-foreground">Next-session targets and recovery guidance</p>
+        <p className="text-sm text-muted-foreground">Next-session targets, readiness, and recovery guidance</p>
       </div>
 
-      {!deloadLoading && deload && (
+      {!fatigueLoading && fatigue && (
         <Card
           className={
-            deload.shouldDeload
+            fatigue.deloadSuggested
               ? "border-destructive/40 bg-destructive/10"
               : "border-volume-optimal/40 bg-volume-optimal/10"
           }
-          data-testid="card-deload-status"
+          data-testid="card-fatigue-status"
         >
           <CardContent className="p-4 flex gap-3">
-            {deload.shouldDeload ? (
+            {fatigue.deloadSuggested ? (
               <AlertTriangle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
             ) : (
-              <Sparkles className="h-5 w-5 text-volume-optimal shrink-0 mt-0.5" />
+              <Flame className="h-5 w-5 text-volume-optimal shrink-0 mt-0.5" />
             )}
-            <div className="space-y-2 min-w-0">
-              <p className="font-semibold text-sm" data-testid="text-deload-headline">
-                {deload.shouldDeload ? "Consider a deload" : "No deload needed"}
-              </p>
-              {deload.shouldDeload ? (
-                <ul className="space-y-1">
-                  {deload.reasons.map((r, i) => (
-                    <li key={i} className="text-sm text-muted-foreground" data-testid={`text-deload-reason-${i}`}>
-                      <span className="font-medium text-foreground">{r.reason}:</span> {r.detail}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  Fatigue markers (stalled lifts, RPE, and volume vs MRV) all look manageable. Keep training as
-                  planned.
+            <div className="space-y-2 min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <p className="font-semibold text-sm" data-testid="text-fatigue-headline">
+                  {fatigue.deloadSuggested ? "Deload Suggested" : "Fatigue Trend"}
                 </p>
-              )}
+                <Badge variant="outline" className={FATIGUE_STATUS_STYLE[fatigue.status] ?? ""}>
+                  {fatigue.status}
+                </Badge>
+              </div>
+              <p className="text-sm text-muted-foreground" data-testid="text-fatigue-summary">
+                {fatigue.summary}
+              </p>
+              <div className="relative h-2 w-full rounded-full bg-muted overflow-hidden">
+                <div
+                  className={`absolute inset-y-0 left-0 rounded-full ${
+                    fatigue.riskScore >= 70
+                      ? "bg-destructive"
+                      : fatigue.riskScore >= 45
+                      ? "bg-volume-high"
+                      : "bg-volume-optimal"
+                  }`}
+                  style={{ width: `${fatigue.riskScore}%` }}
+                  data-testid="bar-fatigue-risk"
+                />
+              </div>
             </div>
           </CardContent>
         </Card>
       )}
 
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Next-Session Suggestions</CardTitle>
+        <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 flex-wrap">
+          <CardTitle className="text-base">Exercise Suggestions</CardTitle>
+          <Select value={templateId} onValueChange={setTemplateId}>
+            <SelectTrigger className="w-44" data-testid="select-coach-template-filter">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All trained exercises</SelectItem>
+              {(templates ?? []).map((t) => (
+                <SelectItem key={t.id} value={String(t.id)}>
+                  {t.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </CardHeader>
         <CardContent className="space-y-3">
           {suggestionsLoading &&
-            Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-20 w-full" />)}
+            Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-28 w-full" />)}
 
           {!suggestionsLoading && (suggestions?.length ?? 0) === 0 && (
             <div className="flex flex-col items-center text-center gap-3 py-10 text-muted-foreground">
@@ -118,32 +174,62 @@ export default function Coach() {
 
           {!suggestionsLoading &&
             suggestions?.map((s) => {
-              const meta = ACTION_META[s.action];
+              const meta = recommendationMeta(s.recommendation);
               const Icon = meta.icon;
               return (
-                <Link key={s.exerciseId} href={`/progress/${s.exerciseId}`}>
-                  <div
-                    className="rounded-md border p-3 space-y-2 hover-elevate cursor-pointer"
-                    data-testid={`card-suggestion-${s.exerciseId}`}
-                  >
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <p className="font-medium text-sm" data-testid={`text-suggestion-exercise-${s.exerciseId}`}>
-                        {s.exerciseName}
-                      </p>
-                      <Badge variant="outline" className={`text-xs gap-1 ${meta.className}`}>
-                        <Icon className="h-3 w-3" />
-                        {meta.label}
-                      </Badge>
-                    </div>
-                    <p className="text-sm text-muted-foreground">{s.reasoning}</p>
-                    <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span>Last trained {formatDate(s.lastSessionDate)}</span>
-                      <span className="font-mono tabular-nums">
-                        Target: {s.suggestedWeight} lb × {s.suggestedRepTarget}
-                      </span>
-                    </div>
+                <div
+                  key={s.exerciseId}
+                  className="rounded-md border p-4 space-y-3"
+                  data-testid={`card-suggestion-${s.exerciseId}`}
+                >
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <Link
+                      href={`/progress/${s.exerciseId}`}
+                      className="font-medium text-sm hover-elevate rounded px-1 -mx-1"
+                      data-testid={`link-suggestion-exercise-${s.exerciseId}`}
+                    >
+                      {s.exerciseName}
+                    </Link>
+                    <Badge variant="outline" className={`text-xs gap-1 ${meta.className}`}>
+                      <Icon className="h-3 w-3" />
+                      {s.recommendation}
+                    </Badge>
                   </div>
-                </Link>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    <span>Last: {s.lastPerformance}</span>
+                    <span className="font-mono tabular-nums">Goal: {s.suggestedGoal}</span>
+                  </div>
+
+                  <p className="text-sm" data-testid={`text-suggestion-reason-${s.exerciseId}`}>
+                    {s.reason}
+                  </p>
+                  {s.evidenceText && (
+                    <p className="text-xs text-muted-foreground">{s.evidenceText}</p>
+                  )}
+                  {s.nextGoalText && (
+                    <p className="text-xs text-muted-foreground italic">{s.nextGoalText}</p>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs border-t pt-2">
+                    <span className="flex items-center gap-1">
+                      <ShieldAlert className="h-3.5 w-3.5" />
+                      <span className={RECOVERY_STATUS_STYLE[s.recoveryStatus] ?? "text-muted-foreground"}>
+                        {s.recoveryText}
+                      </span>
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <Gauge className="h-3.5 w-3.5" />
+                      Readiness {s.readinessScore}/100 — {s.readinessStatus}
+                    </span>
+                    <span className="text-muted-foreground">Confidence {s.confidenceScore}%</span>
+                  </div>
+                  {s.readinessGuidance && (
+                    <p className="text-xs text-muted-foreground" data-testid={`text-readiness-guidance-${s.exerciseId}`}>
+                      {s.readinessGuidance}
+                    </p>
+                  )}
+                </div>
               );
             })}
         </CardContent>

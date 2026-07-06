@@ -16,6 +16,8 @@ import LogWorkout from "@/pages/log-workout";
 import Progress from "@/pages/progress";
 import Coach from "@/pages/coach";
 import VolumeTracker from "@/pages/volume-tracker";
+import WorkoutTemplates from "@/pages/workout-templates";
+import RecoveryMap from "@/pages/recovery";
 
 function AppRouter() {
   return (
@@ -26,6 +28,8 @@ function AppRouter() {
       <Route path="/progress/:exerciseId" component={Progress} />
       <Route path="/coach" component={Coach} />
       <Route path="/volume" component={VolumeTracker} />
+      <Route path="/templates" component={WorkoutTemplates} />
+      <Route path="/recovery" component={RecoveryMap} />
       <Route component={NotFound} />
     </Switch>
   );
