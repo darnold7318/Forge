@@ -1,4 +1,5 @@
 import {
+  users,
   muscleGroups,
   exercises,
   workouts,
@@ -8,6 +9,8 @@ import {
   workoutTemplateExercises,
 } from "@shared/schema";
 import type {
+  User,
+  InsertUser,
   MuscleGroup,
   InsertMuscleGroup,
   Exercise,
@@ -26,7 +29,7 @@ import type {
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, and } from "drizzle-orm";
 import { MUSCLE_GROUPS, EXERCISES, WORKOUT_TEMPLATES } from "./seed-data";
 
 const sqlite = new Database("data.db");
@@ -39,6 +42,12 @@ export const db = drizzle(sqlite);
 // ---------------------------------------------------------------------------
 function ensureTables() {
   sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      color_accent TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS muscle_groups (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
@@ -60,6 +69,7 @@ function ensureTables() {
 
     CREATE TABLE IF NOT EXISTS workout_templates (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
       name TEXT NOT NULL,
       notes TEXT
     );
@@ -87,6 +97,7 @@ function ensureTables() {
 
     CREATE TABLE IF NOT EXISTS workouts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
       date TEXT NOT NULL,
       name TEXT,
       notes TEXT,
@@ -106,6 +117,7 @@ function ensureTables() {
 
     CREATE TABLE IF NOT EXISTS bodyweight_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
       date TEXT NOT NULL,
       weight REAL NOT NULL
     );
@@ -115,8 +127,18 @@ function ensureTables() {
 ensureTables();
 
 function seedIfEmpty() {
-  const existing = db.select().from(muscleGroups).all();
-  if (existing.length > 0) return;
+  // ---- Users: seed 2 default profiles if none exist ----
+  let existingUsers = db.select().from(users).all();
+  if (existingUsers.length === 0) {
+    db.insert(users).values({ name: "Profile 1", colorAccent: "chart-1" }).run();
+    db.insert(users).values({ name: "Profile 2", colorAccent: "chart-4" }).run();
+    existingUsers = db.select().from(users).all();
+  }
+  const firstUser = existingUsers.slice().sort((a, b) => a.id - b.id)[0];
+
+  // ---- Shared catalog data (muscle groups + exercises) ----
+  const existingGroups = db.select().from(muscleGroups).all();
+  if (existingGroups.length > 0) return; // catalog + templates already seeded
 
   const nameToId = new Map<string, number>();
   for (const mg of MUSCLE_GROUPS) {
@@ -147,10 +169,11 @@ function seedIfEmpty() {
     exerciseNameToId.set(ex.name, row.id);
   }
 
+  // Example templates are attached to the first default user only.
   for (const template of WORKOUT_TEMPLATES) {
     const templateRow = db
       .insert(workoutTemplates)
-      .values({ name: template.name, notes: template.notes })
+      .values({ userId: firstUser.id, name: template.name, notes: template.notes })
       .returning()
       .get();
 
@@ -213,46 +236,71 @@ export interface WorkoutTemplateWithExercises extends WorkoutTemplate {
 // Storage interface
 // ---------------------------------------------------------------------------
 export interface IStorage {
-  // Muscle groups
+  // Users
+  getUsers(): Promise<User[]>;
+  getUser(id: number): Promise<User | undefined>;
+  createUser(user: InsertUser): Promise<User>;
+  renameUser(id: number, name: string): Promise<User | undefined>;
+
+  // Muscle groups (shared/global)
   getMuscleGroups(): Promise<MuscleGroup[]>;
   getMuscleGroup(id: number): Promise<MuscleGroup | undefined>;
 
-  // Exercises
+  // Exercises (shared/global)
   getExercises(): Promise<Exercise[]>;
   getExercise(id: number): Promise<Exercise | undefined>;
   createExercise(exercise: InsertExercise): Promise<Exercise>;
 
-  // Workout templates
-  getWorkoutTemplates(): Promise<WorkoutTemplate[]>;
+  // Workout templates (scoped per user)
+  getWorkoutTemplates(userId: number): Promise<WorkoutTemplate[]>;
   getWorkoutTemplate(id: number): Promise<WorkoutTemplate | undefined>;
   getWorkoutTemplateWithExercises(id: number): Promise<WorkoutTemplateWithExercises | undefined>;
-  getAllWorkoutTemplatesWithExercises(): Promise<WorkoutTemplateWithExercises[]>;
+  getAllWorkoutTemplatesWithExercises(userId: number): Promise<WorkoutTemplateWithExercises[]>;
   createWorkoutTemplate(template: InsertWorkoutTemplate): Promise<WorkoutTemplate>;
   createWorkoutTemplateExercise(te: InsertWorkoutTemplateExercise): Promise<WorkoutTemplateExercise>;
   deleteWorkoutTemplate(id: number): Promise<void>;
+  copyWorkoutTemplate(id: number, targetUserId: number): Promise<WorkoutTemplateWithExercises | undefined>;
 
-  // Workouts
-  getWorkouts(): Promise<Workout[]>;
+  // Workouts (scoped per user)
+  getWorkouts(userId: number): Promise<Workout[]>;
   getWorkout(id: number): Promise<Workout | undefined>;
   getWorkoutWithSets(id: number): Promise<WorkoutWithSets | undefined>;
   createWorkout(workout: InsertWorkout): Promise<Workout>;
   updateWorkout(id: number, workout: Partial<InsertWorkout>): Promise<Workout | undefined>;
   deleteWorkout(id: number): Promise<void>;
 
-  // Sets
+  // Sets (scope inherited via workoutId -> workouts.userId)
   getSetsForWorkout(workoutId: number): Promise<SetWithExercise[]>;
-  getSetsForExercise(exerciseId: number): Promise<SetWithExercise[]>;
-  getAllSets(): Promise<SetWithExercise[]>;
+  getSetsForExercise(exerciseId: number, userId: number): Promise<SetWithExercise[]>;
+  getAllSets(userId: number): Promise<SetWithExercise[]>;
   createSet(set: InsertSet): Promise<Set>;
   updateSet(id: number, set: Partial<InsertSet>): Promise<Set | undefined>;
   deleteSet(id: number): Promise<void>;
 
-  // Bodyweight logs
-  getBodyweightLogs(): Promise<BodyweightLog[]>;
+  // Bodyweight logs (scoped per user)
+  getBodyweightLogs(userId: number): Promise<BodyweightLog[]>;
   createBodyweightLog(log: InsertBodyweightLog): Promise<BodyweightLog>;
 }
 
 export class DatabaseStorage implements IStorage {
+  // ---------------- Users ----------------
+  async getUsers(): Promise<User[]> {
+    return db.select().from(users).orderBy(users.id).all();
+  }
+
+  async getUser(id: number): Promise<User | undefined> {
+    return db.select().from(users).where(eq(users.id, id)).get();
+  }
+
+  async createUser(user: InsertUser): Promise<User> {
+    return db.insert(users).values(user).returning().get();
+  }
+
+  async renameUser(id: number, name: string): Promise<User | undefined> {
+    return db.update(users).set({ name }).where(eq(users.id, id)).returning().get();
+  }
+
+  // ---------------- Muscle groups (shared) ----------------
   async getMuscleGroups(): Promise<MuscleGroup[]> {
     return db.select().from(muscleGroups).all();
   }
@@ -261,6 +309,7 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(muscleGroups).where(eq(muscleGroups.id, id)).get();
   }
 
+  // ---------------- Exercises (shared) ----------------
   async getExercises(): Promise<Exercise[]> {
     return db.select().from(exercises).all();
   }
@@ -273,8 +322,9 @@ export class DatabaseStorage implements IStorage {
     return db.insert(exercises).values(exercise).returning().get();
   }
 
-  async getWorkoutTemplates(): Promise<WorkoutTemplate[]> {
-    return db.select().from(workoutTemplates).all();
+  // ---------------- Workout templates ----------------
+  async getWorkoutTemplates(userId: number): Promise<WorkoutTemplate[]> {
+    return db.select().from(workoutTemplates).where(eq(workoutTemplates.userId, userId)).all();
   }
 
   async getWorkoutTemplate(id: number): Promise<WorkoutTemplate | undefined> {
@@ -293,8 +343,8 @@ export class DatabaseStorage implements IStorage {
     return { ...template, exercises: exerciseRows };
   }
 
-  async getAllWorkoutTemplatesWithExercises(): Promise<WorkoutTemplateWithExercises[]> {
-    const templates = await this.getWorkoutTemplates();
+  async getAllWorkoutTemplatesWithExercises(userId: number): Promise<WorkoutTemplateWithExercises[]> {
+    const templates = await this.getWorkoutTemplates(userId);
     const result: WorkoutTemplateWithExercises[] = [];
     for (const t of templates) {
       const withExercises = await this.getWorkoutTemplateWithExercises(t.id);
@@ -316,8 +366,51 @@ export class DatabaseStorage implements IStorage {
     db.delete(workoutTemplates).where(eq(workoutTemplates.id, id)).run();
   }
 
-  async getWorkouts(): Promise<Workout[]> {
-    return db.select().from(workouts).orderBy(desc(workouts.date), desc(workouts.id)).all();
+  async copyWorkoutTemplate(id: number, targetUserId: number): Promise<WorkoutTemplateWithExercises | undefined> {
+    const source = await this.getWorkoutTemplateWithExercises(id);
+    if (!source) return undefined;
+
+    const newTemplate = db
+      .insert(workoutTemplates)
+      .values({ userId: targetUserId, name: source.name, notes: source.notes })
+      .returning()
+      .get();
+
+    for (const te of source.exercises) {
+      db.insert(workoutTemplateExercises)
+        .values({
+          workoutTemplateId: newTemplate.id,
+          exerciseId: te.exerciseId,
+          exerciseOrder: te.exerciseOrder,
+          exerciseRole: te.exerciseRole,
+          warmupSets: te.warmupSets,
+          topSets: te.topSets,
+          backoffSets: te.backoffSets,
+          backoffReductionPercent: te.backoffReductionPercent,
+          targetSets: te.targetSets,
+          targetRepsMin: te.targetRepsMin,
+          targetRepsMax: te.targetRepsMax,
+          tempo: te.tempo,
+          targetRir: te.targetRir,
+          failureTarget: te.failureTarget,
+          intensityTechnique: te.intensityTechnique,
+          restSeconds: te.restSeconds,
+          notes: te.notes,
+        })
+        .run();
+    }
+
+    return this.getWorkoutTemplateWithExercises(newTemplate.id);
+  }
+
+  // ---------------- Workouts ----------------
+  async getWorkouts(userId: number): Promise<Workout[]> {
+    return db
+      .select()
+      .from(workouts)
+      .where(eq(workouts.userId, userId))
+      .orderBy(desc(workouts.date), desc(workouts.id))
+      .all();
   }
 
   async getWorkout(id: number): Promise<Workout | undefined> {
@@ -344,6 +437,7 @@ export class DatabaseStorage implements IStorage {
     db.delete(workouts).where(eq(workouts.id, id)).run();
   }
 
+  // ---------------- Sets ----------------
   async getSetsForWorkout(workoutId: number): Promise<SetWithExercise[]> {
     const rows = db
       .select()
@@ -354,21 +448,24 @@ export class DatabaseStorage implements IStorage {
     return rows.map((r) => ({ ...r.sets, exercise: r.exercises }));
   }
 
-  async getSetsForExercise(exerciseId: number): Promise<SetWithExercise[]> {
+  async getSetsForExercise(exerciseId: number, userId: number): Promise<SetWithExercise[]> {
     const rows = db
       .select()
       .from(sets)
       .innerJoin(exercises, eq(sets.exerciseId, exercises.id))
-      .where(eq(sets.exerciseId, exerciseId))
+      .innerJoin(workouts, eq(sets.workoutId, workouts.id))
+      .where(and(eq(sets.exerciseId, exerciseId), eq(workouts.userId, userId)))
       .all();
     return rows.map((r) => ({ ...r.sets, exercise: r.exercises }));
   }
 
-  async getAllSets(): Promise<SetWithExercise[]> {
+  async getAllSets(userId: number): Promise<SetWithExercise[]> {
     const rows = db
       .select()
       .from(sets)
       .innerJoin(exercises, eq(sets.exerciseId, exercises.id))
+      .innerJoin(workouts, eq(sets.workoutId, workouts.id))
+      .where(eq(workouts.userId, userId))
       .all();
     return rows.map((r) => ({ ...r.sets, exercise: r.exercises }));
   }
@@ -385,8 +482,14 @@ export class DatabaseStorage implements IStorage {
     db.delete(sets).where(eq(sets.id, id)).run();
   }
 
-  async getBodyweightLogs(): Promise<BodyweightLog[]> {
-    return db.select().from(bodyweightLogs).orderBy(desc(bodyweightLogs.date)).all();
+  // ---------------- Bodyweight logs ----------------
+  async getBodyweightLogs(userId: number): Promise<BodyweightLog[]> {
+    return db
+      .select()
+      .from(bodyweightLogs)
+      .where(eq(bodyweightLogs.userId, userId))
+      .orderBy(desc(bodyweightLogs.date))
+      .all();
   }
 
   async createBodyweightLog(log: InsertBodyweightLog): Promise<BodyweightLog> {

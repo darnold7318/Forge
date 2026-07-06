@@ -3,6 +3,20 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
+// Users — lightweight named profiles for data separation (no auth/passwords)
+// ---------------------------------------------------------------------------
+export const users = sqliteTable("users", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().unique(),
+  colorAccent: text("color_accent"),
+});
+
+export const insertUserSchema = createInsertSchema(users).omit({ id: true });
+
+export type InsertUser = z.infer<typeof insertUserSchema>;
+export type User = typeof users.$inferSelect;
+
+// ---------------------------------------------------------------------------
 // Muscle Groups — 19 groups matching the reference C# MuscleGroup enum
 // ---------------------------------------------------------------------------
 export const muscleGroupNames = [
@@ -119,6 +133,9 @@ export type ExerciseWithParsedMuscles = Omit<Exercise, "secondaryMuscles"> & {
 // ---------------------------------------------------------------------------
 export const workoutTemplates = sqliteTable("workout_templates", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id),
   name: text("name").notNull(),
   notes: text("notes"),
 });
@@ -197,6 +214,9 @@ export type WorkoutTemplateExercise =
 // ---------------------------------------------------------------------------
 export const workouts = sqliteTable("workouts", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id),
   date: text("date").notNull(), // ISO date string (startedAt)
   name: text("name"), // e.g. "Push Day"
   notes: text("notes"),
@@ -240,6 +260,9 @@ export type Set = typeof sets.$inferSelect;
 // ---------------------------------------------------------------------------
 export const bodyweightLogs = sqliteTable("bodyweight_logs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id),
   date: text("date").notNull(),
   weight: real("weight").notNull(),
 });
