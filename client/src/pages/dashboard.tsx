@@ -37,7 +37,7 @@ function VolumeBar({ entry }: { entry: VolumeEntry }) {
         <span className="text-sm font-medium">{entry.muscleGroupName}</span>
         <div className="flex items-center gap-2 shrink-0">
           <span className="text-xs text-muted-foreground tabular-nums" data-testid={`text-sets-${entry.muscleGroupName.toLowerCase()}`}>
-            {entry.sets} sets
+            {entry.sets} {entry.sets === 1 ? "set" : "sets"}
           </span>
           <Badge
             variant="outline"

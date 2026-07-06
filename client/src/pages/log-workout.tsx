@@ -424,7 +424,7 @@ export default function LogWorkout() {
       qc.invalidateQueries({ queryKey: ["/api/volume-tracker"] });
       qc.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
       qc.invalidateQueries({ queryKey: ["/api/coach/deload"] });
-      toast({ title: "Workout saved", description: `Logged ${totalValidSets} sets.` });
+      toast({ title: "Workout saved", description: `Logged ${totalValidSets} ${totalValidSets === 1 ? "set" : "sets"}.` });
       setDraftExercises([]);
       setWorkoutName("");
       setDate(todayIso());
