@@ -531,6 +531,38 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteWorkoutTemplate(id: number): Promise<void> {
+    // Detach this template from any schedule references first, so the delete never fails
+    // with a foreign-key error just because the template is currently assigned to a day.
+    // scheduleDays rows keep their `label` even after the template link is cleared (by design
+    // — see the schema comment), so past/future calendar days still show a name, just
+    // pointing at nothing now.
+    db.update(scheduleDays)
+      .set({ workoutTemplateId: null })
+      .where(eq(scheduleDays.workoutTemplateId, id))
+      .run();
+
+    // customWeeklyTemplate is a JSON blob (7 slots keyed by day-of-week) stored per-user, so it
+    // can't be targeted with a SQL WHERE — scan every user's schedule row and null out any slot
+    // that references this template, keeping the slot's label intact.
+    const schedules = db.select().from(workoutSchedules).all();
+    for (const schedule of schedules) {
+      const slots: (CustomWeeklySlot | null)[] = JSON.parse(schedule.customWeeklyTemplate);
+      let changed = false;
+      const nextSlots = slots.map((slot) => {
+        if (slot && slot.workoutTemplateId === id) {
+          changed = true;
+          return { ...slot, workoutTemplateId: null };
+        }
+        return slot;
+      });
+      if (changed) {
+        db.update(workoutSchedules)
+          .set({ customWeeklyTemplate: JSON.stringify(nextSlots) })
+          .where(eq(workoutSchedules.id, schedule.id))
+          .run();
+      }
+    }
+
     db.delete(workoutTemplateExercises).where(eq(workoutTemplateExercises.workoutTemplateId, id)).run();
     db.delete(workoutTemplates).where(eq(workoutTemplates.id, id)).run();
   }

@@ -605,6 +605,8 @@ export default function TemplateEditor() {
             <AlertDialogTitle>Delete {localName ?? template.name}?</AlertDialogTitle>
             <AlertDialogDescription>
               This permanently deletes this template and its exercise list. This can't be undone.
+              If it's currently assigned to any day in a weekly schedule, that day will just be
+              unassigned (its label stays, but it won't point to a template anymore).
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

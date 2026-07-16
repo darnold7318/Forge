@@ -316,8 +316,13 @@ export async function registerRoutes(
 
   app.delete("/api/workout-templates/:id", async (req, res) => {
     const id = Number(req.params.id);
-    await storage.deleteWorkoutTemplate(id);
-    res.status(204).end();
+    try {
+      await storage.deleteWorkoutTemplate(id);
+      res.status(204).end();
+    } catch (err) {
+      console.error("Failed to delete workout template", id, err);
+      res.status(500).json({ message: "Couldn't delete this template. Try again in a moment." });
+    }
   });
 
   // Workout composition analysis for a template (or ad-hoc exercise list)
