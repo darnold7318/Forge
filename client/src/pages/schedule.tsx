@@ -63,6 +63,7 @@ interface ScheduleResponse {
   rotationCursor: number;
   weeklyRestDays: string; // JSON array of 0-6
   lastGeneratedMonth: string | null;
+  customWeeklyTemplate: string; // JSON array of 7 slots, index 0=Sun..6=Sat
   days: ScheduleDay[];
 }
 
@@ -102,7 +103,10 @@ function monthKey(year: number, month0: number): string {
 function DayBubble({ day, isOverlay = false }: { day: ScheduleDay; isOverlay?: boolean }) {
   // Synthetic drag-preview bubble for the Core palette item (id === -1, label "Core").
   const isCorePreview = day.id === -1 && day.label === "Core";
-  const isRest = !isCorePreview && day.workoutTemplateId == null;
+  // A synthetic palette-label preview (id === -1) with a real label is never Rest, even before
+  // the server resolves its final workoutTemplateId. Real calendar days still key off
+  // workoutTemplateId, since that's the authoritative Rest/workout signal from the backend.
+  const isRest = !isCorePreview && (day.id === -1 ? day.label == null : day.workoutTemplateId == null);
   const text = isCorePreview ? "Core" : isRest ? "Rest" : day.label ?? "Workout";
   return (
     <div
@@ -121,20 +125,36 @@ function DayBubble({ day, isOverlay = false }: { day: ScheduleDay; isOverlay?: b
   );
 }
 
-function DraggableBubble({ day }: { day: ScheduleDay }) {
+function DraggableBubble({ day, onClear }: { day: ScheduleDay; onClear?: (date: string) => void }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `day:${day.date}`,
     data: { type: "day", day },
   });
+  const isRest = day.workoutTemplateId == null;
   return (
     <div
       ref={setNodeRef}
       {...listeners}
       {...attributes}
-      className={`cursor-grab touch-none ${isDragging ? "opacity-30" : ""}`}
+      className={`relative group cursor-grab touch-none ${isDragging ? "opacity-30" : ""}`}
       data-testid={`draggable-day-${day.date}`}
     >
       <DayBubble day={day} />
+      {onClear && !isRest && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onClear(day.date);
+          }}
+          className="absolute -top-1.5 -right-1.5 flex items-center justify-center h-4 w-4 rounded-full bg-background border border-border text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity hover:text-foreground hover:border-foreground/40"
+          title="Clear this day"
+          data-testid={`button-clear-day-${day.date}`}
+        >
+          <X className="h-2.5 w-2.5" />
+        </button>
+      )}
     </div>
   );
 }
@@ -181,18 +201,43 @@ function CorePaletteBubble() {
   );
 }
 
+/** Palette bubble for one of the active split's own day-types (e.g. Push/Pull/Legs, or a Custom
+ *  split's label) so the user can drag it directly onto any day without hunting for an existing
+ *  occurrence of that label elsewhere on the calendar. */
+function LabelPaletteBubble({ label, workoutTemplateId }: { label: string; workoutTemplateId: number | null }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `palette:label:${label}`,
+    data: { type: "palette-label", label, workoutTemplateId },
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      {...listeners}
+      {...attributes}
+      className={`cursor-grab touch-none ${isDragging ? "opacity-30" : ""}`}
+      data-testid={`draggable-palette-label-${label}`}
+    >
+      <div className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium ${colorForLabel(label)}`}>
+        {label}
+      </div>
+    </div>
+  );
+}
+
 function CalendarCell({
   date,
   day,
   isToday,
   isCurrentMonth,
   onRemoveCoreAddon,
+  onClearDay,
 }: {
   date: string;
   day: ScheduleDay | undefined;
   isToday: boolean;
   isCurrentMonth: boolean;
   onRemoveCoreAddon: (date: string) => void;
+  onClearDay: (date: string) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `cell:${date}`, data: { type: "cell", date } });
   const dayNum = Number(date.slice(8, 10));
@@ -211,7 +256,7 @@ function CalendarCell({
         </span>
         {isToday && <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-label="Today" />}
       </div>
-      {day ? <DraggableBubble day={day} /> : <div className="h-[26px]" />}
+      {day ? <DraggableBubble day={day} onClear={onClearDay} /> : <div className="h-[26px]" />}
       {day?.hasCoreAddon && (
         <button
           type="button"
@@ -322,6 +367,36 @@ export default function SchedulePage() {
   }, [data?.weeklyRestDays]);
   const hasActiveSplit = data?.activeSplit != null;
 
+  // Distinct day-type labels for the active split, each paired with a template id to drag onto
+  // any day directly. Rotation splits (ppl/upper_lower/full_body/bro_split) source their labels
+  // from rotationCycle; "custom" sources them from its own fixed Mon-Sun template. The template
+  // id for each label is looked up from whatever calendar day already has it, so dragging the
+  // bubble reuses the exact same workout template the rotation/template already points to.
+  const paletteLabels = useMemo(() => {
+    if (!data) return [];
+    let labels: string[] = [];
+    if (data.activeSplit === "custom") {
+      try {
+        const slots: ({ label: string | null; workoutTemplateId: number | null } | null)[] = JSON.parse(
+          data.customWeeklyTemplate ?? "[]",
+        );
+        labels = Array.from(new Set(slots.filter((s) => s?.label).map((s) => s!.label as string)));
+      } catch {
+        labels = [];
+      }
+    } else {
+      try {
+        labels = Array.from(new Set(JSON.parse(data.rotationCycle ?? "[]") as string[]));
+      } catch {
+        labels = [];
+      }
+    }
+    return labels.map((label) => {
+      const match = days.find((d) => d.label === label && d.workoutTemplateId != null);
+      return { label, workoutTemplateId: match?.workoutTemplateId ?? null };
+    });
+  }, [data, days]);
+
   // Build the calendar grid: leading/trailing days from adjacent months to fill full weeks.
   const gridCells = useMemo(() => {
     const firstOfMonth = new Date(viewYear, viewMonth, 1);
@@ -368,6 +443,17 @@ export default function SchedulePage() {
       setDragDay({ id: -1, scheduleId: -1, date: "", workoutTemplateId: null, label: "Rest", isManualOverride: false, isWeeklyBlocked: false, hasCoreAddon: false });
     else if (data?.type === "palette-core")
       setDragDay({ id: -1, scheduleId: -1, date: "", workoutTemplateId: null, label: "Core", isManualOverride: false, isWeeklyBlocked: false, hasCoreAddon: true });
+    else if (data?.type === "palette-label")
+      setDragDay({
+        id: -1,
+        scheduleId: -1,
+        date: "",
+        workoutTemplateId: data.workoutTemplateId ?? null,
+        label: data.label as string,
+        isManualOverride: false,
+        isWeeklyBlocked: false,
+        hasCoreAddon: false,
+      });
   };
 
   const handleDragEnd = (event: DragEndEvent) => {
@@ -396,6 +482,15 @@ export default function SchedulePage() {
       return;
     }
 
+    if (activeData?.type === "palette-label") {
+      setDayMutation.mutate({
+        date: toDate,
+        workoutTemplateId: (activeData.workoutTemplateId as number | null) ?? null,
+        label: activeData.label as string,
+      });
+      return;
+    }
+
     if (activeData?.type === "day") {
       const fromDate = (activeData.day as ScheduleDay).date;
       if (fromDate === toDate) return;
@@ -405,6 +500,12 @@ export default function SchedulePage() {
 
   const removeCoreAddon = (date: string) => {
     coreAddonMutation.mutate({ date, hasCoreAddon: false });
+  };
+
+  // Manually clear a day back to Rest — marks it a manual override so auto-generation for any
+  // split (rotation or Custom) leaves it alone going forward, exactly like dragging Rest onto it.
+  const clearDay = (date: string) => {
+    setDayMutation.mutate({ date, workoutTemplateId: null, label: "Rest" });
   };
 
   const resolveRestDrop = (mode: "shift" | "skip") => {
@@ -521,9 +622,12 @@ export default function SchedulePage() {
             </Button>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="flex flex-col sm:flex-row gap-2">
+            <div className="flex flex-wrap gap-2">
               <RestPaletteBubble />
               <CorePaletteBubble />
+              {paletteLabels.map(({ label, workoutTemplateId }) => (
+                <LabelPaletteBubble key={label} label={label} workoutTemplateId={workoutTemplateId} />
+              ))}
             </div>
             <div className="grid grid-cols-7 gap-1 text-center">
               {DAY_NAMES.map((name) => (
@@ -539,6 +643,7 @@ export default function SchedulePage() {
                   isToday={cell.date === todayIso()}
                   isCurrentMonth={cell.isCurrentMonth}
                   onRemoveCoreAddon={removeCoreAddon}
+                  onClearDay={clearDay}
                 />
               ))}
             </div>
