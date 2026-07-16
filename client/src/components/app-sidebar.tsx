@@ -1,4 +1,4 @@
-import { LayoutDashboard, Dumbbell, LineChart, Sparkles, BarChart3, ClipboardList, CalendarDays, HeartPulse, Settings } from "lucide-react";
+import { LayoutDashboard, Dumbbell, LineChart, Sparkles, BarChart3, ClipboardList, CalendarDays, HeartPulse, Settings, List } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import {
   Sidebar,
@@ -19,6 +19,7 @@ const items = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
   { title: "Log Workout", url: "/log", icon: Dumbbell },
   { title: "Templates", url: "/templates", icon: ClipboardList },
+  { title: "Exercises", url: "/exercises", icon: List },
   { title: "Schedule", url: "/schedule", icon: CalendarDays },
   { title: "Progress", url: "/progress", icon: LineChart },
   { title: "Coach", url: "/coach", icon: Sparkles },

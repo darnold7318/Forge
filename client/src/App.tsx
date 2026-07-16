@@ -19,6 +19,7 @@ import Progress from "@/pages/progress";
 import Coach from "@/pages/coach";
 import VolumeTracker from "@/pages/volume-tracker";
 import WorkoutTemplates from "@/pages/workout-templates";
+import Exercises from "@/pages/exercises";
 import TemplateEditor from "@/pages/template-editor";
 import SchedulePage from "@/pages/schedule";
 import RecoveryMap from "@/pages/recovery";
@@ -34,6 +35,7 @@ function AppRouter() {
       <Route path="/coach" component={Coach} />
       <Route path="/volume" component={VolumeTracker} />
       <Route path="/templates" component={WorkoutTemplates} />
+      <Route path="/exercises" component={Exercises} />
       <Route path="/templates/:id/edit" component={TemplateEditor} />
       <Route path="/schedule" component={SchedulePage} />
       <Route path="/recovery" component={RecoveryMap} />

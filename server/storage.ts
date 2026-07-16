@@ -391,6 +391,9 @@ export interface IStorage {
   getExercises(): Promise<Exercise[]>;
   getExercise(id: number): Promise<Exercise | undefined>;
   createExercise(exercise: InsertExercise): Promise<Exercise>;
+  updateExercise(id: number, exercise: InsertExercise): Promise<Exercise | undefined>;
+  getExerciseUsage(id: number): Promise<{ templateCount: number; loggedSetCount: number }>;
+  deleteExercise(id: number): Promise<{ deleted: boolean; reason?: string }>;
 
   // Workout templates (scoped per user)
   getWorkoutTemplates(userId: number): Promise<WorkoutTemplate[]>;
@@ -489,6 +492,38 @@ export class DatabaseStorage implements IStorage {
 
   async createExercise(exercise: InsertExercise): Promise<Exercise> {
     return db.insert(exercises).values(exercise).returning().get();
+  }
+
+  async updateExercise(id: number, exercise: InsertExercise): Promise<Exercise | undefined> {
+    return db.update(exercises).set(exercise).where(eq(exercises.id, id)).returning().get();
+  }
+
+  async getExerciseUsage(id: number): Promise<{ templateCount: number; loggedSetCount: number }> {
+    const templateRows = db
+      .select()
+      .from(workoutTemplateExercises)
+      .where(eq(workoutTemplateExercises.exerciseId, id))
+      .all();
+    const setRows = db.select().from(sets).where(eq(sets.exerciseId, id)).all();
+    return { templateCount: templateRows.length, loggedSetCount: setRows.length };
+  }
+
+  async deleteExercise(id: number): Promise<{ deleted: boolean; reason?: string }> {
+    const usage = await this.getExerciseUsage(id);
+    if (usage.loggedSetCount > 0) {
+      return {
+        deleted: false,
+        reason: `This exercise has ${usage.loggedSetCount} logged set${usage.loggedSetCount === 1 ? "" : "s"} in your workout history, so it can't be deleted.`,
+      };
+    }
+    if (usage.templateCount > 0) {
+      return {
+        deleted: false,
+        reason: `This exercise is used in ${usage.templateCount} template exercise slot${usage.templateCount === 1 ? "" : "s"}. Remove it from those templates first.`,
+      };
+    }
+    db.delete(exercises).where(eq(exercises.id, id)).run();
+    return { deleted: true };
   }
 
   // ---------------- Workout templates ----------------

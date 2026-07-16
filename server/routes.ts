@@ -223,6 +223,37 @@ export async function registerRoutes(
     res.status(201).json(parseExercise(created));
   });
 
+  app.patch("/api/exercises/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    const parsed = insertExerciseSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.message });
+    }
+    const updated = await storage.updateExercise(id, parsed.data);
+    if (!updated) return res.status(404).json({ message: "Exercise not found" });
+    res.json(parseExercise(updated));
+  });
+
+  app.get("/api/exercises/:id/usage", async (req, res) => {
+    const id = Number(req.params.id);
+    const usage = await storage.getExerciseUsage(id);
+    res.json(usage);
+  });
+
+  app.delete("/api/exercises/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    try {
+      const result = await storage.deleteExercise(id);
+      if (!result.deleted) {
+        return res.status(409).json({ message: result.reason });
+      }
+      res.status(204).end();
+    } catch (err) {
+      console.error("Failed to delete exercise", id, err);
+      res.status(500).json({ message: "Couldn't delete this exercise. Try again in a moment." });
+    }
+  });
+
   app.get("/api/exercises/:id/sets", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
