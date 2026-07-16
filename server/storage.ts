@@ -35,6 +35,7 @@ import type {
   SetWeeklyRestDaysInput,
   MoveScheduleDayInput,
   SetScheduleDayInput,
+  SetCoreAddonInput,
 } from "@shared/schema";
 import {
   buildStarterTemplate,
@@ -158,7 +159,8 @@ function ensureTables() {
       workout_template_id INTEGER REFERENCES workout_templates(id),
       label TEXT,
       is_manual_override INTEGER NOT NULL DEFAULT 0,
-      is_weekly_blocked INTEGER NOT NULL DEFAULT 0
+      is_weekly_blocked INTEGER NOT NULL DEFAULT 0,
+      has_core_addon INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_days_schedule_date ON schedule_days(schedule_id, date);
@@ -207,8 +209,19 @@ function ensureTables() {
       } catch (err) {
         // Guard against a race/rerun where the column was added between the
         // PRAGMA check and this statement — don't crash server startup.
-        console.warn(`Migration skipped for users.${column}:`, (err as Error).message);
       }
+    }
+  }
+
+  // Migration: schedule_days may pre-date the has_core_addon column.
+  const scheduleDayColumns = new Set(
+    (sqlite.prepare("PRAGMA table_info(schedule_days)").all() as { name: string }[]).map((c) => c.name),
+  );
+  if (!scheduleDayColumns.has("has_core_addon")) {
+    try {
+      sqlite.exec("ALTER TABLE schedule_days ADD COLUMN has_core_addon INTEGER NOT NULL DEFAULT 0");
+    } catch (err) {
+      // Guard against a race/rerun — don't crash server startup.
     }
   }
 }
@@ -394,6 +407,7 @@ export interface IStorage {
   generateScheduleMonth(userId: number, input: GenerateScheduleInput, yearMonth: string): Promise<WorkoutScheduleWithDays>;
   continueGeneration(userId: number, yearMonth: string): Promise<void>;
   setScheduleDay(userId: number, input: SetScheduleDayInput): Promise<ScheduleDay>;
+  setCoreAddon(userId: number, input: SetCoreAddonInput): Promise<ScheduleDay>;
   moveScheduleDay(userId: number, input: MoveScheduleDayInput): Promise<ScheduleDay[]>;
   advanceRotation(userId: number, completedTemplateId: number | null, date: string): Promise<void>;
 }
@@ -747,18 +761,58 @@ export class DatabaseStorage implements IStorage {
     const cycle = splitRotationCycles[input.split];
     const isNewSplit = schedule.activeSplit !== input.split;
 
+    // On a fresh split, align cycle[0] (e.g. "Push") to the requested weekday (default Monday)
+    // by pre-rolling the cursor to the negative offset of the month's first date from that
+    // weekday. Any days strictly before the first occurrence of startDayOfWeek in the month
+    // are left as plain rest (handled naturally since continueGeneration walks date-by-date
+    // and the cursor math below makes those leading days resolve to "before cycle start").
+    let initialCursor = isNewSplit ? 0 : schedule.rotationCursor;
+    let leadInDates: string[] = [];
+    if (isNewSplit) {
+      const [monthStart] = monthBounds(yearMonth);
+      const startDow = new Date(monthStart + "T00:00:00").getDay();
+      const targetDow = input.startDayOfWeek;
+      const daysUntilTarget = (targetDow - startDow + 7) % 7;
+      if (daysUntilTarget > 0) {
+        // Leading days before the first target weekday occurrence get marked Rest below.
+        const lead = new Date(monthStart + "T00:00:00");
+        for (let i = 0; i < daysUntilTarget; i++) {
+          leadInDates.push(lead.toISOString().slice(0, 10));
+          lead.setDate(lead.getDate() + 1);
+        }
+      }
+      initialCursor = 0;
+    }
+
     schedule = db
       .update(workoutSchedules)
       .set({
         activeSplit: input.split,
         rotationCycle: JSON.stringify(cycle),
-        rotationCursor: isNewSplit ? 0 : schedule.rotationCursor,
+        rotationCursor: initialCursor,
       })
       .where(eq(workoutSchedules.id, schedule.id))
       .returning()
       .get();
 
     await this.updateUserPreferences(userId, { workoutSplit: input.split });
+
+    // Pre-seed lead-in days (before the first Monday, etc.) as manual-override Rest so
+    // continueGeneration's cursor walk starts fresh exactly on the target weekday.
+    for (const date of leadInDates) {
+      const existing = db.select().from(scheduleDays).where(and(eq(scheduleDays.scheduleId, schedule.id), eq(scheduleDays.date, date))).get();
+      if (existing) {
+        db.update(scheduleDays)
+          .set({ workoutTemplateId: null, label: "Rest", isManualOverride: true, isWeeklyBlocked: false })
+          .where(eq(scheduleDays.id, existing.id))
+          .run();
+      } else {
+        db.insert(scheduleDays)
+          .values({ scheduleId: schedule.id, date, workoutTemplateId: null, label: "Rest", isManualOverride: true })
+          .run();
+      }
+    }
+
     await this.continueGeneration(userId, yearMonth);
 
     const [startDate, endDate] = monthBounds(yearMonth);
@@ -845,6 +899,31 @@ export class DatabaseStorage implements IStorage {
     return db
       .insert(scheduleDays)
       .values({ scheduleId: schedule.id, date: input.date, ...values })
+      .returning()
+      .get();
+  }
+
+  /** Toggle the Core bonus add-on badge on a day. Purely additive — never touches the
+   *  workout/label/rotation cursor, and does not mark the day as a manual override. */
+  async setCoreAddon(userId: number, input: SetCoreAddonInput): Promise<ScheduleDay> {
+    const schedule = this.getOrCreateScheduleRow(userId);
+    const existing = db
+      .select()
+      .from(scheduleDays)
+      .where(and(eq(scheduleDays.scheduleId, schedule.id), eq(scheduleDays.date, input.date)))
+      .get();
+
+    if (existing) {
+      return db
+        .update(scheduleDays)
+        .set({ hasCoreAddon: input.hasCoreAddon })
+        .where(eq(scheduleDays.id, existing.id))
+        .returning()
+        .get();
+    }
+    return db
+      .insert(scheduleDays)
+      .values({ scheduleId: schedule.id, date: input.date, hasCoreAddon: input.hasCoreAddon })
       .returning()
       .get();
   }

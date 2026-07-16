@@ -16,6 +16,7 @@ import {
   setWeeklyRestDaysSchema,
   moveScheduleDaySchema,
   setScheduleDaySchema,
+  setCoreAddonSchema,
   muscleGroupNames,
   muscleGroupDisplayNames,
   type MuscleGroupName,
@@ -727,6 +728,15 @@ export async function registerRoutes(
     const parsed = moveScheduleDaySchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
     const result = await storage.moveScheduleDay(userId, parsed.data);
+    res.json(result);
+  });
+
+  app.post("/api/schedule/core-addon", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = setCoreAddonSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+    const result = await storage.setCoreAddon(userId, parsed.data);
     res.json(result);
   });
 

@@ -11,7 +11,7 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { CalendarDays, ChevronLeft, ChevronRight, Moon, Sparkles } from "lucide-react";
+import { CalendarDays, ChevronLeft, ChevronRight, Moon, Sparkles, Dumbbell, X } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -54,6 +54,7 @@ interface ScheduleDay {
   label: string | null;
   isManualOverride: boolean;
   isWeeklyBlocked: boolean;
+  hasCoreAddon: boolean;
 }
 
 interface ScheduleResponse {
@@ -101,16 +102,22 @@ function monthKey(year: number, month0: number): string {
 }
 
 function DayBubble({ day, isOverlay = false }: { day: ScheduleDay; isOverlay?: boolean }) {
-  const isRest = day.workoutTemplateId == null;
-  const text = isRest ? "Rest" : day.label ?? "Workout";
+  // Synthetic drag-preview bubble for the Core palette item (id === -1, label "Core").
+  const isCorePreview = day.id === -1 && day.label === "Core";
+  const isRest = !isCorePreview && day.workoutTemplateId == null;
+  const text = isCorePreview ? "Core" : isRest ? "Rest" : day.label ?? "Workout";
   return (
     <div
-      className={`flex items-center justify-center rounded-full border px-2 py-1 text-[11px] font-medium truncate select-none ${colorForLabel(
-        isRest ? "Rest" : day.label,
-      )} ${isOverlay ? "shadow-lg" : ""}`}
+      className={`flex items-center justify-center rounded-full border px-2 py-1 text-[11px] font-medium truncate select-none ${
+        isCorePreview ? "bg-chart-5/15 border-chart-5/40 text-chart-5" : colorForLabel(isRest ? "Rest" : day.label)
+      } ${isOverlay ? "shadow-lg" : ""}`}
       data-testid={`bubble-day-${day.date}`}
     >
-      {isRest ? <Moon className="h-3 w-3 mr-1 shrink-0" /> : null}
+      {isCorePreview ? (
+        <Dumbbell className="h-3 w-3 mr-1 shrink-0" />
+      ) : isRest ? (
+        <Moon className="h-3 w-3 mr-1 shrink-0" />
+      ) : null}
       <span className="truncate">{text}</span>
     </div>
   );
@@ -155,16 +162,39 @@ function RestPaletteBubble() {
   );
 }
 
+function CorePaletteBubble() {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: "palette:core",
+    data: { type: "palette-core" },
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      {...listeners}
+      {...attributes}
+      className={`cursor-grab touch-none ${isDragging ? "opacity-30" : ""}`}
+      data-testid="draggable-palette-core"
+    >
+      <div className="flex items-center gap-1.5 rounded-full border border-chart-5/40 bg-chart-5/10 px-3 py-1.5 text-xs font-medium text-chart-5">
+        <Dumbbell className="h-3.5 w-3.5" />
+        Drag Core onto any day (add-on, doesn't replace it)
+      </div>
+    </div>
+  );
+}
+
 function CalendarCell({
   date,
   day,
   isToday,
   isCurrentMonth,
+  onRemoveCoreAddon,
 }: {
   date: string;
   day: ScheduleDay | undefined;
   isToday: boolean;
   isCurrentMonth: boolean;
+  onRemoveCoreAddon: (date: string) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `cell:${date}`, data: { type: "cell", date } });
   const dayNum = Number(date.slice(8, 10));
@@ -184,6 +214,19 @@ function CalendarCell({
         {isToday && <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-label="Today" />}
       </div>
       {day ? <DraggableBubble day={day} /> : <div className="h-[26px]" />}
+      {day?.hasCoreAddon && (
+        <button
+          type="button"
+          onClick={() => onRemoveCoreAddon(date)}
+          className="flex items-center justify-center gap-1 rounded-full border border-chart-5/40 bg-chart-5/10 px-1.5 py-0.5 text-[10px] font-medium text-chart-5 group"
+          title="Remove Core add-on"
+          data-testid={`badge-core-${date}`}
+        >
+          <Dumbbell className="h-2.5 w-2.5" />
+          Core
+          <X className="h-2.5 w-2.5 opacity-0 group-hover:opacity-100" />
+        </button>
+      )}
     </div>
   );
 }
@@ -259,6 +302,15 @@ export default function SchedulePage() {
     onError: () => toast({ title: "Couldn't update day", variant: "destructive" }),
   });
 
+  const coreAddonMutation = useMutation({
+    mutationFn: async (input: { date: string; hasCoreAddon: boolean }) => {
+      const res = await apiRequest("POST", "/api/schedule/core-addon", input);
+      return res.json();
+    },
+    onSuccess: () => invalidate(),
+    onError: () => toast({ title: "Couldn't update Core add-on", variant: "destructive" }),
+  });
+
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
   const days = data?.days ?? [];
@@ -314,7 +366,10 @@ export default function SchedulePage() {
   const handleDragStart = (event: DragStartEvent) => {
     const data = event.active.data.current;
     if (data?.type === "day") setDragDay(data.day as ScheduleDay);
-    else if (data?.type === "palette-rest") setDragDay({ id: -1, scheduleId: -1, date: "", workoutTemplateId: null, label: "Rest", isManualOverride: false, isWeeklyBlocked: false });
+    else if (data?.type === "palette-rest")
+      setDragDay({ id: -1, scheduleId: -1, date: "", workoutTemplateId: null, label: "Rest", isManualOverride: false, isWeeklyBlocked: false, hasCoreAddon: false });
+    else if (data?.type === "palette-core")
+      setDragDay({ id: -1, scheduleId: -1, date: "", workoutTemplateId: null, label: "Core", isManualOverride: false, isWeeklyBlocked: false, hasCoreAddon: true });
   };
 
   const handleDragEnd = (event: DragEndEvent) => {
@@ -337,11 +392,21 @@ export default function SchedulePage() {
       return;
     }
 
+    if (activeData?.type === "palette-core") {
+      // Purely additive — never touches whatever else is already on that day.
+      coreAddonMutation.mutate({ date: toDate, hasCoreAddon: true });
+      return;
+    }
+
     if (activeData?.type === "day") {
       const fromDate = (activeData.day as ScheduleDay).date;
       if (fromDate === toDate) return;
       moveMutation.mutate({ fromDate, toDate, mode: "swap" });
     }
+  };
+
+  const removeCoreAddon = (date: string) => {
+    coreAddonMutation.mutate({ date, hasCoreAddon: false });
   };
 
   const resolveRestDrop = (mode: "shift" | "skip") => {
@@ -448,7 +513,10 @@ export default function SchedulePage() {
             </Button>
           </CardHeader>
           <CardContent className="space-y-3">
-            <RestPaletteBubble />
+            <div className="flex flex-col sm:flex-row gap-2">
+              <RestPaletteBubble />
+              <CorePaletteBubble />
+            </div>
             <div className="grid grid-cols-7 gap-1 text-center">
               {DAY_NAMES.map((name) => (
                 <div key={name} className="text-[10px] font-semibold text-muted-foreground py-1">
@@ -462,6 +530,7 @@ export default function SchedulePage() {
                   day={daysByDate.get(cell.date)}
                   isToday={cell.date === todayIso()}
                   isCurrentMonth={cell.isCurrentMonth}
+                  onRemoveCoreAddon={removeCoreAddon}
                 />
               ))}
             </div>

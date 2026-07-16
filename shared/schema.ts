@@ -332,6 +332,9 @@ export const scheduleDays = sqliteTable("schedule_days", {
   // (as opposed to a manually-dragged rest bubble). Kept separate so the user can still
   // drag a workout on top of a weekly-blocked day.
   isWeeklyBlocked: integer("is_weekly_blocked", { mode: "boolean" }).notNull().default(false),
+  // Manual bonus add-on that sits alongside whatever else is on this day (Push/Pull/Legs/Rest).
+  // Does not consume a rotation slot and is never touched by auto-generation.
+  hasCoreAddon: integer("has_core_addon", { mode: "boolean" }).notNull().default(false),
 });
 
 export const insertScheduleDaySchema = createInsertSchema(scheduleDays).omit({ id: true });
@@ -348,6 +351,9 @@ export const splitRotationCycles: Record<Exclude<WorkoutSplitId, "custom">, stri
 
 export const generateScheduleSchema = z.object({
   split: z.enum(workoutSplitIds).exclude(["custom"]), // ppl | upper_lower | full_body | bro_split
+  // Day of week (0=Sun..6=Sat) that the first cycle entry (e.g. "Push") should land on
+  // for a fresh generation. Defaults to Monday. Ignored when continuing an existing split.
+  startDayOfWeek: z.number().int().min(0).max(6).default(1),
 });
 export type GenerateScheduleInput = z.infer<typeof generateScheduleSchema>;
 
@@ -374,6 +380,14 @@ export const setScheduleDaySchema = z.object({
   label: z.string().nullable().optional(),
 });
 export type SetScheduleDayInput = z.infer<typeof setScheduleDaySchema>;
+
+// Toggle the Core bonus add-on badge on a single day. Purely additive — never touches
+// workoutTemplateId/label or the rotation cursor.
+export const setCoreAddonSchema = z.object({
+  date: z.string(), // YYYY-MM-DD
+  hasCoreAddon: z.boolean(),
+});
+export type SetCoreAddonInput = z.infer<typeof setCoreAddonSchema>;
 
 // ---------------------------------------------------------------------------
 // Bodyweight Logs
