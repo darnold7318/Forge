@@ -46,7 +46,7 @@ import {
 } from "@shared/coaching";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, and, gte } from "drizzle-orm";
 import { MUSCLE_GROUPS, EXERCISES, WORKOUT_TEMPLATES } from "./seed-data";
 
 const sqlite = new Database("data.db");
@@ -160,7 +160,8 @@ function ensureTables() {
       label TEXT,
       is_manual_override INTEGER NOT NULL DEFAULT 0,
       is_weekly_blocked INTEGER NOT NULL DEFAULT 0,
-      has_core_addon INTEGER NOT NULL DEFAULT 0
+      has_core_addon INTEGER NOT NULL DEFAULT 0,
+      is_user_placed INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_days_schedule_date ON schedule_days(schedule_id, date);
@@ -213,13 +214,26 @@ function ensureTables() {
     }
   }
 
-  // Migration: schedule_days may pre-date the has_core_addon column.
+  // Migration: schedule_days may pre-date the has_core_addon / is_user_placed columns.
   const scheduleDayColumns = new Set(
     (sqlite.prepare("PRAGMA table_info(schedule_days)").all() as { name: string }[]).map((c) => c.name),
   );
   if (!scheduleDayColumns.has("has_core_addon")) {
     try {
       sqlite.exec("ALTER TABLE schedule_days ADD COLUMN has_core_addon INTEGER NOT NULL DEFAULT 0");
+    } catch (err) {
+      // Guard against a race/rerun — don't crash server startup.
+    }
+  }
+  if (!scheduleDayColumns.has("is_user_placed")) {
+    try {
+      sqlite.exec("ALTER TABLE schedule_days ADD COLUMN is_user_placed INTEGER NOT NULL DEFAULT 0");
+      // Leave pre-existing rows at is_user_placed = 0 (the column default). There's no way to
+      // tell, retroactively, which historical is_manual_override rows were real drags versus
+      // auto-generated/lead-in days — and defaulting to "protected" would perpetuate the exact
+      // bug this column exists to fix (switching splits never repainting old auto-filled days).
+      // Defaulting to "not protected" means the very next split change will correctly repaint
+      // everything; going forward, only genuine drags/swaps set is_user_placed = 1.
     } catch (err) {
       // Guard against a race/rerun — don't crash server startup.
     }
@@ -760,15 +774,18 @@ export class DatabaseStorage implements IStorage {
     let schedule = this.getOrCreateScheduleRow(userId);
     const cycle = splitRotationCycles[input.split];
     const isNewSplit = schedule.activeSplit !== input.split;
+    // Only align to the target weekday (Monday-start) the very first time this user ever
+    // generates a schedule. Once a schedule has been generated before, a later split change
+    // is a mid-stream swap — there's already a calendar with real dates in play, so we must
+    // NOT re-seed lead-in Rest days over whatever already exists there.
+    const isFirstEverGeneration = schedule.lastGeneratedMonth == null;
 
-    // On a fresh split, align cycle[0] (e.g. "Push") to the requested weekday (default Monday)
-    // by pre-rolling the cursor to the negative offset of the month's first date from that
-    // weekday. Any days strictly before the first occurrence of startDayOfWeek in the month
-    // are left as plain rest (handled naturally since continueGeneration walks date-by-date
-    // and the cursor math below makes those leading days resolve to "before cycle start").
+    // On the very first generation, align cycle[0] (e.g. "Push") to the requested weekday
+    // (default Monday) by pre-rolling the cursor and seeding lead-in Rest days before the
+    // first occurrence of that weekday in the month.
     let initialCursor = isNewSplit ? 0 : schedule.rotationCursor;
     let leadInDates: string[] = [];
-    if (isNewSplit) {
+    if (isFirstEverGeneration) {
       const [monthStart] = monthBounds(yearMonth);
       const startDow = new Date(monthStart + "T00:00:00").getDay();
       const targetDow = input.startDayOfWeek;
@@ -784,6 +801,25 @@ export class DatabaseStorage implements IStorage {
       initialCursor = 0;
     }
 
+    // Switching to a genuinely different split invalidates every day that the *previous*
+    // split's rotation auto-painted — those are stale labels from a cycle that no longer
+    // applies. Clear isManualOverride on rows that were only ever auto-generated (i.e. not
+    // a real user drag) for this month and all future months so continueGeneration actually
+    // repaints them. Rows the user deliberately dragged/swapped (isUserPlaced) are preserved.
+    if (isNewSplit) {
+      const [monthStart] = monthBounds(yearMonth);
+      db.update(scheduleDays)
+        .set({ isManualOverride: false, isWeeklyBlocked: false })
+        .where(
+          and(
+            eq(scheduleDays.scheduleId, schedule.id),
+            eq(scheduleDays.isUserPlaced, false),
+            gte(scheduleDays.date, monthStart),
+          ),
+        )
+        .run();
+    }
+
     schedule = db
       .update(workoutSchedules)
       .set({
@@ -797,8 +833,9 @@ export class DatabaseStorage implements IStorage {
 
     await this.updateUserPreferences(userId, { workoutSplit: input.split });
 
-    // Pre-seed lead-in days (before the first Monday, etc.) as manual-override Rest so
-    // continueGeneration's cursor walk starts fresh exactly on the target weekday.
+    // Pre-seed lead-in days (before the first Monday, etc.) as Rest. These are marked
+    // isManualOverride so continueGeneration's cursor walk starts fresh exactly on the
+    // target weekday, but NOT isUserPlaced — so a future split change can still clear them.
     for (const date of leadInDates) {
       const existing = db.select().from(scheduleDays).where(and(eq(scheduleDays.scheduleId, schedule.id), eq(scheduleDays.date, date))).get();
       if (existing) {
@@ -890,6 +927,7 @@ export class DatabaseStorage implements IStorage {
       workoutTemplateId: input.workoutTemplateId,
       label: input.label ?? null,
       isManualOverride: true,
+      isUserPlaced: true,
       isWeeklyBlocked: false,
     };
 
@@ -943,7 +981,7 @@ export class DatabaseStorage implements IStorage {
 
     const upsert = (date: string, values: { workoutTemplateId: number | null; label: string | null }) => {
       const existing = getDay(date);
-      const payload = { ...values, isManualOverride: true, isWeeklyBlocked: false };
+      const payload = { ...values, isManualOverride: true, isUserPlaced: true, isWeeklyBlocked: false };
       if (existing) {
         return db.update(scheduleDays).set(payload).where(eq(scheduleDays.id, existing.id)).returning().get();
       }

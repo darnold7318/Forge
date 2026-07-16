@@ -326,8 +326,13 @@ export const scheduleDays = sqliteTable("schedule_days", {
   date: text("date").notNull(), // YYYY-MM-DD
   workoutTemplateId: integer("workout_template_id").references(() => workoutTemplates.id), // null = rest day
   label: text("label"), // e.g. "Push", "Pull", "Legs" — kept even if template later deleted
-  // true if the user manually placed/moved this day (drag-and-drop); auto-generation skips these.
+  // true if this day should be skipped by the rotation auto-fill walk (continueGeneration).
+  // Set both for genuine user drags AND for system-seeded lead-in Rest days (Monday-start).
   isManualOverride: integer("is_manual_override", { mode: "boolean" }).notNull().default(false),
+  // true ONLY when the user themselves dragged/swapped/set this day. Distinct from
+  // isManualOverride so that switching splits can safely clear system-seeded days
+  // (like Monday-start lead-in Rest) while still preserving the user's own edits.
+  isUserPlaced: integer("is_user_placed", { mode: "boolean" }).notNull().default(false),
   // true if this day is blank/rest solely because of a weekly-recurring rest rule
   // (as opposed to a manually-dragged rest bubble). Kept separate so the user can still
   // drag a workout on top of a weekly-blocked day.
