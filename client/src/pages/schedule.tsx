@@ -33,7 +33,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useActiveUser } from "@/lib/user-context";
 import { useToast } from "@/hooks/use-toast";
@@ -53,6 +53,11 @@ interface ScheduleDay {
   isManualOverride: boolean;
   isWeeklyBlocked: boolean;
   hasCoreAddon: boolean;
+}
+
+interface WorkoutTemplateLite {
+  id: number;
+  name: string;
 }
 
 interface ScheduleResponse {
@@ -168,17 +173,28 @@ function DayBubble({
   );
 }
 
-function DraggableBubble({ day, onClear }: { day: ScheduleDay; onClear?: (date: string) => void }) {
+function DraggableBubble({
+  day,
+  onClear,
+  onStartWorkout,
+}: {
+  day: ScheduleDay;
+  onClear?: (date: string) => void;
+  onStartWorkout?: (workoutTemplateId: number | null) => void;
+}) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `day:${day.date}`,
     data: { type: "day", day },
   });
+  const canStart = Boolean(onStartWorkout) && day.workoutTemplateId != null;
   return (
     <div
       ref={setNodeRef}
       {...listeners}
       {...attributes}
-      className={`cursor-grab touch-none ${isDragging ? "opacity-30" : ""}`}
+      onDoubleClick={canStart ? () => onStartWorkout!(day.workoutTemplateId) : undefined}
+      className={`cursor-grab touch-none ${isDragging ? "opacity-30" : ""} ${canStart ? "cursor-pointer" : ""}`}
+      title={canStart ? "Double-click to start this workout" : undefined}
       data-testid={`draggable-day-${day.date}`}
     >
       <DayBubble day={day} onClear={onClear} />
@@ -258,6 +274,7 @@ function CalendarCell({
   isCurrentMonth,
   onRemoveCoreAddon,
   onClearDay,
+  onStartWorkout,
 }: {
   date: string;
   day: ScheduleDay | undefined;
@@ -265,6 +282,7 @@ function CalendarCell({
   isCurrentMonth: boolean;
   onRemoveCoreAddon: (date: string) => void;
   onClearDay: (date: string) => void;
+  onStartWorkout: (workoutTemplateId: number | null) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `cell:${date}`, data: { type: "cell", date } });
   const dayNum = Number(date.slice(8, 10));
@@ -283,7 +301,11 @@ function CalendarCell({
         </span>
         {isToday && <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-label="Today" />}
       </div>
-      {day ? <DraggableBubble day={day} onClear={onClearDay} /> : <div className="h-[26px]" />}
+      {day ? (
+        <DraggableBubble day={day} onClear={onClearDay} onStartWorkout={onStartWorkout} />
+      ) : (
+        <div className="h-[26px]" />
+      )}
       {day?.hasCoreAddon && (
         <button
           type="button"
@@ -304,6 +326,7 @@ function CalendarCell({
 export default function SchedulePage() {
   const { activeUserId } = useActiveUser();
   const { toast } = useToast();
+  const [, setLocation] = useLocation();
   const now = new Date();
   const [viewYear, setViewYear] = useState(now.getFullYear());
   const [viewMonth, setViewMonth] = useState(now.getMonth()); // 0-11
@@ -322,6 +345,20 @@ export default function SchedulePage() {
     },
     enabled: activeUserId != null,
   });
+
+  const { data: templates } = useQuery<WorkoutTemplateLite[]>({
+    queryKey: ["/api/workout-templates", activeUserId],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/workout-templates");
+      return res.json();
+    },
+    enabled: activeUserId != null,
+  });
+
+  const startWorkout = (workoutTemplateId: number | null) => {
+    if (workoutTemplateId == null) return;
+    setLocation(`/log?template=${workoutTemplateId}`);
+  };
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/schedule"] });
@@ -394,35 +431,13 @@ export default function SchedulePage() {
   }, [data?.weeklyRestDays]);
   const hasActiveSplit = data?.activeSplit != null;
 
-  // Distinct day-type labels for the active split, each paired with a template id to drag onto
-  // any day directly. Rotation splits (ppl/upper_lower/full_body/bro_split) source their labels
-  // from rotationCycle; "custom" sources them from its own fixed Mon-Sun template. The template
-  // id for each label is looked up from whatever calendar day already has it, so dragging the
-  // bubble reuses the exact same workout template the rotation/template already points to.
-  const paletteLabels = useMemo(() => {
-    if (!data) return [];
-    let labels: string[] = [];
-    if (data.activeSplit === "custom") {
-      try {
-        const slots: ({ label: string | null; workoutTemplateId: number | null } | null)[] = JSON.parse(
-          data.customWeeklyTemplate ?? "[]",
-        );
-        labels = Array.from(new Set(slots.filter((s) => s?.label).map((s) => s!.label as string)));
-      } catch {
-        labels = [];
-      }
-    } else {
-      try {
-        labels = Array.from(new Set(JSON.parse(data.rotationCycle ?? "[]") as string[]));
-      } catch {
-        labels = [];
-      }
-    }
-    return labels.map((label) => {
-      const match = days.find((d) => d.label === label && d.workoutTemplateId != null);
-      return { label, workoutTemplateId: match?.workoutTemplateId ?? null };
-    });
-  }, [data, days]);
+  // Palette bubbles are pulled straight from the user's saved Templates list — one bubble per
+  // template, by name — so the palette always matches whatever exists on the Templates page,
+  // regardless of which split is active or what's already painted on the calendar.
+  const paletteTemplates = useMemo(
+    () => (templates ?? []).map((t) => ({ label: t.name, workoutTemplateId: t.id })),
+    [templates],
+  );
 
   // Build the calendar grid: leading/trailing days from adjacent months to fill full weeks.
   const gridCells = useMemo(() => {
@@ -652,8 +667,8 @@ export default function SchedulePage() {
             <div className="flex flex-wrap gap-2">
               <RestPaletteBubble />
               <CorePaletteBubble />
-              {paletteLabels.map(({ label, workoutTemplateId }) => (
-                <LabelPaletteBubble key={label} label={label} workoutTemplateId={workoutTemplateId} />
+              {paletteTemplates.map(({ label, workoutTemplateId }) => (
+                <LabelPaletteBubble key={workoutTemplateId} label={label} workoutTemplateId={workoutTemplateId} />
               ))}
             </div>
             <div className="grid grid-cols-7 gap-1 text-center">
@@ -671,6 +686,7 @@ export default function SchedulePage() {
                   isCurrentMonth={cell.isCurrentMonth}
                   onRemoveCoreAddon={removeCoreAddon}
                   onClearDay={clearDay}
+                  onStartWorkout={startWorkout}
                 />
               ))}
             </div>

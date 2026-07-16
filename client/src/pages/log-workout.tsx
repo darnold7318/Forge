@@ -471,12 +471,17 @@ export default function LogWorkout() {
     return m;
   }, [exercises]);
 
-  // Auto-start from template if navigated with ?template=<id>
+  // Auto-start from template if navigated with ?template=<id>. Under useHashLocation, wouter's
+  // navigate() sets the query on the real URL's search string (not embedded in the hash), so
+  // check window.location.search first — falling back to a query string embedded directly in
+  // the hash (e.g. from a manually-set `#/log?template=1` hash) for robustness.
   useEffect(() => {
+    if (!templates || exercisesLoading) return;
     const hash = window.location.hash;
     const qIndex = hash.indexOf("?");
-    if (qIndex === -1 || !templates || exercisesLoading) return;
-    const params = new URLSearchParams(hash.slice(qIndex + 1));
+    const rawQuery = window.location.search || (qIndex !== -1 ? hash.slice(qIndex) : "");
+    if (!rawQuery) return;
+    const params = new URLSearchParams(rawQuery);
     const templateId = params.get("template");
     if (templateId && activeTemplateId === null) {
       const t = templates.find((tpl) => tpl.id === Number(templateId));
