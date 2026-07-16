@@ -252,6 +252,10 @@ function DeleteExerciseDialog({
       return res.json();
     },
     enabled: exercise != null,
+    // Usage can change from other pages (e.g. removing this exercise from a template),
+    // so never trust a cached result here — always check fresh when the dialog opens.
+    staleTime: 0,
+    gcTime: 0,
   });
 
   const deleteMutation = useMutation({
