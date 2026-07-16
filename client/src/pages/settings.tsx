@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2 } from "lucide-react";
+import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2, Trash2 } from "lucide-react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -248,9 +248,10 @@ async function downloadResponse(res: Response, fallbackFilename: string) {
 }
 
 function BackupExportCard() {
-  const { activeUser, users } = useActiveUser();
+  const { activeUser, activeUserId, users, setActiveUserId } = useActiveUser();
   const { toast } = useToast();
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: number; name: string } | null>(null);
 
   const downloadProfile = async (userId: number, name: string) => {
     setDownloadingKey(`user-${userId}`);
@@ -278,6 +279,29 @@ function BackupExportCard() {
     }
   };
 
+  const deleteMutation = useMutation({
+    mutationFn: async (userId: number) => {
+      const res = await apiRequest("DELETE", `/api/users/${userId}`);
+      return res.json();
+    },
+    onSuccess: async (_data, userId) => {
+      const wasActive = activeUserId === userId;
+      await queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      if (wasActive) {
+        const remaining = (users ?? []).filter((u) => u.id !== userId);
+        if (remaining[0]) setActiveUserId(remaining[0].id);
+      }
+      toast({ title: `${deleteTarget?.name ?? "Profile"} deleted` });
+      setDeleteTarget(null);
+    },
+    onError: (err: Error) => {
+      toast({ title: err.message.includes("only remaining") ? "Can't delete the only profile" : "Couldn't delete profile", variant: "destructive" });
+      setDeleteTarget(null);
+    },
+  });
+
+  const canDelete = (users ?? []).length > 1;
+
   return (
     <Card data-testid="card-backup-export">
       <CardHeader>
@@ -295,7 +319,7 @@ function BackupExportCard() {
           {(users ?? []).map((u) => (
             <div
               key={u.id}
-              className="flex items-center justify-between gap-3 rounded-md border p-2.5"
+              className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-md border p-2.5"
               data-testid={`row-backup-profile-${u.id}`}
             >
               <div className="text-sm font-medium">
@@ -304,21 +328,35 @@ function BackupExportCard() {
                   <span className="ml-2 text-xs text-muted-foreground">(current)</span>
                 )}
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-1.5"
-                disabled={downloadingKey === `user-${u.id}`}
-                onClick={() => downloadProfile(u.id, u.name)}
-                data-testid={`button-backup-profile-${u.id}`}
-              >
-                {downloadingKey === `user-${u.id}` ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Download className="h-3.5 w-3.5" />
-                )}
-                Download backup
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5"
+                  disabled={downloadingKey === `user-${u.id}`}
+                  onClick={() => downloadProfile(u.id, u.name)}
+                  data-testid={`button-backup-profile-${u.id}`}
+                >
+                  {downloadingKey === `user-${u.id}` ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Download className="h-3.5 w-3.5" />
+                  )}
+                  Download backup
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5 text-destructive hover:text-destructive"
+                  disabled={!canDelete}
+                  title={canDelete ? undefined : "Can't delete the only remaining profile"}
+                  onClick={() => setDeleteTarget({ id: u.id, name: u.name })}
+                  data-testid={`button-delete-profile-${u.id}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Delete
+                </Button>
+              </div>
             </div>
           ))}
         </div>
@@ -340,6 +378,29 @@ function BackupExportCard() {
           history, plus the shared exercise library.
         </p>
       </CardContent>
+
+      <AlertDialog open={deleteTarget != null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {deleteTarget?.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently deletes this profile and everything tied to it — workout templates, logged workouts
+              and sets, schedule, and body weight history. This can't be undone. Consider downloading a backup first.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="button-cancel-delete-profile">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={deleteMutation.isPending}
+              onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
+              data-testid="button-confirm-delete-profile"
+            >
+              {deleteMutation.isPending ? "Deleting..." : "Delete Profile"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   );
 }

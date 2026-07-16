@@ -817,6 +817,50 @@ export async function registerRoutes(
   });
 
   // -------------------------------------------------------------------------
+  // Delete profile — permanently removes a user and everything they own
+  // (templates, workouts, sets, schedule, bodyweight logs). Irreversible;
+  // the frontend is expected to confirm with the user and offer a backup
+  // download first. Refuses to delete the last remaining profile.
+  // -------------------------------------------------------------------------
+  app.delete("/api/users/:userId", async (req, res) => {
+    const userId = Number(req.params.userId);
+    if (Number.isNaN(userId)) {
+      return res.status(400).json({ message: "Invalid user id" });
+    }
+    const user = db.select().from(usersTable).where(eq(usersTable.id, userId)).get();
+    if (!user) {
+      return res.status(404).json({ message: "Profile not found" });
+    }
+    const totalUsers = db.select().from(usersTable).all().length;
+    if (totalUsers <= 1) {
+      return res.status(400).json({ message: "Can't delete the only remaining profile" });
+    }
+
+    const templates = db.select().from(workoutTemplatesTable).where(eq(workoutTemplatesTable.userId, userId)).all();
+    const templateIds = templates.map((t) => t.id);
+    const workoutsRows = db.select().from(workoutsTable).where(eq(workoutsTable.userId, userId)).all();
+    const workoutIds = workoutsRows.map((w) => w.id);
+    const schedule = db.select().from(workoutSchedulesTable).where(eq(workoutSchedulesTable.userId, userId)).get();
+
+    if (workoutIds.length) {
+      db.delete(setsTable).where(inArray(setsTable.workoutId, workoutIds)).run();
+    }
+    db.delete(workoutsTable).where(eq(workoutsTable.userId, userId)).run();
+    if (templateIds.length) {
+      db.delete(workoutTemplateExercisesTable).where(inArray(workoutTemplateExercisesTable.workoutTemplateId, templateIds)).run();
+    }
+    db.delete(workoutTemplatesTable).where(eq(workoutTemplatesTable.userId, userId)).run();
+    if (schedule) {
+      db.delete(scheduleDaysTable).where(eq(scheduleDaysTable.scheduleId, schedule.id)).run();
+      db.delete(workoutSchedulesTable).where(eq(workoutSchedulesTable.id, schedule.id)).run();
+    }
+    db.delete(bodyweightLogsTable).where(eq(bodyweightLogsTable.userId, userId)).run();
+    db.delete(usersTable).where(eq(usersTable.id, userId)).run();
+
+    res.json({ success: true });
+  });
+
+  // -------------------------------------------------------------------------
   // Data export / backup — downloadable JSON snapshots for a single profile
   // or the entire database. Used by the Settings page's Backup & Export card.
   // -------------------------------------------------------------------------
