@@ -11,6 +11,10 @@ import {
   muscleGroupNames,
   muscleGroupDisplayNames,
   type MuscleGroupName,
+  type WorkoutSplitId,
+  type ScheduleModeId,
+  type ExerciseRole,
+  type FailureTarget,
 } from "./schema";
 
 const fmt1 = (n: number) => {
@@ -915,6 +919,8 @@ export interface DashboardSnapshot {
   completedWorkouts: number;
   suggestions: DashboardExerciseSuggestion[];
   muscleFatigueMap: MuscleFatigueMapEntry[];
+  isRestDay: boolean;
+  scheduleSource: "schedule" | "fallback";
 }
 
 function resolveOverallRecovery(states: MuscleRecoveryState[]): number {
@@ -996,6 +1002,18 @@ function estimateDurationMinutes(exercises: DashboardTemplateInput["exercises"])
   return Math.max(20, Math.round((workSeconds + restSeconds) / 60));
 }
 
+export interface ScheduleSlotLookupInput {
+  dayOfWeek: number | null;
+  position: number;
+  workoutTemplateId: number | null;
+}
+
+export interface DashboardScheduleInput {
+  mode: ScheduleModeId;
+  slots: ScheduleSlotLookupInput[];
+  rotationPosition: number;
+}
+
 export interface GetDashboardSnapshotArgs {
   templates: DashboardTemplateInput[];
   history: HistorySessionInput[]; // most-recent-first, up to 50
@@ -1003,6 +1021,36 @@ export interface GetDashboardSnapshotArgs {
   exercisePrimaryMuscleLookup: Map<number, MuscleGroupName>;
   muscleGroupLookup: MuscleGroupLookup;
   now?: Date;
+  schedule?: DashboardScheduleInput | null;
+}
+
+/**
+ * Resolve which slot (if any) represents "today" per the schedule's mode.
+ * Fixed mode: match on calendar weekday. Rotating mode: match on rotationPosition
+ * (mod slot count so a stale/out-of-range position never crashes the lookup).
+ */
+function resolveScheduledSlot(
+  schedule: DashboardScheduleInput | null | undefined,
+  now: Date,
+): { matched: true; workoutTemplateId: number | null } | { matched: false } {
+  if (!schedule || schedule.slots.length === 0) return { matched: false };
+  const hasAnyTemplate = schedule.slots.some((s) => s.workoutTemplateId != null);
+  if (!hasAnyTemplate) return { matched: false };
+
+  if (schedule.mode === "fixed") {
+    const todayDow = now.getDay();
+    const slot = schedule.slots.find((s) => s.dayOfWeek === todayDow);
+    if (!slot) return { matched: false };
+    return { matched: true, workoutTemplateId: slot.workoutTemplateId };
+  }
+
+  // rotating
+  const count = schedule.slots.length;
+  const idx = ((schedule.rotationPosition % count) + count) % count;
+  const ordered = [...schedule.slots].sort((a, b) => a.position - b.position);
+  const slot = ordered[idx] ?? ordered.find((s) => s.position === schedule.rotationPosition);
+  if (!slot) return { matched: false };
+  return { matched: true, workoutTemplateId: slot.workoutTemplateId };
 }
 
 export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardSnapshot {
@@ -1021,12 +1069,51 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
 
   const lastSession = history[0] ?? null;
 
-  const selectedTemplate =
-    templates.length === 0
-      ? null
-      : (lastSession?.workoutTemplateId != null &&
-          templates.find((t) => t.id === lastSession.workoutTemplateId)) ||
-        templates[0];
+  // Consult the schedule first (if one exists with at least one non-null slot).
+  const scheduleResolution = resolveScheduledSlot(args.schedule, now);
+  const scheduleSource: "schedule" | "fallback" = scheduleResolution.matched ? "schedule" : "fallback";
+  const isRestDay = scheduleResolution.matched && scheduleResolution.workoutTemplateId == null;
+
+  let selectedTemplate: DashboardTemplateInput | null = null;
+  if (scheduleResolution.matched && scheduleResolution.workoutTemplateId != null) {
+    selectedTemplate = templates.find((t) => t.id === scheduleResolution.workoutTemplateId) ?? null;
+  }
+  if (!scheduleResolution.matched) {
+    // Fallback: exact previous behavior (last-used template, else first template).
+    selectedTemplate =
+      templates.length === 0
+        ? null
+        : (lastSession?.workoutTemplateId != null &&
+            templates.find((t) => t.id === lastSession.workoutTemplateId)) ||
+          templates[0];
+  }
+
+  if (isRestDay) {
+    return {
+      todaysWorkoutName: "Rest Day",
+      workoutStatus: "Rest Day",
+      lastWorkoutText: lastSession
+        ? `Last workout: ${lastSession.workoutName} on ${lastSession.startedAt.toLocaleString()}`
+        : "No workouts saved yet",
+      recoveryText: resolveRecoveryText(
+        lastSession
+          ? Math.max(0, Math.floor((dateOnly(now).getTime() - dateOnly(lastSession.startedAt).getTime()) / (24 * 60 * 60 * 1000)))
+          : null,
+        resolveOverallRecovery(recoveryStates),
+      ),
+      fatigueStatus: fatigue.status,
+      fatigueText: fatigue.summary,
+      fatigueRiskScore: fatigue.riskScore,
+      muscleFatigueMap,
+      recentAchievementText: resolveRecentAchievement(history),
+      estimatedDurationMinutes: 0,
+      exerciseCount: 0,
+      completedWorkouts: history.length,
+      suggestions: [],
+      isRestDay: true,
+      scheduleSource: "schedule",
+    };
+  }
 
   if (!selectedTemplate) {
     return {
@@ -1043,6 +1130,8 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
       exerciseCount: 0,
       completedWorkouts: history.length,
       suggestions: [],
+      isRestDay: false,
+      scheduleSource,
     };
   }
 
@@ -1068,6 +1157,8 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
     exerciseCount: templateExercises.length,
     completedWorkouts: history.length,
     suggestions: [],
+    isRestDay: false,
+    scheduleSource,
   };
 
   for (const prescription of templateExercises.slice(0, 6)) {
@@ -1147,4 +1238,245 @@ export function computeWeeklyVolumeByMuscleGroup(taggedSets: SetMuscleTag[]): Ma
     }
   }
   return volume;
+}
+
+// ---------------------------------------------------------------------------
+// 9. Scheduler — buildAutoSchedule
+// ---------------------------------------------------------------------------
+// Pure planning function: given a split + mode + the user's existing templates
+// + the global exercise catalog, decides (a) which existing template fills each
+// "day archetype" of the split, or a starter-template spec to create when none
+// matches, and (b) the resulting slot list (weekday-based or rotation-based).
+// No DB access here — server/storage.ts executes the plan (creating any needed
+// starter templates, then persisting schedule + slots).
+// ---------------------------------------------------------------------------
+
+export const SPLIT_DAY_ARCHETYPES: Record<Exclude<WorkoutSplitId, "custom">, string[]> = {
+  ppl: ["Push", "Pull", "Legs"],
+  upper_lower: ["Upper", "Lower"],
+  full_body: ["Full Body A", "Full Body B", "Full Body C"],
+  bro_split: ["Chest", "Back", "Shoulders", "Arms", "Legs"],
+};
+
+// Default training weekdays (0=Sun..6=Sat) used when the caller omits
+// `trainingDays` for fixed mode. Chosen to spread sessions with sensible rest.
+const DEFAULT_TRAINING_DAYS: Record<Exclude<WorkoutSplitId, "custom">, number[]> = {
+  ppl: [1, 2, 3, 5, 6, 0], // Mon Tue Wed Fri Sat Sun, Thu rest
+  upper_lower: [1, 2, 4, 5], // Mon Tue Thu Fri
+  full_body: [1, 3, 5], // Mon Wed Fri
+  bro_split: [1, 2, 3, 4, 5], // Mon-Fri
+};
+
+// Archetype -> primary muscle groups to draw exercises from when a starter
+// template must be generated (order matters: first = primary compound focus).
+const ARCHETYPE_MUSCLE_FOCUS: Record<string, MuscleGroupName[]> = {
+  Push: ["Chest", "FrontDelts", "SideDelts", "Triceps"],
+  Pull: ["Lats", "Back", "Biceps", "RearDelts"],
+  Legs: ["Quads", "Hamstrings", "Glutes", "Calves"],
+  Upper: ["Chest", "Lats", "Back", "FrontDelts", "SideDelts", "Biceps", "Triceps"],
+  Lower: ["Quads", "Hamstrings", "Glutes", "Calves"],
+  "Full Body A": ["Quads", "Chest", "Lats", "SideDelts"],
+  "Full Body B": ["Hamstrings", "Back", "FrontDelts", "Biceps"],
+  "Full Body C": ["Glutes", "Chest", "Lats", "Triceps"],
+  Chest: ["Chest", "FrontDelts", "Triceps"],
+  Back: ["Back", "Lats", "Traps", "Biceps"],
+  Shoulders: ["SideDelts", "FrontDelts", "RearDelts", "Traps"],
+  Arms: ["Biceps", "Triceps", "Forearms"],
+};
+
+export interface ScheduleCatalogExercise {
+  id: number;
+  name: string;
+  primaryMuscleGroupId: number;
+  isCompound: boolean;
+}
+
+export interface ScheduleExistingTemplate {
+  id: number;
+  name: string;
+}
+
+export interface StarterTemplateExerciseSpec {
+  exerciseId: number;
+  exerciseOrder: number;
+  exerciseRole: ExerciseRole;
+  targetSets: number;
+  targetRepsMin: number;
+  targetRepsMax: number;
+  targetRir: number;
+  failureTarget: FailureTarget;
+  restSeconds: number;
+  warmupSets: number;
+  topSets: number;
+  backoffSets: number;
+}
+
+export interface StarterTemplateSpec {
+  name: string;
+  archetype: string;
+  exercises: StarterTemplateExerciseSpec[];
+}
+
+// A resolved day archetype: either points at an existing owned template, or
+// carries a starter-template spec (identified by index into `newTemplates`)
+// that the caller must create first and substitute the resulting id.
+export type ResolvedArchetype =
+  | { archetype: string; kind: "existing"; templateId: number }
+  | { archetype: string; kind: "new"; newTemplateIndex: number };
+
+export interface PlannedSlot {
+  dayOfWeek: number | null;
+  position: number;
+  archetype: string | null; // null = rest day
+  resolved: ResolvedArchetype | null; // null = rest day
+}
+
+export interface AutoSchedulePlan {
+  mode: ScheduleModeId;
+  archetypes: string[];
+  resolutions: ResolvedArchetype[];
+  newTemplates: StarterTemplateSpec[]; // starter templates that must be created
+  slots: PlannedSlot[]; // slots reference resolutions/newTemplates by index; workoutTemplateId filled in by caller after creation
+}
+
+export interface BuildAutoScheduleArgs {
+  split: Exclude<WorkoutSplitId, "custom">;
+  mode: ScheduleModeId;
+  trainingDays?: number[];
+  existingTemplates: ScheduleExistingTemplate[];
+  catalog: ScheduleCatalogExercise[];
+  muscleGroupLookup: MuscleGroupLookup; // to resolve MuscleGroupName -> id
+}
+
+function pickExercisesForArchetype(
+  archetype: string,
+  catalog: ScheduleCatalogExercise[],
+  muscleGroupLookup: MuscleGroupLookup,
+): StarterTemplateExerciseSpec[] {
+  const focusNames = ARCHETYPE_MUSCLE_FOCUS[archetype] ?? [];
+  const nameToId = new Map<MuscleGroupName, number>();
+  muscleGroupLookup.idToName.forEach((name, id) => {
+    nameToId.set(name, id);
+  });
+  const focusIds = focusNames
+    .map((name) => nameToId.get(name))
+    .filter((id): id is number => id != null);
+
+  const byMuscle = new Map<number, ScheduleCatalogExercise[]>();
+  for (const id of focusIds) byMuscle.set(id, []);
+  for (const ex of catalog) {
+    const bucket = byMuscle.get(ex.primaryMuscleGroupId);
+    if (bucket) bucket.push(ex);
+  }
+
+  const picked: ScheduleCatalogExercise[] = [];
+  const usedIds = new Set<number>();
+  const takeFrom = (muscleId: number, preferCompound: boolean) => {
+    const bucket = (byMuscle.get(muscleId) ?? []).filter((e) => !usedIds.has(e.id));
+    if (bucket.length === 0) return null;
+    const sorted = [...bucket].sort((a, b) => (preferCompound ? Number(b.isCompound) - Number(a.isCompound) : 0));
+    const chosen = sorted[0];
+    usedIds.add(chosen.id);
+    picked.push(chosen);
+    return chosen;
+  };
+
+  // 1 primary compound from the first focus muscle
+  if (focusIds[0] != null) takeFrom(focusIds[0], true);
+  // 1-2 secondary compound/isolation from remaining focus muscles
+  for (const muscleId of focusIds.slice(1, 3)) {
+    takeFrom(muscleId, true);
+  }
+  // Fill out to 4-5 total exercises with isolation work across focus muscles
+  let cursor = 0;
+  while (picked.length < Math.min(5, Math.max(4, focusIds.length + 1)) && focusIds.length > 0) {
+    const muscleId = focusIds[cursor % focusIds.length];
+    const before = picked.length;
+    takeFrom(muscleId, false);
+    cursor++;
+    if (picked.length === before && cursor > focusIds.length * 3) break; // avoid infinite loop when catalog exhausted
+  }
+
+  return picked.map((ex, idx) => {
+    const isFirst = idx === 0;
+    const role: ExerciseRole = isFirst ? "Primary Compound" : ex.isCompound ? "Secondary Compound" : "Isolation";
+    return {
+      exerciseId: ex.id,
+      exerciseOrder: idx + 1,
+      exerciseRole: role,
+      targetSets: isFirst ? 4 : 3,
+      targetRepsMin: isFirst ? 5 : 8,
+      targetRepsMax: isFirst ? 8 : 12,
+      targetRir: isFirst ? 2 : 1,
+      failureTarget: isFirst ? "Never" : "Last Set",
+      restSeconds: isFirst ? 150 : 90,
+      warmupSets: isFirst ? 2 : 0,
+      topSets: 0,
+      backoffSets: 0,
+    };
+  });
+}
+
+/**
+ * Resolve each split day-archetype to either an existing user template
+ * (case-insensitive substring match on name) or a freshly generated starter
+ * template spec. Pure — does not touch the DB.
+ */
+export function buildAutoSchedule(args: BuildAutoScheduleArgs): AutoSchedulePlan {
+  const { split, mode, trainingDays, existingTemplates, catalog, muscleGroupLookup } = args;
+  const archetypes = SPLIT_DAY_ARCHETYPES[split];
+
+  const resolutions: ResolvedArchetype[] = [];
+  const newTemplates: StarterTemplateSpec[] = [];
+
+  const claimedTemplateIds = new Set<number>();
+
+  for (const archetype of archetypes) {
+    // Build a distinguishing keyword set for the whole archetype phrase, not
+    // just its first word, so multi-word archetypes ("Full Body A/B/C") don't
+    // all collide on "full". Normalize simple plurals ("Legs" -> "leg").
+    const words = archetype
+      .toLowerCase()
+      .split(" ")
+      .map((w) => (w.endsWith("s") && w.length > 3 ? w.slice(0, -1) : w));
+    const match = existingTemplates.find((t) => {
+      if (claimedTemplateIds.has(t.id)) return false; // don't reuse a template across archetypes
+      const name = t.name.toLowerCase();
+      return words.every((w) => name.includes(w));
+    });
+    if (match) {
+      claimedTemplateIds.add(match.id);
+      resolutions.push({ archetype, kind: "existing", templateId: match.id });
+    } else {
+      const exercises = pickExercisesForArchetype(archetype, catalog, muscleGroupLookup);
+      const newTemplateIndex = newTemplates.length;
+      newTemplates.push({ name: `${archetype} Day (Auto)`, archetype, exercises });
+      resolutions.push({ archetype, kind: "new", newTemplateIndex });
+    }
+  }
+
+  const slots: PlannedSlot[] = [];
+
+  if (mode === "fixed") {
+    const days = trainingDays && trainingDays.length > 0 ? trainingDays : DEFAULT_TRAINING_DAYS[split];
+    const trainingSet = new Set(days);
+    let archetypeCursor = 0;
+    // Build slots for every day of the week (0-6) so rest days are explicit rows.
+    for (let dow = 0; dow <= 6; dow++) {
+      if (trainingSet.has(dow)) {
+        const resolved = resolutions[archetypeCursor % resolutions.length];
+        slots.push({ dayOfWeek: dow, position: dow, archetype: resolved.archetype, resolved });
+        archetypeCursor++;
+      } else {
+        slots.push({ dayOfWeek: dow, position: dow, archetype: null, resolved: null });
+      }
+    }
+  } else {
+    // rotating: no rest days, sequential positions through the archetype list
+    resolutions.forEach((resolved, idx) => {
+      slots.push({ dayOfWeek: null, position: idx, archetype: resolved.archetype, resolved });
+    });
+  }
+
+  return { mode, archetypes, resolutions, newTemplates, slots };
 }

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { ClipboardList, Play, Clock, Dumbbell, Flame, AlertCircle, Copy, Lock } from "lucide-react";
+import { ClipboardList, Play, Clock, Dumbbell, Flame, AlertCircle, Copy, Lock, Pencil } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -87,12 +87,20 @@ function TemplateCard({
             {copyPending ? "Copying..." : "Copy to my templates"}
           </Button>
         ) : (
-          <Link href={`/log?template=${template.id}`}>
-            <Button size="sm" data-testid={`button-start-template-${template.id}`}>
-              <Play className="h-3.5 w-3.5" />
-              Start
-            </Button>
-          </Link>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <Link href={`/templates/${template.id}/edit`}>
+              <Button size="sm" variant="outline" data-testid={`button-edit-template-${template.id}`}>
+                <Pencil className="h-3.5 w-3.5" />
+                Edit
+              </Button>
+            </Link>
+            <Link href={`/log?template=${template.id}`}>
+              <Button size="sm" data-testid={`button-start-template-${template.id}`}>
+                <Play className="h-3.5 w-3.5" />
+                Start
+              </Button>
+            </Link>
+          </div>
         )}
       </CardHeader>
       <CardContent className="space-y-4">
@@ -149,7 +157,7 @@ function TemplateCard({
 }
 
 export default function WorkoutTemplates() {
-  const { activeUserId, users } = useActiveUser();
+  const { activeUserId, activeUser, users } = useActiveUser();
   const { toast } = useToast();
   const [tab, setTab] = useState<"mine" | "other">("mine");
 
@@ -214,7 +222,7 @@ export default function WorkoutTemplates() {
         <Tabs value={tab} onValueChange={(v) => setTab(v as "mine" | "other")}>
           <TabsList data-testid="tabs-template-scope">
             <TabsTrigger value="mine" data-testid="tab-my-templates">
-              My Templates
+              {activeUser ? `${activeUser.name}'s Templates` : "My Templates"}
             </TabsTrigger>
             <TabsTrigger value="other" data-testid="tab-other-templates">
               <Lock className="h-3 w-3 mr-1" />

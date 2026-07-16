@@ -11,6 +11,9 @@ import {
   insertWorkoutTemplateSchema,
   insertWorkoutTemplateExerciseSchema,
   insertUserSchema,
+  updateUserPreferencesSchema,
+  generateScheduleSchema,
+  updateScheduleSlotsSchema,
   muscleGroupNames,
   muscleGroupDisplayNames,
   type MuscleGroupName,
@@ -165,6 +168,17 @@ export async function registerRoutes(
     res.json(updated);
   });
 
+  app.patch("/api/users/:id/preferences", async (req, res) => {
+    const id = Number(req.params.id);
+    const parsed = updateUserPreferencesSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.message });
+    }
+    const updated = await storage.updateUserPreferences(id, parsed.data);
+    if (!updated) return res.status(404).json({ message: "User not found" });
+    res.json(updated);
+  });
+
   // ---------------- Muscle Groups (shared/global) ----------------
   app.get("/api/muscle-groups", async (_req, res) => {
     const groups = await storage.getMuscleGroups();
@@ -304,6 +318,74 @@ export async function registerRoutes(
     res.json(analyzeWorkoutComposition(rows));
   });
 
+  // ---------------- Template editor (owner-only mutations) ----------------
+  // Templates are scoped per user; editing routes verify the requesting
+  // X-User-Id matches the template's userId and reject with 403 otherwise.
+  app.patch("/api/workout-templates/:id", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const id = Number(req.params.id);
+    const template = await storage.getWorkoutTemplate(id);
+    if (!template) return res.status(404).json({ message: "Template not found" });
+    if (template.userId !== userId) return res.status(403).json({ message: "You do not own this template" });
+
+    const patchSchema = insertWorkoutTemplateSchema.pick({ name: true, notes: true }).partial();
+    const parsed = patchSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+
+    const updated = await storage.updateWorkoutTemplate(id, parsed.data);
+    res.json(updated);
+  });
+
+  app.patch("/api/workout-templates/:id/exercises/:teId", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const id = Number(req.params.id);
+    const teId = Number(req.params.teId);
+    const template = await storage.getWorkoutTemplate(id);
+    if (!template) return res.status(404).json({ message: "Template not found" });
+    if (template.userId !== userId) return res.status(403).json({ message: "You do not own this template" });
+
+    const patchSchema = insertWorkoutTemplateExerciseSchema.partial();
+    const parsed = patchSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+
+    const updated = await storage.updateWorkoutTemplateExercise(teId, parsed.data);
+    if (!updated) return res.status(404).json({ message: "Template exercise not found" });
+    res.json(updated);
+  });
+
+  app.delete("/api/workout-templates/:id/exercises/:teId", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const id = Number(req.params.id);
+    const teId = Number(req.params.teId);
+    const template = await storage.getWorkoutTemplate(id);
+    if (!template) return res.status(404).json({ message: "Template not found" });
+    if (template.userId !== userId) return res.status(403).json({ message: "You do not own this template" });
+
+    await storage.deleteWorkoutTemplateExercise(teId);
+    res.status(204).end();
+  });
+
+  app.post("/api/workout-templates/:id/exercises/reorder", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const id = Number(req.params.id);
+    const template = await storage.getWorkoutTemplate(id);
+    if (!template) return res.status(404).json({ message: "Template not found" });
+    if (template.userId !== userId) return res.status(403).json({ message: "You do not own this template" });
+
+    const orderedIds = req.body?.orderedIds;
+    if (!Array.isArray(orderedIds) || orderedIds.some((v) => typeof v !== "number")) {
+      return res.status(400).json({ message: "orderedIds must be an array of numbers" });
+    }
+
+    await storage.reorderWorkoutTemplateExercises(id, orderedIds);
+    const updated = await storage.getWorkoutTemplateWithExercises(id);
+    res.json(updated);
+  });
+
   // ---------------- Workouts (scoped per user) ----------------
   app.get("/api/workouts", async (req, res) => {
     const userId = getUserId(req, res);
@@ -327,6 +409,12 @@ export async function registerRoutes(
       return res.status(400).json({ message: parsed.error.message });
     }
     const created = await storage.createWorkout(parsed.data);
+    // If this workout is tied to a template that's the current rotating-mode
+    // schedule slot, advance the rotation to the next slot. No-op for fixed
+    // mode, no schedule, or ad-hoc workouts not matching the current slot.
+    if (created.workoutTemplateId != null) {
+      await storage.advanceRotation(userId, created.workoutTemplateId);
+    }
     res.status(201).json(created);
   });
 
@@ -586,6 +674,36 @@ export async function registerRoutes(
     res.json(suggestions);
   });
 
+  // ---------------- Workout schedule ----------------
+  app.get("/api/schedule", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const schedule = await storage.getWorkoutSchedule(userId);
+    if (!schedule) return res.json({ schedule: null, slots: [] });
+    const { slots, ...scheduleFields } = schedule;
+    res.json({ schedule: scheduleFields, slots });
+  });
+
+  app.post("/api/schedule/generate", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = generateScheduleSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+    const result = await storage.generateWorkoutSchedule(userId, parsed.data);
+    const { slots, ...scheduleFields } = result;
+    res.json({ schedule: scheduleFields, slots });
+  });
+
+  app.patch("/api/schedule", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = updateScheduleSlotsSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+    const result = await storage.updateWorkoutScheduleSlots(userId, parsed.data);
+    const { slots, ...scheduleFields } = result;
+    res.json({ schedule: scheduleFields, slots });
+  });
+
   // ---------------- Dashboard snapshot ----------------
   app.get("/api/dashboard", async (req, res) => {
     const userId = getUserId(req, res);
@@ -601,6 +719,19 @@ export async function registerRoutes(
     }
 
     const history = (await buildHistory(userId)).slice(0, 50);
+
+    const scheduleRow = await storage.getWorkoutSchedule(userId);
+    const scheduleForDashboard = scheduleRow
+      ? {
+          mode: scheduleRow.mode as "fixed" | "rotating",
+          rotationPosition: scheduleRow.rotationPosition,
+          slots: scheduleRow.slots.map((s) => ({
+            dayOfWeek: s.dayOfWeek,
+            position: s.position,
+            workoutTemplateId: s.workoutTemplateId,
+          })),
+        }
+      : null;
 
     const dashboardTemplates: DashboardTemplateInput[] = templates.map((t) => ({
       id: t.id,
@@ -625,6 +756,7 @@ export async function registerRoutes(
       exerciseNameLookup,
       exercisePrimaryMuscleLookup,
       muscleGroupLookup: lookup,
+      schedule: scheduleForDashboard,
     });
 
     res.json(snapshot);

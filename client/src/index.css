@@ -197,6 +197,147 @@
   );
 }
 
+/* ---------------------------------------------------------------------------
+ * Theme color overrides — data-theme-color attribute on <html>, sibling to
+ * how the .dark class is toggled. :root/.dark above stay the compiled-in
+ * green default (fallback for first paint before user data loads). Each
+ * block below overrides --primary/--ring/--sidebar-primary/--sidebar-ring/
+ * --accent/--accent-foreground/--chart-1 (and --primary-foreground,
+ * --sidebar-primary-foreground in dark mode) for a specific palette id.
+ * ------------------------------------------------------------------------- */
+
+/* green (explicit override block for consistency, matches the default) */
+:root[data-theme-color="green"] {
+  --primary: 142 76% 36%;
+  --ring: 142 76% 36%;
+  --sidebar-primary: 142 76% 36%;
+  --sidebar-ring: 142 76% 36%;
+  --accent: 142 70% 92%;
+  --accent-foreground: 142 60% 22%;
+  --chart-1: 142 76% 36%;
+}
+.dark[data-theme-color="green"] {
+  --primary: 142 70% 45%;
+  --primary-foreground: 142 30% 8%;
+  --ring: 142 70% 45%;
+  --sidebar-primary: 142 70% 45%;
+  --sidebar-primary-foreground: 142 30% 8%;
+  --sidebar-ring: 142 70% 45%;
+  --accent: 142 40% 20%;
+  --accent-foreground: 142 90% 85%;
+  --chart-1: 142 70% 45%;
+}
+
+/* blue (Electric Blue) */
+:root[data-theme-color="blue"] {
+  --primary: 217 91% 48%;
+  --ring: 217 91% 48%;
+  --sidebar-primary: 217 91% 48%;
+  --sidebar-ring: 217 91% 48%;
+  --accent: 217 70% 92%;
+  --accent-foreground: 217 60% 22%;
+  --chart-1: 217 91% 48%;
+}
+.dark[data-theme-color="blue"] {
+  --primary: 217 85% 58%;
+  --primary-foreground: 217 30% 10%;
+  --ring: 217 85% 58%;
+  --sidebar-primary: 217 85% 58%;
+  --sidebar-primary-foreground: 217 30% 10%;
+  --sidebar-ring: 217 85% 58%;
+  --accent: 217 40% 20%;
+  --accent-foreground: 217 90% 85%;
+  --chart-1: 217 85% 58%;
+}
+
+/* orange (Ember Orange) */
+:root[data-theme-color="orange"] {
+  --primary: 22 88% 48%;
+  --ring: 22 88% 48%;
+  --sidebar-primary: 22 88% 48%;
+  --sidebar-ring: 22 88% 48%;
+  --accent: 22 70% 92%;
+  --accent-foreground: 22 60% 22%;
+  --chart-1: 22 88% 48%;
+}
+.dark[data-theme-color="orange"] {
+  --primary: 22 85% 56%;
+  --primary-foreground: 22 30% 10%;
+  --ring: 22 85% 56%;
+  --sidebar-primary: 22 85% 56%;
+  --sidebar-primary-foreground: 22 30% 10%;
+  --sidebar-ring: 22 85% 56%;
+  --accent: 22 40% 20%;
+  --accent-foreground: 22 90% 85%;
+  --chart-1: 22 85% 56%;
+}
+
+/* purple (Voltage Purple) */
+:root[data-theme-color="purple"] {
+  --primary: 262 75% 50%;
+  --ring: 262 75% 50%;
+  --sidebar-primary: 262 75% 50%;
+  --sidebar-ring: 262 75% 50%;
+  --accent: 262 70% 92%;
+  --accent-foreground: 262 60% 22%;
+  --chart-1: 262 75% 50%;
+}
+.dark[data-theme-color="purple"] {
+  --primary: 262 70% 62%;
+  --primary-foreground: 262 30% 10%;
+  --ring: 262 70% 62%;
+  --sidebar-primary: 262 70% 62%;
+  --sidebar-primary-foreground: 262 30% 10%;
+  --sidebar-ring: 262 70% 62%;
+  --accent: 262 40% 20%;
+  --accent-foreground: 262 90% 85%;
+  --chart-1: 262 70% 62%;
+}
+
+/* red (Crimson) */
+:root[data-theme-color="red"] {
+  --primary: 4 78% 46%;
+  --ring: 4 78% 46%;
+  --sidebar-primary: 4 78% 46%;
+  --sidebar-ring: 4 78% 46%;
+  --accent: 4 70% 92%;
+  --accent-foreground: 4 60% 22%;
+  --chart-1: 4 78% 46%;
+}
+.dark[data-theme-color="red"] {
+  --primary: 4 84% 58%;
+  --primary-foreground: 4 30% 10%;
+  --ring: 4 84% 58%;
+  --sidebar-primary: 4 84% 58%;
+  --sidebar-primary-foreground: 4 30% 10%;
+  --sidebar-ring: 4 84% 58%;
+  --accent: 4 40% 20%;
+  --accent-foreground: 4 90% 85%;
+  --chart-1: 4 84% 58%;
+}
+
+/* teal (Cyan Teal) */
+:root[data-theme-color="teal"] {
+  --primary: 187 75% 38%;
+  --ring: 187 75% 38%;
+  --sidebar-primary: 187 75% 38%;
+  --sidebar-ring: 187 75% 38%;
+  --accent: 187 70% 92%;
+  --accent-foreground: 187 60% 22%;
+  --chart-1: 187 75% 38%;
+}
+.dark[data-theme-color="teal"] {
+  --primary: 187 70% 48%;
+  --primary-foreground: 187 30% 10%;
+  --ring: 187 70% 48%;
+  --sidebar-primary: 187 70% 48%;
+  --sidebar-primary-foreground: 187 30% 10%;
+  --sidebar-ring: 187 70% 48%;
+  --accent: 187 40% 20%;
+  --accent-foreground: 187 90% 85%;
+  --chart-1: 187 70% 48%;
+}
+
 @layer base {
   * {
     @apply border-border;

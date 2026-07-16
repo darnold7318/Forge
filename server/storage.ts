@@ -7,6 +7,8 @@ import {
   bodyweightLogs,
   workoutTemplates,
   workoutTemplateExercises,
+  workoutSchedules,
+  workoutScheduleSlots,
 } from "@shared/schema";
 import type {
   User,
@@ -26,7 +28,17 @@ import type {
   InsertWorkoutTemplate,
   WorkoutTemplateExercise,
   InsertWorkoutTemplateExercise,
+  WorkoutSchedule,
+  WorkoutScheduleSlot,
+  GenerateScheduleInput,
+  UpdateScheduleSlotsInput,
 } from "@shared/schema";
+import {
+  buildAutoSchedule,
+  type ScheduleExistingTemplate,
+  type ScheduleCatalogExercise,
+  type MuscleGroupLookup,
+} from "@shared/coaching";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq, desc, and } from "drizzle-orm";
@@ -45,7 +57,10 @@ function ensureTables() {
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
-      color_accent TEXT
+      color_accent TEXT,
+      theme_color TEXT NOT NULL DEFAULT 'green',
+      theme_mode TEXT NOT NULL DEFAULT 'dark',
+      workout_split TEXT NOT NULL DEFAULT 'ppl'
     );
 
     CREATE TABLE IF NOT EXISTS muscle_groups (
@@ -121,7 +136,48 @@ function ensureTables() {
       date TEXT NOT NULL,
       weight REAL NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS workout_schedules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),
+      mode TEXT NOT NULL DEFAULT 'fixed',
+      rotation_position INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS workout_schedule_slots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      schedule_id INTEGER NOT NULL REFERENCES workout_schedules(id),
+      day_of_week INTEGER,
+      position INTEGER NOT NULL,
+      workout_template_id INTEGER REFERENCES workout_templates(id),
+      label TEXT
+    );
   `);
+
+  // Migration: the `users` table may already exist from before the
+  // theme_color/theme_mode/workout_split columns were introduced. SQLite
+  // has no `ADD COLUMN IF NOT EXISTS`, so check PRAGMA table_info first and
+  // only add columns that are actually missing. This preserves all existing
+  // seeded users/templates/workouts — data.db is never dropped or recreated.
+  const existingColumns = new Set(
+    (sqlite.prepare("PRAGMA table_info(users)").all() as { name: string }[]).map((c) => c.name),
+  );
+  const migrations: { column: string; ddl: string }[] = [
+    { column: "theme_color", ddl: "ALTER TABLE users ADD COLUMN theme_color TEXT NOT NULL DEFAULT 'green'" },
+    { column: "theme_mode", ddl: "ALTER TABLE users ADD COLUMN theme_mode TEXT NOT NULL DEFAULT 'dark'" },
+    { column: "workout_split", ddl: "ALTER TABLE users ADD COLUMN workout_split TEXT NOT NULL DEFAULT 'ppl'" },
+  ];
+  for (const { column, ddl } of migrations) {
+    if (!existingColumns.has(column)) {
+      try {
+        sqlite.exec(ddl);
+      } catch (err) {
+        // Guard against a race/rerun where the column was added between the
+        // PRAGMA check and this statement — don't crash server startup.
+        console.warn(`Migration skipped for users.${column}:`, (err as Error).message);
+      }
+    }
+  }
 }
 
 ensureTables();
@@ -232,6 +288,10 @@ export interface WorkoutTemplateWithExercises extends WorkoutTemplate {
   exercises: WorkoutTemplateExercise[];
 }
 
+export interface WorkoutScheduleWithSlots extends WorkoutSchedule {
+  slots: WorkoutScheduleSlot[];
+}
+
 // ---------------------------------------------------------------------------
 // Storage interface
 // ---------------------------------------------------------------------------
@@ -241,6 +301,10 @@ export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   renameUser(id: number, name: string): Promise<User | undefined>;
+  updateUserPreferences(
+    id: number,
+    prefs: Partial<Pick<User, "themeColor" | "themeMode" | "workoutSplit">>,
+  ): Promise<User | undefined>;
 
   // Muscle groups (shared/global)
   getMuscleGroups(): Promise<MuscleGroup[]>;
@@ -260,6 +324,16 @@ export interface IStorage {
   createWorkoutTemplateExercise(te: InsertWorkoutTemplateExercise): Promise<WorkoutTemplateExercise>;
   deleteWorkoutTemplate(id: number): Promise<void>;
   copyWorkoutTemplate(id: number, targetUserId: number): Promise<WorkoutTemplateWithExercises | undefined>;
+  updateWorkoutTemplate(
+    id: number,
+    patch: Partial<Pick<WorkoutTemplate, "name" | "notes">>,
+  ): Promise<WorkoutTemplate | undefined>;
+  updateWorkoutTemplateExercise(
+    id: number,
+    patch: Partial<InsertWorkoutTemplateExercise>,
+  ): Promise<WorkoutTemplateExercise | undefined>;
+  deleteWorkoutTemplateExercise(id: number): Promise<void>;
+  reorderWorkoutTemplateExercises(templateId: number, orderedExerciseIds: number[]): Promise<void>;
 
   // Workouts (scoped per user)
   getWorkouts(userId: number): Promise<Workout[]>;
@@ -280,6 +354,12 @@ export interface IStorage {
   // Bodyweight logs (scoped per user)
   getBodyweightLogs(userId: number): Promise<BodyweightLog[]>;
   createBodyweightLog(log: InsertBodyweightLog): Promise<BodyweightLog>;
+
+  // Workout schedule (scoped per user)
+  getWorkoutSchedule(userId: number): Promise<WorkoutScheduleWithSlots | undefined>;
+  generateWorkoutSchedule(userId: number, input: GenerateScheduleInput): Promise<WorkoutScheduleWithSlots>;
+  updateWorkoutScheduleSlots(userId: number, input: UpdateScheduleSlotsInput): Promise<WorkoutScheduleWithSlots>;
+  advanceRotation(userId: number, completedTemplateId: number | null): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -298,6 +378,13 @@ export class DatabaseStorage implements IStorage {
 
   async renameUser(id: number, name: string): Promise<User | undefined> {
     return db.update(users).set({ name }).where(eq(users.id, id)).returning().get();
+  }
+
+  async updateUserPreferences(
+    id: number,
+    prefs: Partial<Pick<User, "themeColor" | "themeMode" | "workoutSplit">>,
+  ): Promise<User | undefined> {
+    return db.update(users).set(prefs).where(eq(users.id, id)).returning().get();
   }
 
   // ---------------- Muscle groups (shared) ----------------
@@ -403,6 +490,40 @@ export class DatabaseStorage implements IStorage {
     return this.getWorkoutTemplateWithExercises(newTemplate.id);
   }
 
+  async updateWorkoutTemplate(
+    id: number,
+    patch: Partial<Pick<WorkoutTemplate, "name" | "notes">>,
+  ): Promise<WorkoutTemplate | undefined> {
+    return db.update(workoutTemplates).set(patch).where(eq(workoutTemplates.id, id)).returning().get();
+  }
+
+  async updateWorkoutTemplateExercise(
+    id: number,
+    patch: Partial<InsertWorkoutTemplateExercise>,
+  ): Promise<WorkoutTemplateExercise | undefined> {
+    return db
+      .update(workoutTemplateExercises)
+      .set(patch)
+      .where(eq(workoutTemplateExercises.id, id))
+      .returning()
+      .get();
+  }
+
+  async deleteWorkoutTemplateExercise(id: number): Promise<void> {
+    db.delete(workoutTemplateExercises).where(eq(workoutTemplateExercises.id, id)).run();
+  }
+
+  async reorderWorkoutTemplateExercises(templateId: number, orderedExerciseIds: number[]): Promise<void> {
+    orderedExerciseIds.forEach((teId, idx) => {
+      db.update(workoutTemplateExercises)
+        .set({ exerciseOrder: idx + 1 })
+        .where(
+          and(eq(workoutTemplateExercises.id, teId), eq(workoutTemplateExercises.workoutTemplateId, templateId)),
+        )
+        .run();
+    });
+  }
+
   // ---------------- Workouts ----------------
   async getWorkouts(userId: number): Promise<Workout[]> {
     return db
@@ -494,6 +615,185 @@ export class DatabaseStorage implements IStorage {
 
   async createBodyweightLog(log: InsertBodyweightLog): Promise<BodyweightLog> {
     return db.insert(bodyweightLogs).values(log).returning().get();
+  }
+
+  // ---------------- Workout schedule ----------------
+  private async getScheduleSlots(scheduleId: number): Promise<WorkoutScheduleSlot[]> {
+    const rows = db
+      .select()
+      .from(workoutScheduleSlots)
+      .where(eq(workoutScheduleSlots.scheduleId, scheduleId))
+      .all();
+    return rows.sort((a, b) => a.position - b.position);
+  }
+
+  async getWorkoutSchedule(userId: number): Promise<WorkoutScheduleWithSlots | undefined> {
+    const schedule = db.select().from(workoutSchedules).where(eq(workoutSchedules.userId, userId)).get();
+    if (!schedule) return undefined;
+    const slots = await this.getScheduleSlots(schedule.id);
+    return { ...schedule, slots };
+  }
+
+  /** Build the pure-planning inputs (existing templates, exercise catalog, muscle lookup) from the DB. */
+  private async buildSchedulePlanInputs(userId: number): Promise<{
+    existingTemplates: ScheduleExistingTemplate[];
+    catalog: ScheduleCatalogExercise[];
+    muscleGroupLookup: MuscleGroupLookup;
+  }> {
+    const templates = await this.getWorkoutTemplates(userId);
+    const existingTemplates: ScheduleExistingTemplate[] = templates.map((t) => ({ id: t.id, name: t.name }));
+
+    const exerciseRows = await this.getExercises();
+    const catalog: ScheduleCatalogExercise[] = exerciseRows.map((e) => ({
+      id: e.id,
+      name: e.name,
+      primaryMuscleGroupId: e.primaryMuscleGroupId,
+      isCompound: e.isCompound,
+    }));
+
+    const groups = await this.getMuscleGroups();
+    const idToName = new Map<number, any>();
+    for (const g of groups) idToName.set(g.id, g.name);
+    const muscleGroupLookup: MuscleGroupLookup = { idToName };
+
+    return { existingTemplates, catalog, muscleGroupLookup };
+  }
+
+  async generateWorkoutSchedule(userId: number, input: GenerateScheduleInput): Promise<WorkoutScheduleWithSlots> {
+    const { existingTemplates, catalog, muscleGroupLookup } = await this.buildSchedulePlanInputs(userId);
+
+    const plan = buildAutoSchedule({
+      split: input.split,
+      mode: input.mode,
+      trainingDays: input.trainingDays,
+      existingTemplates,
+      catalog,
+      muscleGroupLookup,
+    });
+
+    // Materialize any starter templates the plan decided to create, and
+    // remember their new ids so slots can reference the right template.
+    const newTemplateIdByIndex = new Map<number, number>();
+    for (let i = 0; i < plan.newTemplates.length; i++) {
+      const spec = plan.newTemplates[i];
+      const created = await this.createWorkoutTemplate({ userId, name: spec.name, notes: null });
+      for (const ex of spec.exercises) {
+        await this.createWorkoutTemplateExercise({
+          workoutTemplateId: created.id,
+          exerciseId: ex.exerciseId,
+          exerciseOrder: ex.exerciseOrder,
+          exerciseRole: ex.exerciseRole,
+          warmupSets: ex.warmupSets,
+          topSets: ex.topSets,
+          backoffSets: ex.backoffSets,
+          backoffReductionPercent: 0,
+          targetSets: ex.targetSets,
+          targetRepsMin: ex.targetRepsMin,
+          targetRepsMax: ex.targetRepsMax,
+          tempo: null,
+          targetRir: ex.targetRir,
+          failureTarget: ex.failureTarget,
+          intensityTechnique: null,
+          restSeconds: ex.restSeconds,
+          notes: null,
+        });
+      }
+      newTemplateIdByIndex.set(i, created.id);
+    }
+
+    const resolvedTemplateIdByArchetype = new Map<string, number>();
+    plan.resolutions.forEach((r) => {
+      const templateId = r.kind === "existing" ? r.templateId : newTemplateIdByIndex.get(r.newTemplateIndex)!;
+      resolvedTemplateIdByArchetype.set(r.archetype, templateId);
+    });
+
+    // Upsert the schedule row (unique per user).
+    let schedule = db.select().from(workoutSchedules).where(eq(workoutSchedules.userId, userId)).get();
+    if (schedule) {
+      db.delete(workoutScheduleSlots).where(eq(workoutScheduleSlots.scheduleId, schedule.id)).run();
+      schedule = db
+        .update(workoutSchedules)
+        .set({ mode: input.mode, rotationPosition: 0 })
+        .where(eq(workoutSchedules.id, schedule.id))
+        .returning()
+        .get();
+    } else {
+      schedule = db
+        .insert(workoutSchedules)
+        .values({ userId, mode: input.mode, rotationPosition: 0 })
+        .returning()
+        .get();
+    }
+
+    for (const slot of plan.slots) {
+      const templateId = slot.archetype ? resolvedTemplateIdByArchetype.get(slot.archetype) ?? null : null;
+      db.insert(workoutScheduleSlots)
+        .values({
+          scheduleId: schedule.id,
+          dayOfWeek: slot.dayOfWeek,
+          position: slot.position,
+          workoutTemplateId: templateId,
+          label: slot.archetype,
+        })
+        .run();
+    }
+
+    // Reflect the newly generated split on the user's preferences.
+    await this.updateUserPreferences(userId, { workoutSplit: input.split });
+
+    const slots = await this.getScheduleSlots(schedule.id);
+    return { ...schedule, slots };
+  }
+
+  async updateWorkoutScheduleSlots(userId: number, input: UpdateScheduleSlotsInput): Promise<WorkoutScheduleWithSlots> {
+    let schedule = db.select().from(workoutSchedules).where(eq(workoutSchedules.userId, userId)).get();
+    if (!schedule) {
+      schedule = db
+        .insert(workoutSchedules)
+        .values({ userId, mode: input.mode, rotationPosition: 0 })
+        .returning()
+        .get();
+    } else {
+      schedule = db
+        .update(workoutSchedules)
+        .set({ mode: input.mode })
+        .where(eq(workoutSchedules.id, schedule.id))
+        .returning()
+        .get();
+    }
+
+    db.delete(workoutScheduleSlots).where(eq(workoutScheduleSlots.scheduleId, schedule.id)).run();
+    for (const slot of input.slots) {
+      db.insert(workoutScheduleSlots)
+        .values({
+          scheduleId: schedule.id,
+          dayOfWeek: slot.dayOfWeek,
+          position: slot.position,
+          workoutTemplateId: slot.workoutTemplateId,
+          label: slot.label ?? null,
+        })
+        .run();
+    }
+
+    // Manual edits mark the split as "custom" so Settings reflects the divergence.
+    await this.updateUserPreferences(userId, { workoutSplit: "custom" });
+
+    const slots = await this.getScheduleSlots(schedule.id);
+    return { ...schedule, slots };
+  }
+
+  async advanceRotation(userId: number, completedTemplateId: number | null): Promise<void> {
+    if (completedTemplateId == null) return;
+    const schedule = db.select().from(workoutSchedules).where(eq(workoutSchedules.userId, userId)).get();
+    if (!schedule || schedule.mode !== "rotating") return;
+    const slots = await this.getScheduleSlots(schedule.id);
+    if (slots.length === 0) return;
+    const currentSlot = slots.find((s) => s.position === schedule.rotationPosition);
+    // Only advance if the logged workout matches the template scheduled at the
+    // current rotation position — avoids skipping the cycle for ad-hoc workouts.
+    if (!currentSlot || currentSlot.workoutTemplateId !== completedTemplateId) return;
+    const nextPosition = (schedule.rotationPosition + 1) % slots.length;
+    db.update(workoutSchedules).set({ rotationPosition: nextPosition }).where(eq(workoutSchedules.id, schedule.id)).run();
   }
 }
 

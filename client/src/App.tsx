@@ -19,7 +19,10 @@ import Progress from "@/pages/progress";
 import Coach from "@/pages/coach";
 import VolumeTracker from "@/pages/volume-tracker";
 import WorkoutTemplates from "@/pages/workout-templates";
+import TemplateEditor from "@/pages/template-editor";
+import SchedulePage from "@/pages/schedule";
 import RecoveryMap from "@/pages/recovery";
+import Settings from "@/pages/settings";
 
 function AppRouter() {
   return (
@@ -31,7 +34,10 @@ function AppRouter() {
       <Route path="/coach" component={Coach} />
       <Route path="/volume" component={VolumeTracker} />
       <Route path="/templates" component={WorkoutTemplates} />
+      <Route path="/templates/:id/edit" component={TemplateEditor} />
+      <Route path="/schedule" component={SchedulePage} />
       <Route path="/recovery" component={RecoveryMap} />
+      <Route path="/settings" component={Settings} />
       <Route component={NotFound} />
     </Switch>
   );
@@ -45,21 +51,17 @@ export default function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <ThemeProvider>
-        <UserProvider>
+      <UserProvider>
+        <ThemeProvider>
           <TooltipProvider>
             <Router hook={useHashLocation}>
               <SidebarProvider style={style as React.CSSProperties}>
                 <div className="flex h-screen w-full">
-                  <div className="hidden md:block">
-                    <AppSidebar />
-                  </div>
+                  <AppSidebar />
                   <div className="flex flex-col flex-1 min-w-0">
                     <header className="flex items-center justify-between gap-2 p-2 border-b h-14 shrink-0">
                       <div className="flex items-center gap-2 min-w-0">
-                        <div className="hidden md:block">
-                          <SidebarTrigger data-testid="button-sidebar-toggle" />
-                        </div>
+                        <SidebarTrigger data-testid="button-sidebar-toggle" />
                         <div className="md:hidden">
                           <Logo />
                         </div>
@@ -81,8 +83,8 @@ export default function App() {
             </Router>
             <Toaster />
           </TooltipProvider>
-        </UserProvider>
-      </ThemeProvider>
+        </ThemeProvider>
+      </UserProvider>
     </QueryClientProvider>
   );
 }

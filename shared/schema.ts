@@ -9,12 +9,50 @@ export const users = sqliteTable("users", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull().unique(),
   colorAccent: text("color_accent"),
+  // App-wide accent theme (distinct from colorAccent, which is used only for
+  // profile badge coloring in user-switcher.tsx). One of themeColorIds below.
+  themeColor: text("theme_color").notNull().default("green"),
+  // Light/dark mode preference, persisted per-user.
+  themeMode: text("theme_mode").notNull().default("dark"),
+  // Preferred workout split — stored preference only, informational.
+  workoutSplit: text("workout_split").notNull().default("ppl"),
 });
 
 export const insertUserSchema = createInsertSchema(users).omit({ id: true });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// User preferences — theme color, theme mode, workout split
+// ---------------------------------------------------------------------------
+export const themeColorIds = ["green", "blue", "orange", "purple", "red", "teal"] as const;
+export type ThemeColorId = (typeof themeColorIds)[number];
+
+export const themeModeIds = ["dark", "light"] as const;
+export type ThemeModeId = (typeof themeModeIds)[number];
+
+export const workoutSplitIds = ["ppl", "upper_lower", "full_body", "bro_split", "custom"] as const;
+export type WorkoutSplitId = (typeof workoutSplitIds)[number];
+
+export const workoutSplitLabels: Record<string, string> = {
+  ppl: "Push / Pull / Legs",
+  upper_lower: "Upper / Lower",
+  full_body: "Full Body",
+  bro_split: "Bro Split",
+  custom: "Custom",
+};
+
+export const updateUserPreferencesSchema = createInsertSchema(users)
+  .pick({ themeColor: true, themeMode: true, workoutSplit: true })
+  .partial()
+  .extend({
+    themeColor: z.enum(themeColorIds).optional(),
+    themeMode: z.enum(themeModeIds).optional(),
+    workoutSplit: z.enum(workoutSplitIds).optional(),
+  });
+
+export type UpdateUserPreferences = z.infer<typeof updateUserPreferencesSchema>;
 
 // ---------------------------------------------------------------------------
 // Muscle Groups — 19 groups matching the reference C# MuscleGroup enum
@@ -254,6 +292,63 @@ export const insertSetSchema = createInsertSchema(sets).omit({ id: true });
 
 export type InsertSet = z.infer<typeof insertSetSchema>;
 export type Set = typeof sets.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Workout Schedule — per-user weekly plan of which template to do when
+// ---------------------------------------------------------------------------
+export const scheduleModeIds = ["fixed", "rotating"] as const;
+export type ScheduleModeId = (typeof scheduleModeIds)[number];
+
+// One row per user holding the schedule-level settings.
+export const workoutSchedules = sqliteTable("workout_schedules", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id).unique(),
+  mode: text("mode").notNull().default("fixed"), // one of scheduleModeIds
+  // Only used in "rotating" mode: index into the ordered rotation (0-based),
+  // advanced each time a workout tied to the schedule is logged/completed.
+  rotationPosition: integer("rotation_position").notNull().default(0),
+});
+
+export const insertWorkoutScheduleSchema = createInsertSchema(workoutSchedules).omit({ id: true });
+export type InsertWorkoutSchedule = z.infer<typeof insertWorkoutScheduleSchema>;
+export type WorkoutSchedule = typeof workoutSchedules.$inferSelect;
+
+// Ordered slots. For "fixed" mode, dayOfWeek is 0-6 (Sun-Sat) and position is unused
+// for lookup (but kept for consistent ordering in the UI). For "rotating" mode,
+// dayOfWeek is null and position (0-based) defines the cycle order.
+export const workoutScheduleSlots = sqliteTable("workout_schedule_slots", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  scheduleId: integer("schedule_id").notNull().references(() => workoutSchedules.id),
+  dayOfWeek: integer("day_of_week"), // 0=Sun..6=Sat, null for rotating mode
+  position: integer("position").notNull(), // ordering within the schedule (rotation order, or display order for fixed)
+  workoutTemplateId: integer("workout_template_id").references(() => workoutTemplates.id), // null = rest day
+  label: text("label"), // optional override label e.g. "Push A" shown even if template deleted
+});
+
+export const insertWorkoutScheduleSlotSchema = createInsertSchema(workoutScheduleSlots).omit({ id: true });
+export type InsertWorkoutScheduleSlot = z.infer<typeof insertWorkoutScheduleSlotSchema>;
+export type WorkoutScheduleSlot = typeof workoutScheduleSlots.$inferSelect;
+
+export const generateScheduleSchema = z.object({
+  split: z.enum(workoutSplitIds).exclude(["custom"]), // ppl | upper_lower | full_body | bro_split
+  mode: z.enum(scheduleModeIds), // fixed | rotating
+  // For fixed mode: which weekdays are training days, in order (0=Sun..6=Sat). Rest = all other days.
+  trainingDays: z.array(z.number().min(0).max(6)).optional(),
+});
+export type GenerateScheduleInput = z.infer<typeof generateScheduleSchema>;
+
+export const updateScheduleSlotsSchema = z.object({
+  mode: z.enum(scheduleModeIds),
+  slots: z.array(
+    z.object({
+      dayOfWeek: z.number().min(0).max(6).nullable(),
+      position: z.number().int().min(0),
+      workoutTemplateId: z.number().int().nullable(),
+      label: z.string().nullable().optional(),
+    }),
+  ),
+});
+export type UpdateScheduleSlotsInput = z.infer<typeof updateScheduleSlotsSchema>;
 
 // ---------------------------------------------------------------------------
 // Bodyweight Logs

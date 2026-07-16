@@ -1,4 +1,4 @@
-import { LayoutDashboard, Dumbbell, LineChart, Sparkles, BarChart3, ClipboardList, HeartPulse } from "lucide-react";
+import { LayoutDashboard, Dumbbell, LineChart, Sparkles, BarChart3, ClipboardList, CalendarDays, HeartPulse, Settings } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import {
   Sidebar,
@@ -19,11 +19,14 @@ const items = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
   { title: "Log Workout", url: "/log", icon: Dumbbell },
   { title: "Templates", url: "/templates", icon: ClipboardList },
+  { title: "Schedule", url: "/schedule", icon: CalendarDays },
   { title: "Progress", url: "/progress", icon: LineChart },
   { title: "Coach", url: "/coach", icon: Sparkles },
   { title: "Volume Tracker", url: "/volume", icon: BarChart3 },
   { title: "Recovery Map", url: "/recovery", icon: HeartPulse },
 ];
+
+const accountItems = [{ title: "Settings", url: "/settings", icon: Settings }];
 
 export function AppSidebar() {
   const [location] = useLocation();
@@ -39,6 +42,26 @@ export function AppSidebar() {
           <SidebarGroupContent>
             <SidebarMenu>
               {items.map((item) => {
+                const isActive = location === item.url;
+                return (
+                  <SidebarMenuItem key={item.title}>
+                    <SidebarMenuButton asChild isActive={isActive} data-testid={`link-nav-${item.title.toLowerCase().replace(/\s+/g, "-")}`}>
+                      <Link href={item.url}>
+                        <item.icon />
+                        <span>{item.title}</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+        <SidebarGroup>
+          <SidebarGroupLabel>Account</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {accountItems.map((item) => {
                 const isActive = location === item.url;
                 return (
                   <SidebarMenuItem key={item.title}>
