@@ -1,12 +1,21 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Link } from "wouter";
-import { ClipboardList, Play, Clock, Dumbbell, Flame, AlertCircle, Copy, Lock, Pencil } from "lucide-react";
+import { Link, useLocation } from "wouter";
+import { ClipboardList, Play, Clock, Dumbbell, Flame, AlertCircle, Copy, Lock, Pencil, Plus } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useActiveUser } from "@/lib/user-context";
 import { useToast } from "@/hooks/use-toast";
@@ -159,7 +168,10 @@ function TemplateCard({
 export default function WorkoutTemplates() {
   const { activeUserId, activeUser, users } = useActiveUser();
   const { toast } = useToast();
+  const [, navigate] = useLocation();
   const [tab, setTab] = useState<"mine" | "other">("mine");
+  const [newOpen, setNewOpen] = useState(false);
+  const [newName, setNewName] = useState("");
 
   const otherUser = users.find((u) => u.id !== activeUserId);
 
@@ -209,14 +221,79 @@ export default function WorkoutTemplates() {
   const activeList = tab === "mine" ? templates : otherTemplates;
   const activeLoading = tab === "mine" ? isLoading : otherLoading;
 
+  const createMutation = useMutation({
+    mutationFn: async (name: string) => {
+      const res = await apiRequest("POST", "/api/workout-templates", { name, notes: null });
+      return res.json();
+    },
+    onSuccess: (created) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/workout-templates"] });
+      setNewOpen(false);
+      setNewName("");
+      navigate(`/templates/${created.id}/edit`);
+    },
+    onError: () => toast({ title: "Couldn't create template", variant: "destructive" }),
+  });
+
+  const handleCreate = () => {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    createMutation.mutate(trimmed);
+  };
+
   return (
     <div className="mx-auto max-w-3xl p-4 md:p-6 space-y-6">
-      <div>
-        <h1 className="text-xl font-display font-bold" data-testid="text-page-title">
-          Workout Templates
-        </h1>
-        <p className="text-sm text-muted-foreground">Pre-built sessions with prescribed sets, reps, and RIR targets</p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-display font-bold" data-testid="text-page-title">
+            Workout Templates
+          </h1>
+          <p className="text-sm text-muted-foreground">Pre-built sessions with prescribed sets, reps, and RIR targets</p>
+        </div>
+        <Button
+          size="sm"
+          className="gap-1.5 shrink-0"
+          onClick={() => setNewOpen(true)}
+          data-testid="button-new-template"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          New Template
+        </Button>
       </div>
+
+      <Dialog open={newOpen} onOpenChange={(open) => { setNewOpen(open); if (!open) setNewName(""); }}>
+        <DialogContent data-testid="dialog-new-template">
+          <DialogHeader>
+            <DialogTitle>New Template</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label className="text-xs text-muted-foreground">Name</Label>
+            <Input
+              autoFocus
+              placeholder="e.g. Push Day"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleCreate(); }}
+              data-testid="input-new-template-name"
+            />
+            <p className="text-xs text-muted-foreground">
+              You'll add exercises next — start with a blank template and build it up.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setNewOpen(false)} data-testid="button-cancel-new-template">
+              Cancel
+            </Button>
+            <Button
+              onClick={handleCreate}
+              disabled={!newName.trim() || createMutation.isPending}
+              data-testid="button-confirm-new-template"
+            >
+              {createMutation.isPending ? "Creating..." : "Create & Add Exercises"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {otherUser && (
         <Tabs value={tab} onValueChange={(v) => setTab(v as "mine" | "other")}>

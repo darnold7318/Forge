@@ -284,7 +284,17 @@ export async function registerRoutes(
 
   app.post("/api/workout-templates/:id/exercises", async (req, res) => {
     const workoutTemplateId = Number(req.params.id);
-    const parsed = insertWorkoutTemplateExerciseSchema.safeParse({ ...req.body, workoutTemplateId });
+    const existing = db
+      .select()
+      .from(workoutTemplateExercisesTable)
+      .where(eq(workoutTemplateExercisesTable.workoutTemplateId, workoutTemplateId))
+      .all();
+    const nextOrder = existing.reduce((max, te) => Math.max(max, te.exerciseOrder), -1) + 1;
+    const parsed = insertWorkoutTemplateExerciseSchema.safeParse({
+      ...req.body,
+      workoutTemplateId,
+      exerciseOrder: req.body?.exerciseOrder ?? nextOrder,
+    });
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
