@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks } from "lucide-react";
+import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2 } from "lucide-react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -229,6 +229,121 @@ function CustomTemplateBuilder() {
   );
 }
 
+// Triggers a browser download from a fetched Response's blob, honoring the
+// filename the server set via Content-Disposition (falls back to a default).
+async function downloadResponse(res: Response, fallbackFilename: string) {
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const match = /filename="?([^";]+)"?/i.exec(disposition);
+  const filename = match?.[1] ?? fallbackFilename;
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function BackupExportCard() {
+  const { activeUser, users } = useActiveUser();
+  const { toast } = useToast();
+  const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
+
+  const downloadProfile = async (userId: number, name: string) => {
+    setDownloadingKey(`user-${userId}`);
+    try {
+      const res = await apiRequest("GET", `/api/export/user/${userId}`);
+      await downloadResponse(res, `forge-backup-${name}.json`);
+      toast({ title: `Backup downloaded for ${name}` });
+    } catch {
+      toast({ title: "Couldn't create backup", variant: "destructive" });
+    } finally {
+      setDownloadingKey(null);
+    }
+  };
+
+  const downloadAll = async () => {
+    setDownloadingKey("all");
+    try {
+      const res = await apiRequest("GET", "/api/export/all");
+      await downloadResponse(res, "forge-full-backup.json");
+      toast({ title: "Full backup downloaded" });
+    } catch {
+      toast({ title: "Couldn't create backup", variant: "destructive" });
+    } finally {
+      setDownloadingKey(null);
+    }
+  };
+
+  return (
+    <Card data-testid="card-backup-export">
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <DatabaseBackup className="h-4 w-4" />
+          Backup & Export
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Download your data as a JSON file you can keep somewhere safe. Useful before switching devices, or just in
+          case. Bring the file back to us if you ever need it restored.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="space-y-2">
+          {(users ?? []).map((u) => (
+            <div
+              key={u.id}
+              className="flex items-center justify-between gap-3 rounded-md border p-2.5"
+              data-testid={`row-backup-profile-${u.id}`}
+            >
+              <div className="text-sm font-medium">
+                {u.name}
+                {activeUser?.id === u.id && (
+                  <span className="ml-2 text-xs text-muted-foreground">(current)</span>
+                )}
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                disabled={downloadingKey === `user-${u.id}`}
+                onClick={() => downloadProfile(u.id, u.name)}
+                data-testid={`button-backup-profile-${u.id}`}
+              >
+                {downloadingKey === `user-${u.id}` ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                Download backup
+              </Button>
+            </div>
+          ))}
+        </div>
+        <Button
+          className="w-full gap-2"
+          disabled={downloadingKey === "all"}
+          onClick={downloadAll}
+          data-testid="button-backup-all"
+        >
+          {downloadingKey === "all" ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <DatabaseBackup className="h-4 w-4" />
+          )}
+          Download full backup (all profiles)
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          A full backup includes every profile, its templates, logged workouts, sets, schedule, and body weight
+          history, plus the shared exercise library.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function Settings() {
   const { activeUser, activeUserId, isLoading } = useActiveUser();
   const { theme, themeColor, setTheme } = useTheme();
@@ -412,6 +527,8 @@ export default function Settings() {
       </Card>
 
       {activeUser.workoutSplit === "custom" && <CustomTemplateBuilder />}
+
+      <BackupExportCard />
 
       <AlertDialog open={pendingSplit != null} onOpenChange={(open) => !open && setPendingSplit(null)}>
         <AlertDialogContent>

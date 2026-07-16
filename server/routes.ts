@@ -1,8 +1,21 @@
 import type { Express, Request, Response } from "express";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
-import { storage, parseExercise } from "./storage";
+import { storage, parseExercise, db } from "./storage";
 import type { SetWithExercise } from "./storage";
+import {
+  users as usersTable,
+  muscleGroups as muscleGroupsTable,
+  exercises as exercisesTable,
+  workoutTemplates as workoutTemplatesTable,
+  workoutTemplateExercises as workoutTemplateExercisesTable,
+  workouts as workoutsTable,
+  sets as setsTable,
+  workoutSchedules as workoutSchedulesTable,
+  scheduleDays as scheduleDaysTable,
+  bodyweightLogs as bodyweightLogsTable,
+} from "@shared/schema";
+import { inArray, eq } from "drizzle-orm";
 import {
   insertExerciseSchema,
   insertWorkoutSchema,
@@ -23,6 +36,7 @@ import {
   type MuscleGroupName,
   type Exercise,
   type Workout,
+  type User,
 } from "@shared/schema";
 import {
   categorizeVolume,
@@ -800,6 +814,87 @@ export async function registerRoutes(
     });
 
     res.json(snapshot);
+  });
+
+  // -------------------------------------------------------------------------
+  // Data export / backup — downloadable JSON snapshots for a single profile
+  // or the entire database. Used by the Settings page's Backup & Export card.
+  // -------------------------------------------------------------------------
+  function buildUserExport(user: User) {
+    const userId = user.id;
+    const templates = db.select().from(workoutTemplatesTable).where(eq(workoutTemplatesTable.userId, userId)).all();
+    const templateIds = templates.map((t) => t.id);
+    const templateExercises = templateIds.length
+      ? db.select().from(workoutTemplateExercisesTable).where(inArray(workoutTemplateExercisesTable.workoutTemplateId, templateIds)).all()
+      : [];
+    const workoutsRows = db.select().from(workoutsTable).where(eq(workoutsTable.userId, userId)).all();
+    const workoutIds = workoutsRows.map((w) => w.id);
+    const setsRows = workoutIds.length
+      ? db.select().from(setsTable).where(inArray(setsTable.workoutId, workoutIds)).all()
+      : [];
+    const schedule = db.select().from(workoutSchedulesTable).where(eq(workoutSchedulesTable.userId, userId)).get();
+    const days = schedule
+      ? db.select().from(scheduleDaysTable).where(eq(scheduleDaysTable.scheduleId, schedule.id)).all()
+      : [];
+    const bodyweightRows = db.select().from(bodyweightLogsTable).where(eq(bodyweightLogsTable.userId, userId)).all();
+
+    return {
+      user,
+      workoutTemplates: templates,
+      workoutTemplateExercises: templateExercises,
+      workouts: workoutsRows,
+      sets: setsRows,
+      workoutSchedule: schedule ?? null,
+      scheduleDays: days,
+      bodyweightLogs: bodyweightRows,
+    };
+  }
+
+  app.get("/api/export/user/:userId", async (req, res) => {
+    const userId = Number(req.params.userId);
+    if (Number.isNaN(userId)) {
+      return res.status(400).json({ message: "Invalid user id" });
+    }
+    const user = db.select().from(usersTable).where(eq(usersTable.id, userId)).get();
+    if (!user) {
+      return res.status(404).json({ message: "Profile not found" });
+    }
+
+    const payload = {
+      exportType: "forge-profile-backup" as const,
+      exportedAt: new Date().toISOString(),
+      version: 1,
+      data: buildUserExport(user),
+    };
+
+    const filename = `forge-backup-${user.name.replace(/[^a-z0-9-_]+/gi, "_")}-${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(JSON.stringify(payload, null, 2));
+  });
+
+  app.get("/api/export/all", async (_req, res) => {
+    const allUsers = db.select().from(usersTable).orderBy(usersTable.id).all();
+    const allMuscleGroups = db.select().from(muscleGroupsTable).all();
+    const allExercises = db.select().from(exercisesTable).all();
+
+    const profiles = allUsers.map((user) => buildUserExport(user));
+
+    const payload = {
+      exportType: "forge-full-backup" as const,
+      exportedAt: new Date().toISOString(),
+      version: 1,
+      data: {
+        muscleGroups: allMuscleGroups,
+        exercises: allExercises,
+        profiles,
+      },
+    };
+
+    const filename = `forge-full-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(JSON.stringify(payload, null, 2));
   });
 
   return httpServer;
