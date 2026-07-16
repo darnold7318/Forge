@@ -426,6 +426,19 @@ export default function TemplateEditor() {
     onError: () => toast({ title: "Couldn't save order", variant: "destructive" }),
   });
 
+  const [deleteTemplateOpen, setDeleteTemplateOpen] = useState(false);
+  const deleteTemplateMutation = useMutation({
+    mutationFn: async () => {
+      await apiRequest("DELETE", `/api/workout-templates/${templateId}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/workout-templates"] });
+      toast({ title: "Template deleted" });
+      navigate("/templates");
+    },
+    onError: () => toast({ title: "Couldn't delete template", variant: "destructive" }),
+  });
+
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
   const [localOrder, setLocalOrder] = useState<number[] | null>(null);
@@ -564,6 +577,52 @@ export default function TemplateEditor() {
           )}
         </CardContent>
       </Card>
+
+      <Card data-testid="card-delete-template" className="border-destructive/40">
+        <CardHeader>
+          <CardTitle className="text-base text-destructive">Delete Template</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-sm text-muted-foreground">
+            Permanently deletes this template. Any schedule days already using it keep their label but
+            will no longer link to a live template. This can't be undone.
+          </p>
+          <Button
+            variant="destructive"
+            className="gap-2"
+            onClick={() => setDeleteTemplateOpen(true)}
+            data-testid="button-delete-template"
+          >
+            <Trash2 className="h-4 w-4" />
+            Delete Template
+          </Button>
+        </CardContent>
+      </Card>
+
+      <AlertDialog open={deleteTemplateOpen} onOpenChange={setDeleteTemplateOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {localName ?? template.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently deletes this template and its exercise list. This can't be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="button-cancel-delete-template">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                setDeleteTemplateOpen(false);
+                deleteTemplateMutation.mutate();
+              }}
+              disabled={deleteTemplateMutation.isPending}
+              data-testid="button-confirm-delete-template"
+            >
+              {deleteTemplateMutation.isPending ? "Deleting..." : "Delete Template"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
