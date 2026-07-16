@@ -70,28 +70,18 @@ export default function Settings() {
     },
   });
 
-  const { data: existingSchedule } = useQuery<{ schedule: { mode: "fixed" | "rotating" } | null }>({
-    queryKey: ["/api/schedule", activeUserId],
-    queryFn: async () => {
-      const res = await apiRequest("GET", "/api/schedule");
-      return res.json();
-    },
-    enabled: activeUserId != null,
-  });
-
   const generateSchedule = useMutation({
     mutationFn: async (split: Exclude<WorkoutSplitId, "custom">) => {
-      const mode = existingSchedule?.schedule?.mode ?? "fixed";
-      const res = await apiRequest("POST", "/api/schedule/generate", { split, mode });
+      const res = await apiRequest("POST", "/api/schedule/generate", { split });
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/users"] });
       queryClient.invalidateQueries({ queryKey: ["/api/schedule"] });
-      toast({ title: "Schedule generated" });
+      toast({ title: "Calendar updated" });
     },
     onError: () => {
-      toast({ title: "Couldn't generate schedule", variant: "destructive" });
+      toast({ title: "Couldn't update calendar", variant: "destructive" });
     },
   });
 
@@ -244,11 +234,12 @@ export default function Settings() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Generate a new {pendingSplit ? workoutSplitLabels[pendingSplit] : ""} schedule?
+              Switch to {pendingSplit ? workoutSplitLabels[pendingSplit] : ""}?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              This will replace your current weekly schedule with a fresh one built for this split. You can
-              still edit it afterward from the Schedule page.
+              This will auto-fill your calendar with a repeating {pendingSplit ? workoutSplitLabels[pendingSplit] : ""}{" "}
+              rotation going forward, continuing month after month. Any days you've already customized are left alone,
+              and you can always drag days around afterward from the Schedule page.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

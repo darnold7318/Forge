@@ -8,7 +8,8 @@ import {
   workoutTemplates,
   workoutTemplateExercises,
   workoutSchedules,
-  workoutScheduleSlots,
+  scheduleDays,
+  splitRotationCycles,
 } from "@shared/schema";
 import type {
   User,
@@ -29,13 +30,16 @@ import type {
   WorkoutTemplateExercise,
   InsertWorkoutTemplateExercise,
   WorkoutSchedule,
-  WorkoutScheduleSlot,
+  ScheduleDay,
   GenerateScheduleInput,
-  UpdateScheduleSlotsInput,
+  SetWeeklyRestDaysInput,
+  MoveScheduleDayInput,
+  SetScheduleDayInput,
 } from "@shared/schema";
 import {
-  buildAutoSchedule,
-  type ScheduleExistingTemplate,
+  buildStarterTemplate,
+  monthBounds,
+  enumerateDates,
   type ScheduleCatalogExercise,
   type MuscleGroupLookup,
 } from "@shared/coaching";
@@ -140,19 +144,48 @@ function ensureTables() {
     CREATE TABLE IF NOT EXISTS workout_schedules (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),
-      mode TEXT NOT NULL DEFAULT 'fixed',
-      rotation_position INTEGER NOT NULL DEFAULT 0
+      active_split TEXT,
+      rotation_cycle TEXT NOT NULL DEFAULT '[]',
+      rotation_cursor INTEGER NOT NULL DEFAULT 0,
+      weekly_rest_days TEXT NOT NULL DEFAULT '[]',
+      last_generated_month TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS workout_schedule_slots (
+    CREATE TABLE IF NOT EXISTS schedule_days (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       schedule_id INTEGER NOT NULL REFERENCES workout_schedules(id),
-      day_of_week INTEGER,
-      position INTEGER NOT NULL,
+      date TEXT NOT NULL,
       workout_template_id INTEGER REFERENCES workout_templates(id),
-      label TEXT
+      label TEXT,
+      is_manual_override INTEGER NOT NULL DEFAULT 0,
+      is_weekly_blocked INTEGER NOT NULL DEFAULT 0
     );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_days_schedule_date ON schedule_days(schedule_id, date);
   `);
+
+  // Drop the legacy weekday/rotation-position schedule table from earlier builds —
+  // superseded by the calendar-date based schedule_days model above.
+  const legacyScheduleCols = new Set(
+    (sqlite.prepare("PRAGMA table_info(workout_schedules)").all() as { name: string }[]).map((c) => c.name),
+  );
+  if (legacyScheduleCols.has("mode") && !legacyScheduleCols.has("active_split")) {
+    sqlite.exec(`
+      DROP TABLE IF EXISTS workout_schedule_slots;
+      DROP TABLE IF EXISTS workout_schedules;
+    `);
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS workout_schedules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),
+        active_split TEXT,
+        rotation_cycle TEXT NOT NULL DEFAULT '[]',
+        rotation_cursor INTEGER NOT NULL DEFAULT 0,
+        weekly_rest_days TEXT NOT NULL DEFAULT '[]',
+        last_generated_month TEXT
+      );
+    `);
+  }
 
   // Migration: the `users` table may already exist from before the
   // theme_color/theme_mode/workout_split columns were introduced. SQLite
@@ -288,8 +321,8 @@ export interface WorkoutTemplateWithExercises extends WorkoutTemplate {
   exercises: WorkoutTemplateExercise[];
 }
 
-export interface WorkoutScheduleWithSlots extends WorkoutSchedule {
-  slots: WorkoutScheduleSlot[];
+export interface WorkoutScheduleWithDays extends WorkoutSchedule {
+  days: ScheduleDay[];
 }
 
 // ---------------------------------------------------------------------------
@@ -355,11 +388,14 @@ export interface IStorage {
   getBodyweightLogs(userId: number): Promise<BodyweightLog[]>;
   createBodyweightLog(log: InsertBodyweightLog): Promise<BodyweightLog>;
 
-  // Workout schedule (scoped per user)
-  getWorkoutSchedule(userId: number): Promise<WorkoutScheduleWithSlots | undefined>;
-  generateWorkoutSchedule(userId: number, input: GenerateScheduleInput): Promise<WorkoutScheduleWithSlots>;
-  updateWorkoutScheduleSlots(userId: number, input: UpdateScheduleSlotsInput): Promise<WorkoutScheduleWithSlots>;
-  advanceRotation(userId: number, completedTemplateId: number | null): Promise<void>;
+  // Workout schedule (scoped per user, calendar-date based)
+  getWorkoutSchedule(userId: number, startDate: string, endDate: string): Promise<WorkoutScheduleWithDays>;
+  setWeeklyRestDays(userId: number, days: number[]): Promise<WorkoutSchedule>;
+  generateScheduleMonth(userId: number, input: GenerateScheduleInput, yearMonth: string): Promise<WorkoutScheduleWithDays>;
+  continueGeneration(userId: number, yearMonth: string): Promise<void>;
+  setScheduleDay(userId: number, input: SetScheduleDayInput): Promise<ScheduleDay>;
+  moveScheduleDay(userId: number, input: MoveScheduleDayInput): Promise<ScheduleDay[]>;
+  advanceRotation(userId: number, completedTemplateId: number | null, date: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -617,32 +653,58 @@ export class DatabaseStorage implements IStorage {
     return db.insert(bodyweightLogs).values(log).returning().get();
   }
 
-  // ---------------- Workout schedule ----------------
-  private async getScheduleSlots(scheduleId: number): Promise<WorkoutScheduleSlot[]> {
-    const rows = db
-      .select()
-      .from(workoutScheduleSlots)
-      .where(eq(workoutScheduleSlots.scheduleId, scheduleId))
-      .all();
-    return rows.sort((a, b) => a.position - b.position);
+  // ---------------- Workout schedule (calendar-based) ----------------
+  private getOrCreateScheduleRow(userId: number): WorkoutSchedule {
+    let schedule = db.select().from(workoutSchedules).where(eq(workoutSchedules.userId, userId)).get();
+    if (!schedule) {
+      schedule = db.insert(workoutSchedules).values({ userId }).returning().get();
+    }
+    return schedule;
   }
 
-  async getWorkoutSchedule(userId: number): Promise<WorkoutScheduleWithSlots | undefined> {
-    const schedule = db.select().from(workoutSchedules).where(eq(workoutSchedules.userId, userId)).get();
-    if (!schedule) return undefined;
-    const slots = await this.getScheduleSlots(schedule.id);
-    return { ...schedule, slots };
+  private async getDaysInRange(scheduleId: number, startDate: string, endDate: string): Promise<ScheduleDay[]> {
+    const rows = db.select().from(scheduleDays).where(eq(scheduleDays.scheduleId, scheduleId)).all();
+    return rows.filter((d) => d.date >= startDate && d.date <= endDate).sort((a, b) => a.date.localeCompare(b.date));
   }
 
-  /** Build the pure-planning inputs (existing templates, exercise catalog, muscle lookup) from the DB. */
+  /** Ensure a template exists for a given rotation label (e.g. "Push"), creating a starter if needed. */
+  private async ensureTemplateForLabel(userId: number, label: string): Promise<number> {
+    const templates = await this.getWorkoutTemplates(userId);
+    const existing = templates.find((t) => t.name.toLowerCase().startsWith(label.toLowerCase()));
+    if (existing) return existing.id;
+
+    const { catalog, muscleGroupLookup } = await this.buildSchedulePlanInputs(userId);
+    const starter = buildStarterTemplate({ archetype: label, catalog, muscleGroupLookup });
+    const created = await this.createWorkoutTemplate({ userId, name: starter.name, notes: null });
+    for (const ex of starter.exercises) {
+      await this.createWorkoutTemplateExercise({
+        workoutTemplateId: created.id,
+        exerciseId: ex.exerciseId,
+        exerciseOrder: ex.exerciseOrder,
+        exerciseRole: ex.exerciseRole,
+        warmupSets: ex.warmupSets,
+        topSets: ex.topSets,
+        backoffSets: ex.backoffSets,
+        backoffReductionPercent: 0,
+        targetSets: ex.targetSets,
+        targetRepsMin: ex.targetRepsMin,
+        targetRepsMax: ex.targetRepsMax,
+        tempo: null,
+        targetRir: ex.targetRir,
+        failureTarget: ex.failureTarget,
+        intensityTechnique: null,
+        restSeconds: ex.restSeconds,
+        notes: null,
+      });
+    }
+    return created.id;
+  }
+
+  /** Build the pure-planning inputs (exercise catalog, muscle lookup) from the DB. */
   private async buildSchedulePlanInputs(userId: number): Promise<{
-    existingTemplates: ScheduleExistingTemplate[];
     catalog: ScheduleCatalogExercise[];
     muscleGroupLookup: MuscleGroupLookup;
   }> {
-    const templates = await this.getWorkoutTemplates(userId);
-    const existingTemplates: ScheduleExistingTemplate[] = templates.map((t) => ({ id: t.id, name: t.name }));
-
     const exerciseRows = await this.getExercises();
     const catalog: ScheduleCatalogExercise[] = exerciseRows.map((e) => ({
       id: e.id,
@@ -656,144 +718,208 @@ export class DatabaseStorage implements IStorage {
     for (const g of groups) idToName.set(g.id, g.name);
     const muscleGroupLookup: MuscleGroupLookup = { idToName };
 
-    return { existingTemplates, catalog, muscleGroupLookup };
+    return { catalog, muscleGroupLookup };
   }
 
-  async generateWorkoutSchedule(userId: number, input: GenerateScheduleInput): Promise<WorkoutScheduleWithSlots> {
-    const { existingTemplates, catalog, muscleGroupLookup } = await this.buildSchedulePlanInputs(userId);
+  async getWorkoutSchedule(userId: number, startDate: string, endDate: string): Promise<WorkoutScheduleWithDays> {
+    const schedule = this.getOrCreateScheduleRow(userId);
+    const days = await this.getDaysInRange(schedule.id, startDate, endDate);
+    return { ...schedule, days };
+  }
 
-    const plan = buildAutoSchedule({
-      split: input.split,
-      mode: input.mode,
-      trainingDays: input.trainingDays,
-      existingTemplates,
-      catalog,
-      muscleGroupLookup,
-    });
+  async setWeeklyRestDays(userId: number, days: number[]): Promise<WorkoutSchedule> {
+    const schedule = this.getOrCreateScheduleRow(userId);
+    return db
+      .update(workoutSchedules)
+      .set({ weeklyRestDays: JSON.stringify(days) })
+      .where(eq(workoutSchedules.id, schedule.id))
+      .returning()
+      .get();
+  }
 
-    // Materialize any starter templates the plan decided to create, and
-    // remember their new ids so slots can reference the right template.
-    const newTemplateIdByIndex = new Map<number, number>();
-    for (let i = 0; i < plan.newTemplates.length; i++) {
-      const spec = plan.newTemplates[i];
-      const created = await this.createWorkoutTemplate({ userId, name: spec.name, notes: null });
-      for (const ex of spec.exercises) {
-        await this.createWorkoutTemplateExercise({
-          workoutTemplateId: created.id,
-          exerciseId: ex.exerciseId,
-          exerciseOrder: ex.exerciseOrder,
-          exerciseRole: ex.exerciseRole,
-          warmupSets: ex.warmupSets,
-          topSets: ex.topSets,
-          backoffSets: ex.backoffSets,
-          backoffReductionPercent: 0,
-          targetSets: ex.targetSets,
-          targetRepsMin: ex.targetRepsMin,
-          targetRepsMax: ex.targetRepsMax,
-          tempo: null,
-          targetRir: ex.targetRir,
-          failureTarget: ex.failureTarget,
-          intensityTechnique: null,
-          restSeconds: ex.restSeconds,
-          notes: null,
-        });
-      }
-      newTemplateIdByIndex.set(i, created.id);
-    }
+  /** Auto-generate (or continue) the active split's rotation for one calendar month (YYYY-MM). */
+  async generateScheduleMonth(
+    userId: number,
+    input: GenerateScheduleInput,
+    yearMonth: string,
+  ): Promise<WorkoutScheduleWithDays> {
+    let schedule = this.getOrCreateScheduleRow(userId);
+    const cycle = splitRotationCycles[input.split];
+    const isNewSplit = schedule.activeSplit !== input.split;
 
-    const resolvedTemplateIdByArchetype = new Map<string, number>();
-    plan.resolutions.forEach((r) => {
-      const templateId = r.kind === "existing" ? r.templateId : newTemplateIdByIndex.get(r.newTemplateIndex)!;
-      resolvedTemplateIdByArchetype.set(r.archetype, templateId);
-    });
+    schedule = db
+      .update(workoutSchedules)
+      .set({
+        activeSplit: input.split,
+        rotationCycle: JSON.stringify(cycle),
+        rotationCursor: isNewSplit ? 0 : schedule.rotationCursor,
+      })
+      .where(eq(workoutSchedules.id, schedule.id))
+      .returning()
+      .get();
 
-    // Upsert the schedule row (unique per user).
-    let schedule = db.select().from(workoutSchedules).where(eq(workoutSchedules.userId, userId)).get();
-    if (schedule) {
-      db.delete(workoutScheduleSlots).where(eq(workoutScheduleSlots.scheduleId, schedule.id)).run();
-      schedule = db
-        .update(workoutSchedules)
-        .set({ mode: input.mode, rotationPosition: 0 })
-        .where(eq(workoutSchedules.id, schedule.id))
-        .returning()
-        .get();
-    } else {
-      schedule = db
-        .insert(workoutSchedules)
-        .values({ userId, mode: input.mode, rotationPosition: 0 })
-        .returning()
-        .get();
-    }
-
-    for (const slot of plan.slots) {
-      const templateId = slot.archetype ? resolvedTemplateIdByArchetype.get(slot.archetype) ?? null : null;
-      db.insert(workoutScheduleSlots)
-        .values({
-          scheduleId: schedule.id,
-          dayOfWeek: slot.dayOfWeek,
-          position: slot.position,
-          workoutTemplateId: templateId,
-          label: slot.archetype,
-        })
-        .run();
-    }
-
-    // Reflect the newly generated split on the user's preferences.
     await this.updateUserPreferences(userId, { workoutSplit: input.split });
+    await this.continueGeneration(userId, yearMonth);
 
-    const slots = await this.getScheduleSlots(schedule.id);
-    return { ...schedule, slots };
+    const [startDate, endDate] = monthBounds(yearMonth);
+    const days = await this.getDaysInRange(schedule.id, startDate, endDate);
+    const refreshed = db.select().from(workoutSchedules).where(eq(workoutSchedules.id, schedule.id)).get()!;
+    return { ...refreshed, days };
   }
 
-  async updateWorkoutScheduleSlots(userId: number, input: UpdateScheduleSlotsInput): Promise<WorkoutScheduleWithSlots> {
-    let schedule = db.select().from(workoutSchedules).where(eq(workoutSchedules.userId, userId)).get();
-    if (!schedule) {
-      schedule = db
-        .insert(workoutSchedules)
-        .values({ userId, mode: input.mode, rotationPosition: 0 })
-        .returning()
+  /** Fill in every day of yearMonth that isn't manually overridden, continuing the rotation cursor. */
+  async continueGeneration(userId: number, yearMonth: string): Promise<void> {
+    const schedule = this.getOrCreateScheduleRow(userId);
+    if (!schedule.activeSplit) return;
+    const cycle: string[] = JSON.parse(schedule.rotationCycle || "[]");
+    if (cycle.length === 0) return;
+    const weeklyRestDays: number[] = JSON.parse(schedule.weeklyRestDays || "[]");
+
+    const [startDate, endDate] = monthBounds(yearMonth);
+    const existingDays = await this.getDaysInRange(schedule.id, startDate, endDate);
+    const existingByDate = new Map(existingDays.map((d) => [d.date, d]));
+
+    let cursor = schedule.rotationCursor;
+    const dates = enumerateDates(startDate, endDate);
+    for (const date of dates) {
+      const existing = existingByDate.get(date);
+      if (existing && existing.isManualOverride) continue; // never touch manual days
+
+      const dow = new Date(date + "T00:00:00").getDay();
+      const isRestDay = weeklyRestDays.includes(dow);
+
+      if (isRestDay) {
+        if (existing) {
+          db.update(scheduleDays)
+            .set({ workoutTemplateId: null, label: "Rest", isWeeklyBlocked: true })
+            .where(eq(scheduleDays.id, existing.id))
+            .run();
+        } else {
+          db.insert(scheduleDays)
+            .values({ scheduleId: schedule.id, date, workoutTemplateId: null, label: "Rest", isWeeklyBlocked: true })
+            .run();
+        }
+        continue; // rest days don't consume a rotation slot
+      }
+
+      const label = cycle[cursor % cycle.length];
+      const templateId = await this.ensureTemplateForLabel(userId, label);
+      if (existing) {
+        db.update(scheduleDays)
+          .set({ workoutTemplateId: templateId, label, isWeeklyBlocked: false })
+          .where(eq(scheduleDays.id, existing.id))
+          .run();
+      } else {
+        db.insert(scheduleDays)
+          .values({ scheduleId: schedule.id, date, workoutTemplateId: templateId, label, isWeeklyBlocked: false })
+          .run();
+      }
+      cursor += 1;
+    }
+
+    db.update(workoutSchedules)
+      .set({ rotationCursor: cursor % cycle.length, lastGeneratedMonth: yearMonth })
+      .where(eq(workoutSchedules.id, schedule.id))
+      .run();
+  }
+
+  /** Directly set one calendar day (drag a Rest bubble onto a day, or any manual edit). Marks it as a manual override. */
+  async setScheduleDay(userId: number, input: SetScheduleDayInput): Promise<ScheduleDay> {
+    const schedule = this.getOrCreateScheduleRow(userId);
+    const existing = db
+      .select()
+      .from(scheduleDays)
+      .where(and(eq(scheduleDays.scheduleId, schedule.id), eq(scheduleDays.date, input.date)))
+      .get();
+
+    const values = {
+      workoutTemplateId: input.workoutTemplateId,
+      label: input.label ?? null,
+      isManualOverride: true,
+      isWeeklyBlocked: false,
+    };
+
+    if (existing) {
+      return db.update(scheduleDays).set(values).where(eq(scheduleDays.id, existing.id)).returning().get();
+    }
+    return db
+      .insert(scheduleDays)
+      .values({ scheduleId: schedule.id, date: input.date, ...values })
+      .returning()
+      .get();
+  }
+
+  /** Drag-and-drop a day's content to another date. "swap" exchanges both days' contents;
+   *  "shift" pushes every day from `toDate` onward forward by one day within the same month
+   *  before placing Rest at `toDate`; "skip" just overwrites `toDate` with the dragged content
+   *  without touching any other day. */
+  async moveScheduleDay(userId: number, input: MoveScheduleDayInput): Promise<ScheduleDay[]> {
+    const schedule = this.getOrCreateScheduleRow(userId);
+    const getDay = (date: string) =>
+      db
+        .select()
+        .from(scheduleDays)
+        .where(and(eq(scheduleDays.scheduleId, schedule.id), eq(scheduleDays.date, date)))
         .get();
+
+    const upsert = (date: string, values: { workoutTemplateId: number | null; label: string | null }) => {
+      const existing = getDay(date);
+      const payload = { ...values, isManualOverride: true, isWeeklyBlocked: false };
+      if (existing) {
+        return db.update(scheduleDays).set(payload).where(eq(scheduleDays.id, existing.id)).returning().get();
+      }
+      return db.insert(scheduleDays).values({ scheduleId: schedule.id, date, ...payload }).returning().get();
+    };
+
+    const fromDay = getDay(input.fromDate);
+    const toDay = getDay(input.toDate);
+    const touched: ScheduleDay[] = [];
+
+    if (input.mode === "swap") {
+      touched.push(upsert(input.toDate, { workoutTemplateId: fromDay?.workoutTemplateId ?? null, label: fromDay?.label ?? null }));
+      touched.push(
+        upsert(input.fromDate, { workoutTemplateId: toDay?.workoutTemplateId ?? null, label: toDay?.label ?? null }),
+      );
+    } else if (input.mode === "skip") {
+      // Overwrite only the target day with the dragged content; source day is cleared to rest.
+      touched.push(upsert(input.toDate, { workoutTemplateId: fromDay?.workoutTemplateId ?? null, label: fromDay?.label ?? null }));
+      touched.push(upsert(input.fromDate, { workoutTemplateId: null, label: "Rest" }));
     } else {
-      schedule = db
-        .update(workoutSchedules)
-        .set({ mode: input.mode })
-        .where(eq(workoutSchedules.id, schedule.id))
-        .returning()
-        .get();
+      // shift: push toDate and everything after it (within the same month) forward by one day,
+      // then place the dragged content at toDate. When fromDate === toDate (dropping the Rest
+      // palette bubble directly onto an occupied day), the dragged content is explicitly Rest
+      // rather than whatever currently occupies that day.
+      const draggedContent =
+        input.fromDate === input.toDate ? { workoutTemplateId: null, label: "Rest" } : { workoutTemplateId: fromDay?.workoutTemplateId ?? null, label: fromDay?.label ?? null };
+
+      const [, endOfMonth] = monthBounds(input.toDate.slice(0, 7));
+      const datesAfter = enumerateDates(input.toDate, endOfMonth);
+      // Walk backwards so we don't overwrite a day before reading it.
+      for (let i = datesAfter.length - 1; i >= 1; i--) {
+        const cur = getDay(datesAfter[i - 1]);
+        touched.push(upsert(datesAfter[i], { workoutTemplateId: cur?.workoutTemplateId ?? null, label: cur?.label ?? null }));
+      }
+      touched.push(upsert(input.toDate, draggedContent));
+      if (input.fromDate !== input.toDate) {
+        touched.push(upsert(input.fromDate, { workoutTemplateId: null, label: "Rest" }));
+      }
     }
 
-    db.delete(workoutScheduleSlots).where(eq(workoutScheduleSlots.scheduleId, schedule.id)).run();
-    for (const slot of input.slots) {
-      db.insert(workoutScheduleSlots)
-        .values({
-          scheduleId: schedule.id,
-          dayOfWeek: slot.dayOfWeek,
-          position: slot.position,
-          workoutTemplateId: slot.workoutTemplateId,
-          label: slot.label ?? null,
-        })
-        .run();
-    }
-
-    // Manual edits mark the split as "custom" so Settings reflects the divergence.
-    await this.updateUserPreferences(userId, { workoutSplit: "custom" });
-
-    const slots = await this.getScheduleSlots(schedule.id);
-    return { ...schedule, slots };
+    return touched;
   }
 
-  async advanceRotation(userId: number, completedTemplateId: number | null): Promise<void> {
+  async advanceRotation(userId: number, completedTemplateId: number | null, date: string): Promise<void> {
     if (completedTemplateId == null) return;
-    const schedule = db.select().from(workoutSchedules).where(eq(workoutSchedules.userId, userId)).get();
-    if (!schedule || schedule.mode !== "rotating") return;
-    const slots = await this.getScheduleSlots(schedule.id);
-    if (slots.length === 0) return;
-    const currentSlot = slots.find((s) => s.position === schedule.rotationPosition);
-    // Only advance if the logged workout matches the template scheduled at the
-    // current rotation position — avoids skipping the cycle for ad-hoc workouts.
-    if (!currentSlot || currentSlot.workoutTemplateId !== completedTemplateId) return;
-    const nextPosition = (schedule.rotationPosition + 1) % slots.length;
-    db.update(workoutSchedules).set({ rotationPosition: nextPosition }).where(eq(workoutSchedules.id, schedule.id)).run();
+    const schedule = this.getOrCreateScheduleRow(userId);
+    const day = db
+      .select()
+      .from(scheduleDays)
+      .where(and(eq(scheduleDays.scheduleId, schedule.id), eq(scheduleDays.date, date)))
+      .get();
+    // Only meaningful as a signal that the day's plan was followed; the calendar model
+    // already has each day pre-assigned, so no cursor mutation is needed here beyond
+    // keeping the month generation logic (continueGeneration) as the source of truth.
+    void day;
   }
 }
 

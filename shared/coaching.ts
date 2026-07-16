@@ -12,7 +12,6 @@ import {
   muscleGroupDisplayNames,
   type MuscleGroupName,
   type WorkoutSplitId,
-  type ScheduleModeId,
   type ExerciseRole,
   type FailureTarget,
 } from "./schema";
@@ -1002,16 +1001,10 @@ function estimateDurationMinutes(exercises: DashboardTemplateInput["exercises"])
   return Math.max(20, Math.round((workSeconds + restSeconds) / 60));
 }
 
-export interface ScheduleSlotLookupInput {
-  dayOfWeek: number | null;
-  position: number;
-  workoutTemplateId: number | null;
-}
-
+// Today's resolved calendar day, passed straight from the ScheduleDay row (if any).
 export interface DashboardScheduleInput {
-  mode: ScheduleModeId;
-  slots: ScheduleSlotLookupInput[];
-  rotationPosition: number;
+  workoutTemplateId: number | null; // null = rest day
+  label: string | null;
 }
 
 export interface GetDashboardSnapshotArgs {
@@ -1024,33 +1017,12 @@ export interface GetDashboardSnapshotArgs {
   schedule?: DashboardScheduleInput | null;
 }
 
-/**
- * Resolve which slot (if any) represents "today" per the schedule's mode.
- * Fixed mode: match on calendar weekday. Rotating mode: match on rotationPosition
- * (mod slot count so a stale/out-of-range position never crashes the lookup).
- */
+/** The calendar model already resolves "today" to a single row; this just reports whether one exists. */
 function resolveScheduledSlot(
   schedule: DashboardScheduleInput | null | undefined,
-  now: Date,
 ): { matched: true; workoutTemplateId: number | null } | { matched: false } {
-  if (!schedule || schedule.slots.length === 0) return { matched: false };
-  const hasAnyTemplate = schedule.slots.some((s) => s.workoutTemplateId != null);
-  if (!hasAnyTemplate) return { matched: false };
-
-  if (schedule.mode === "fixed") {
-    const todayDow = now.getDay();
-    const slot = schedule.slots.find((s) => s.dayOfWeek === todayDow);
-    if (!slot) return { matched: false };
-    return { matched: true, workoutTemplateId: slot.workoutTemplateId };
-  }
-
-  // rotating
-  const count = schedule.slots.length;
-  const idx = ((schedule.rotationPosition % count) + count) % count;
-  const ordered = [...schedule.slots].sort((a, b) => a.position - b.position);
-  const slot = ordered[idx] ?? ordered.find((s) => s.position === schedule.rotationPosition);
-  if (!slot) return { matched: false };
-  return { matched: true, workoutTemplateId: slot.workoutTemplateId };
+  if (!schedule) return { matched: false };
+  return { matched: true, workoutTemplateId: schedule.workoutTemplateId };
 }
 
 export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardSnapshot {
@@ -1070,7 +1042,7 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
   const lastSession = history[0] ?? null;
 
   // Consult the schedule first (if one exists with at least one non-null slot).
-  const scheduleResolution = resolveScheduledSlot(args.schedule, now);
+  const scheduleResolution = resolveScheduledSlot(args.schedule);
   const scheduleSource: "schedule" | "fallback" = scheduleResolution.matched ? "schedule" : "fallback";
   const isRestDay = scheduleResolution.matched && scheduleResolution.workoutTemplateId == null;
 
@@ -1317,37 +1289,6 @@ export interface StarterTemplateSpec {
   exercises: StarterTemplateExerciseSpec[];
 }
 
-// A resolved day archetype: either points at an existing owned template, or
-// carries a starter-template spec (identified by index into `newTemplates`)
-// that the caller must create first and substitute the resulting id.
-export type ResolvedArchetype =
-  | { archetype: string; kind: "existing"; templateId: number }
-  | { archetype: string; kind: "new"; newTemplateIndex: number };
-
-export interface PlannedSlot {
-  dayOfWeek: number | null;
-  position: number;
-  archetype: string | null; // null = rest day
-  resolved: ResolvedArchetype | null; // null = rest day
-}
-
-export interface AutoSchedulePlan {
-  mode: ScheduleModeId;
-  archetypes: string[];
-  resolutions: ResolvedArchetype[];
-  newTemplates: StarterTemplateSpec[]; // starter templates that must be created
-  slots: PlannedSlot[]; // slots reference resolutions/newTemplates by index; workoutTemplateId filled in by caller after creation
-}
-
-export interface BuildAutoScheduleArgs {
-  split: Exclude<WorkoutSplitId, "custom">;
-  mode: ScheduleModeId;
-  trainingDays?: number[];
-  existingTemplates: ScheduleExistingTemplate[];
-  catalog: ScheduleCatalogExercise[];
-  muscleGroupLookup: MuscleGroupLookup; // to resolve MuscleGroupName -> id
-}
-
 function pickExercisesForArchetype(
   archetype: string,
   catalog: ScheduleCatalogExercise[],
@@ -1417,66 +1358,35 @@ function pickExercisesForArchetype(
   });
 }
 
-/**
- * Resolve each split day-archetype to either an existing user template
- * (case-insensitive substring match on name) or a freshly generated starter
- * template spec. Pure — does not touch the DB.
- */
-export function buildAutoSchedule(args: BuildAutoScheduleArgs): AutoSchedulePlan {
-  const { split, mode, trainingDays, existingTemplates, catalog, muscleGroupLookup } = args;
-  const archetypes = SPLIT_DAY_ARCHETYPES[split];
-
-  const resolutions: ResolvedArchetype[] = [];
-  const newTemplates: StarterTemplateSpec[] = [];
-
-  const claimedTemplateIds = new Set<number>();
-
-  for (const archetype of archetypes) {
-    // Build a distinguishing keyword set for the whole archetype phrase, not
-    // just its first word, so multi-word archetypes ("Full Body A/B/C") don't
-    // all collide on "full". Normalize simple plurals ("Legs" -> "leg").
-    const words = archetype
-      .toLowerCase()
-      .split(" ")
-      .map((w) => (w.endsWith("s") && w.length > 3 ? w.slice(0, -1) : w));
-    const match = existingTemplates.find((t) => {
-      if (claimedTemplateIds.has(t.id)) return false; // don't reuse a template across archetypes
-      const name = t.name.toLowerCase();
-      return words.every((w) => name.includes(w));
-    });
-    if (match) {
-      claimedTemplateIds.add(match.id);
-      resolutions.push({ archetype, kind: "existing", templateId: match.id });
-    } else {
-      const exercises = pickExercisesForArchetype(archetype, catalog, muscleGroupLookup);
-      const newTemplateIndex = newTemplates.length;
-      newTemplates.push({ name: `${archetype} Day (Auto)`, archetype, exercises });
-      resolutions.push({ archetype, kind: "new", newTemplateIndex });
-    }
-  }
-
-  const slots: PlannedSlot[] = [];
-
-  if (mode === "fixed") {
-    const days = trainingDays && trainingDays.length > 0 ? trainingDays : DEFAULT_TRAINING_DAYS[split];
-    const trainingSet = new Set(days);
-    let archetypeCursor = 0;
-    // Build slots for every day of the week (0-6) so rest days are explicit rows.
-    for (let dow = 0; dow <= 6; dow++) {
-      if (trainingSet.has(dow)) {
-        const resolved = resolutions[archetypeCursor % resolutions.length];
-        slots.push({ dayOfWeek: dow, position: dow, archetype: resolved.archetype, resolved });
-        archetypeCursor++;
-      } else {
-        slots.push({ dayOfWeek: dow, position: dow, archetype: null, resolved: null });
-      }
-    }
-  } else {
-    // rotating: no rest days, sequential positions through the archetype list
-    resolutions.forEach((resolved, idx) => {
-      slots.push({ dayOfWeek: null, position: idx, archetype: resolved.archetype, resolved });
-    });
-  }
-
-  return { mode, archetypes, resolutions, newTemplates, slots };
+/** Build a single starter-template spec for one archetype label (e.g. "Push"). Pure — no DB access. */
+export function buildStarterTemplate(args: {
+  archetype: string;
+  catalog: ScheduleCatalogExercise[];
+  muscleGroupLookup: MuscleGroupLookup;
+}): StarterTemplateSpec {
+  const { archetype, catalog, muscleGroupLookup } = args;
+  const exercises = pickExercisesForArchetype(archetype, catalog, muscleGroupLookup);
+  return { name: `${archetype} Day (Auto)`, archetype, exercises };
 }
+
+/** Returns [startDate, endDate] (both YYYY-MM-DD, inclusive) for a given "YYYY-MM" month string. */
+export function monthBounds(yearMonth: string): [string, string] {
+  const [year, month] = yearMonth.split("-").map(Number);
+  const start = `${yearMonth}-01`;
+  const lastDay = new Date(year, month, 0).getDate(); // day 0 of next month = last day of this month
+  const end = `${yearMonth}-${String(lastDay).padStart(2, "0")}`;
+  return [start, end];
+}
+
+/** Enumerate every date (YYYY-MM-DD) from startDate to endDate, inclusive. */
+export function enumerateDates(startDate: string, endDate: string): string[] {
+  const dates: string[] = [];
+  let cursor = new Date(startDate + "T00:00:00");
+  const end = new Date(endDate + "T00:00:00");
+  while (cursor <= end) {
+    dates.push(cursor.toISOString().slice(0, 10));
+    cursor = new Date(cursor.getTime() + 86400000);
+  }
+  return dates;
+}
+

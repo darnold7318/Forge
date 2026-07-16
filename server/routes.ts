@@ -13,7 +13,9 @@ import {
   insertUserSchema,
   updateUserPreferencesSchema,
   generateScheduleSchema,
-  updateScheduleSlotsSchema,
+  setWeeklyRestDaysSchema,
+  moveScheduleDaySchema,
+  setScheduleDaySchema,
   muscleGroupNames,
   muscleGroupDisplayNames,
   type MuscleGroupName,
@@ -38,6 +40,7 @@ import {
   type HistorySetInput,
   type MuscleGroupLookup,
   type DashboardTemplateInput,
+  monthBounds,
 } from "@shared/coaching";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -409,11 +412,8 @@ export async function registerRoutes(
       return res.status(400).json({ message: parsed.error.message });
     }
     const created = await storage.createWorkout(parsed.data);
-    // If this workout is tied to a template that's the current rotating-mode
-    // schedule slot, advance the rotation to the next slot. No-op for fixed
-    // mode, no schedule, or ad-hoc workouts not matching the current slot.
     if (created.workoutTemplateId != null) {
-      await storage.advanceRotation(userId, created.workoutTemplateId);
+      await storage.advanceRotation(userId, created.workoutTemplateId, created.date);
     }
     res.status(201).json(created);
   });
@@ -674,14 +674,17 @@ export async function registerRoutes(
     res.json(suggestions);
   });
 
-  // ---------------- Workout schedule ----------------
+  // ---------------- Workout schedule (calendar-based) ----------------
+  // ?month=YYYY-MM (defaults to current month). Auto-continues generation for that month
+  // if a split is active, so navigating forward always has content.
   app.get("/api/schedule", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
-    const schedule = await storage.getWorkoutSchedule(userId);
-    if (!schedule) return res.json({ schedule: null, slots: [] });
-    const { slots, ...scheduleFields } = schedule;
-    res.json({ schedule: scheduleFields, slots });
+    const month = typeof req.query.month === "string" ? req.query.month : new Date().toISOString().slice(0, 7);
+    await storage.continueGeneration(userId, month);
+    const [startDate, endDate] = monthBounds(month);
+    const result = await storage.getWorkoutSchedule(userId, startDate, endDate);
+    res.json(result);
   });
 
   app.post("/api/schedule/generate", async (req, res) => {
@@ -689,19 +692,42 @@ export async function registerRoutes(
     if (userId == null) return;
     const parsed = generateScheduleSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
-    const result = await storage.generateWorkoutSchedule(userId, parsed.data);
-    const { slots, ...scheduleFields } = result;
-    res.json({ schedule: scheduleFields, slots });
+    const month = typeof req.body.month === "string" ? req.body.month : new Date().toISOString().slice(0, 7);
+    const result = await storage.generateScheduleMonth(userId, parsed.data, month);
+    res.json(result);
   });
 
-  app.patch("/api/schedule", async (req, res) => {
+  app.patch("/api/schedule/weekly-rest-days", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
-    const parsed = updateScheduleSlotsSchema.safeParse(req.body);
+    const parsed = setWeeklyRestDaysSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
-    const result = await storage.updateWorkoutScheduleSlots(userId, parsed.data);
-    const { slots, ...scheduleFields } = result;
-    res.json({ schedule: scheduleFields, slots });
+    const result = await storage.setWeeklyRestDays(userId, parsed.data.days);
+    // Re-apply the new rest-day rule to the current and next month right away.
+    const now = new Date();
+    const thisMonth = now.toISOString().slice(0, 7);
+    const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString().slice(0, 7);
+    await storage.continueGeneration(userId, thisMonth);
+    await storage.continueGeneration(userId, nextMonth);
+    res.json(result);
+  });
+
+  app.post("/api/schedule/day", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = setScheduleDaySchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+    const result = await storage.setScheduleDay(userId, parsed.data);
+    res.json(result);
+  });
+
+  app.post("/api/schedule/move", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = moveScheduleDaySchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+    const result = await storage.moveScheduleDay(userId, parsed.data);
+    res.json(result);
   });
 
   // ---------------- Dashboard snapshot ----------------
@@ -720,18 +746,12 @@ export async function registerRoutes(
 
     const history = (await buildHistory(userId)).slice(0, 50);
 
-    const scheduleRow = await storage.getWorkoutSchedule(userId);
-    const scheduleForDashboard = scheduleRow
-      ? {
-          mode: scheduleRow.mode as "fixed" | "rotating",
-          rotationPosition: scheduleRow.rotationPosition,
-          slots: scheduleRow.slots.map((s) => ({
-            dayOfWeek: s.dayOfWeek,
-            position: s.position,
-            workoutTemplateId: s.workoutTemplateId,
-          })),
-        }
-      : null;
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const [monthStart, monthEnd] = monthBounds(todayIso.slice(0, 7));
+    await storage.continueGeneration(userId, todayIso.slice(0, 7));
+    const scheduleRow = await storage.getWorkoutSchedule(userId, monthStart, monthEnd);
+    const todayDay = scheduleRow.days.find((d) => d.date === todayIso);
+    const scheduleForDashboard = todayDay ? { workoutTemplateId: todayDay.workoutTemplateId, label: todayDay.label } : null;
 
     const dashboardTemplates: DashboardTemplateInput[] = templates.map((t) => ({
       id: t.id,

@@ -294,61 +294,86 @@ export type InsertSet = z.infer<typeof insertSetSchema>;
 export type Set = typeof sets.$inferSelect;
 
 // ---------------------------------------------------------------------------
-// Workout Schedule — per-user weekly plan of which template to do when
+// Workout Schedule — per-user calendar plan of which template falls on which date
 // ---------------------------------------------------------------------------
-export const scheduleModeIds = ["fixed", "rotating"] as const;
-export type ScheduleModeId = (typeof scheduleModeIds)[number];
 
-// One row per user holding the schedule-level settings.
+// One row per user holding schedule-level settings.
 export const workoutSchedules = sqliteTable("workout_schedules", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: integer("user_id").notNull().references(() => users.id).unique(),
-  mode: text("mode").notNull().default("fixed"), // one of scheduleModeIds
-  // Only used in "rotating" mode: index into the ordered rotation (0-based),
-  // advanced each time a workout tied to the schedule is logged/completed.
-  rotationPosition: integer("rotation_position").notNull().default(0),
+  // Which split is actively auto-generating into the calendar (null = none / fully custom).
+  activeSplit: text("active_split"), // one of workoutSplitIds, excluding "custom", or null
+  // Ordered rotation cycle for the active split, e.g. ["push","pull","legs"].
+  // Stored as JSON text since SQLite has no array column type.
+  rotationCycle: text("rotation_cycle").notNull().default("[]"),
+  // Index into rotationCycle for the next day that needs auto-generating.
+  rotationCursor: integer("rotation_cursor").notNull().default(0),
+  // Weekly recurring rest days, applied in perpetuity. JSON array of 0-6 ints (0=Sun..6=Sat).
+  weeklyRestDays: text("weekly_rest_days").notNull().default("[]"),
+  // Last calendar month (YYYY-MM) that has been auto-generated, so we know where to continue from.
+  lastGeneratedMonth: text("last_generated_month"),
 });
 
 export const insertWorkoutScheduleSchema = createInsertSchema(workoutSchedules).omit({ id: true });
 export type InsertWorkoutSchedule = z.infer<typeof insertWorkoutScheduleSchema>;
 export type WorkoutSchedule = typeof workoutSchedules.$inferSelect;
 
-// Ordered slots. For "fixed" mode, dayOfWeek is 0-6 (Sun-Sat) and position is unused
-// for lookup (but kept for consistent ordering in the UI). For "rotating" mode,
-// dayOfWeek is null and position (0-based) defines the cycle order.
-export const workoutScheduleSlots = sqliteTable("workout_schedule_slots", {
+// One row per calendar date (YYYY-MM-DD) that has content — training day or rest day.
+// Absence of a row for a date means "unplanned" (shown blank on the calendar).
+export const scheduleDays = sqliteTable("schedule_days", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   scheduleId: integer("schedule_id").notNull().references(() => workoutSchedules.id),
-  dayOfWeek: integer("day_of_week"), // 0=Sun..6=Sat, null for rotating mode
-  position: integer("position").notNull(), // ordering within the schedule (rotation order, or display order for fixed)
+  date: text("date").notNull(), // YYYY-MM-DD
   workoutTemplateId: integer("workout_template_id").references(() => workoutTemplates.id), // null = rest day
-  label: text("label"), // optional override label e.g. "Push A" shown even if template deleted
+  label: text("label"), // e.g. "Push", "Pull", "Legs" — kept even if template later deleted
+  // true if the user manually placed/moved this day (drag-and-drop); auto-generation skips these.
+  isManualOverride: integer("is_manual_override", { mode: "boolean" }).notNull().default(false),
+  // true if this day is blank/rest solely because of a weekly-recurring rest rule
+  // (as opposed to a manually-dragged rest bubble). Kept separate so the user can still
+  // drag a workout on top of a weekly-blocked day.
+  isWeeklyBlocked: integer("is_weekly_blocked", { mode: "boolean" }).notNull().default(false),
 });
 
-export const insertWorkoutScheduleSlotSchema = createInsertSchema(workoutScheduleSlots).omit({ id: true });
-export type InsertWorkoutScheduleSlot = z.infer<typeof insertWorkoutScheduleSlotSchema>;
-export type WorkoutScheduleSlot = typeof workoutScheduleSlots.$inferSelect;
+export const insertScheduleDaySchema = createInsertSchema(scheduleDays).omit({ id: true });
+export type InsertScheduleDay = z.infer<typeof insertScheduleDaySchema>;
+export type ScheduleDay = typeof scheduleDays.$inferSelect;
+
+// Maps a split to its ordered rotation of label keys. Used to auto-generate calendar days.
+export const splitRotationCycles: Record<Exclude<WorkoutSplitId, "custom">, string[]> = {
+  ppl: ["Push", "Pull", "Legs"],
+  upper_lower: ["Upper", "Lower"],
+  full_body: ["Full Body A", "Full Body B", "Full Body C"],
+  bro_split: ["Chest", "Back", "Shoulders", "Arms", "Legs"],
+};
 
 export const generateScheduleSchema = z.object({
   split: z.enum(workoutSplitIds).exclude(["custom"]), // ppl | upper_lower | full_body | bro_split
-  mode: z.enum(scheduleModeIds), // fixed | rotating
-  // For fixed mode: which weekdays are training days, in order (0=Sun..6=Sat). Rest = all other days.
-  trainingDays: z.array(z.number().min(0).max(6)).optional(),
 });
 export type GenerateScheduleInput = z.infer<typeof generateScheduleSchema>;
 
-export const updateScheduleSlotsSchema = z.object({
-  mode: z.enum(scheduleModeIds),
-  slots: z.array(
-    z.object({
-      dayOfWeek: z.number().min(0).max(6).nullable(),
-      position: z.number().int().min(0),
-      workoutTemplateId: z.number().int().nullable(),
-      label: z.string().nullable().optional(),
-    }),
-  ),
+export const setWeeklyRestDaysSchema = z.object({
+  days: z.array(z.number().int().min(0).max(6)),
 });
-export type UpdateScheduleSlotsInput = z.infer<typeof updateScheduleSlotsSchema>;
+export type SetWeeklyRestDaysInput = z.infer<typeof setWeeklyRestDaysSchema>;
+
+// Move/swap a single day's content to another date (drag-and-drop on the calendar).
+export const moveScheduleDaySchema = z.object({
+  fromDate: z.string(), // YYYY-MM-DD
+  toDate: z.string(), // YYYY-MM-DD
+  // When dropping a Rest bubble onto an occupied training day, the client resolves
+  // the shift-vs-skip prompt and tells the server which behavior to apply.
+  mode: z.enum(["swap", "shift", "skip"]).default("swap"),
+});
+export type MoveScheduleDayInput = z.infer<typeof moveScheduleDaySchema>;
+
+// Directly set a single day's content (used for the "drag Rest onto a day" base case
+// and for manual per-day edits from a day-detail popover).
+export const setScheduleDaySchema = z.object({
+  date: z.string(), // YYYY-MM-DD
+  workoutTemplateId: z.number().int().nullable(),
+  label: z.string().nullable().optional(),
+});
+export type SetScheduleDayInput = z.infer<typeof setScheduleDaySchema>;
 
 // ---------------------------------------------------------------------------
 // Bodyweight Logs
