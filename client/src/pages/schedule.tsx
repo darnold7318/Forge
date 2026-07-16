@@ -33,6 +33,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Link } from "wouter";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useActiveUser } from "@/lib/user-context";
 import { useToast } from "@/hooks/use-toast";
@@ -41,10 +42,7 @@ import { workoutSplitIds, workoutSplitLabels, type WorkoutSplitId } from "@share
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const DAY_NAMES_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-const SPLITS_FOR_GENERATION = workoutSplitIds.filter((id) => id !== "custom") as Exclude<
-  WorkoutSplitId,
-  "custom"
->[];
+const SPLITS_FOR_GENERATION: WorkoutSplitId[] = [...workoutSplitIds];
 
 interface ScheduleDay {
   id: number;
@@ -238,7 +236,7 @@ export default function SchedulePage() {
   const [viewYear, setViewYear] = useState(now.getFullYear());
   const [viewMonth, setViewMonth] = useState(now.getMonth()); // 0-11
   const [showSetup, setShowSetup] = useState(false);
-  const [pendingSplit, setPendingSplit] = useState<Exclude<WorkoutSplitId, "custom"> | null>(null);
+  const [pendingSplit, setPendingSplit] = useState<WorkoutSplitId | null>(null);
   const [dragDay, setDragDay] = useState<ScheduleDay | null>(null);
   const [pendingRestDrop, setPendingRestDrop] = useState<string | null>(null); // target date that already has a training day
 
@@ -260,7 +258,7 @@ export default function SchedulePage() {
   };
 
   const generateMutation = useMutation({
-    mutationFn: async (split: Exclude<WorkoutSplitId, "custom">) => {
+    mutationFn: async (split: WorkoutSplitId) => {
       const res = await apiRequest("POST", "/api/schedule/generate", { split, month: yearMonth });
       return res.json();
     },
@@ -467,7 +465,7 @@ export default function SchedulePage() {
               <p className="text-xs font-medium text-muted-foreground">Workout Split</p>
               <Select
                 value={data?.activeSplit ?? "ppl"}
-                onValueChange={(v) => setPendingSplit(v as Exclude<WorkoutSplitId, "custom">)}
+                onValueChange={(v) => setPendingSplit(v as WorkoutSplitId)}
               >
                 <SelectTrigger data-testid="select-setup-split">
                   <SelectValue />
@@ -481,9 +479,19 @@ export default function SchedulePage() {
                 </SelectContent>
               </Select>
             </div>
-            <p className="text-xs text-muted-foreground">
-              This repeats on a continuous rotation and keeps generating into future months automatically.
-            </p>
+            {pendingSplit === "custom" || (!pendingSplit && data?.activeSplit === "custom") ? (
+              <p className="text-xs text-muted-foreground">
+                Applies your fixed Mon–Sun template every week, forever — no rotation.{" "}
+                <Link href="/settings" className="underline" data-testid="link-edit-custom-template">
+                  Edit the template in Settings
+                </Link>
+                .
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                This repeats on a continuous rotation and keeps generating into future months automatically.
+              </p>
+            )}
             {pendingSplit && (
               <Button
                 className="w-full gap-2"

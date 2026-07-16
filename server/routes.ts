@@ -14,6 +14,7 @@ import {
   updateUserPreferencesSchema,
   generateScheduleSchema,
   setWeeklyRestDaysSchema,
+  setCustomWeeklyTemplateSchema,
   moveScheduleDaySchema,
   setScheduleDaySchema,
   setCoreAddonSchema,
@@ -710,6 +711,15 @@ export async function registerRoutes(
     const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString().slice(0, 7);
     await storage.continueGeneration(userId, thisMonth);
     await storage.continueGeneration(userId, nextMonth);
+    res.json(result);
+  });
+
+  app.put("/api/schedule/custom-template", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = setCustomWeeklyTemplateSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+    const result = await storage.setCustomWeeklyTemplate(userId, parsed.data);
     res.json(result);
   });
 

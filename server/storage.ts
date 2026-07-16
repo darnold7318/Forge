@@ -36,6 +36,8 @@ import type {
   MoveScheduleDayInput,
   SetScheduleDayInput,
   SetCoreAddonInput,
+  SetCustomWeeklyTemplateInput,
+  CustomWeeklySlot,
 } from "@shared/schema";
 import {
   buildStarterTemplate,
@@ -149,7 +151,8 @@ function ensureTables() {
       rotation_cycle TEXT NOT NULL DEFAULT '[]',
       rotation_cursor INTEGER NOT NULL DEFAULT 0,
       weekly_rest_days TEXT NOT NULL DEFAULT '[]',
-      last_generated_month TEXT
+      last_generated_month TEXT,
+      custom_weekly_template TEXT NOT NULL DEFAULT '[null,null,null,null,null,null,null]'
     );
 
     CREATE TABLE IF NOT EXISTS schedule_days (
@@ -234,6 +237,20 @@ function ensureTables() {
       // bug this column exists to fix (switching splits never repainting old auto-filled days).
       // Defaulting to "not protected" means the very next split change will correctly repaint
       // everything; going forward, only genuine drags/swaps set is_user_placed = 1.
+    } catch (err) {
+      // Guard against a race/rerun — don't crash server startup.
+    }
+  }
+
+  // Migration: workout_schedules may pre-date the custom_weekly_template column.
+  const scheduleColumns = new Set(
+    (sqlite.prepare("PRAGMA table_info(workout_schedules)").all() as { name: string }[]).map((c) => c.name),
+  );
+  if (!scheduleColumns.has("custom_weekly_template")) {
+    try {
+      sqlite.exec(
+        "ALTER TABLE workout_schedules ADD COLUMN custom_weekly_template TEXT NOT NULL DEFAULT '[null,null,null,null,null,null,null]'",
+      );
     } catch (err) {
       // Guard against a race/rerun — don't crash server startup.
     }
@@ -418,6 +435,7 @@ export interface IStorage {
   // Workout schedule (scoped per user, calendar-date based)
   getWorkoutSchedule(userId: number, startDate: string, endDate: string): Promise<WorkoutScheduleWithDays>;
   setWeeklyRestDays(userId: number, days: number[]): Promise<WorkoutSchedule>;
+  setCustomWeeklyTemplate(userId: number, input: SetCustomWeeklyTemplateInput): Promise<WorkoutSchedule>;
   generateScheduleMonth(userId: number, input: GenerateScheduleInput, yearMonth: string): Promise<WorkoutScheduleWithDays>;
   continueGeneration(userId: number, yearMonth: string): Promise<void>;
   setScheduleDay(userId: number, input: SetScheduleDayInput): Promise<ScheduleDay>;
@@ -765,6 +783,35 @@ export class DatabaseStorage implements IStorage {
       .get();
   }
 
+  /** Save the fixed Mon-Sun weekly template used by the "custom" split. Free-text labels get
+   *  a starter template created/reused the same way the other splits do; slots that already
+   *  reference a saved template are left as-is. Does NOT touch the calendar — apply via
+   *  generateScheduleMonth({ split: "custom" }) from the Schedule page. */
+  async setCustomWeeklyTemplate(userId: number, input: SetCustomWeeklyTemplateInput): Promise<WorkoutSchedule> {
+    const schedule = this.getOrCreateScheduleRow(userId);
+    const resolvedSlots: CustomWeeklySlot[] = [];
+    for (const slot of input.slots) {
+      if (!slot || (slot.label == null && slot.workoutTemplateId == null)) {
+        resolvedSlots.push(null);
+        continue;
+      }
+      if (slot.workoutTemplateId != null) {
+        resolvedSlots.push({ label: slot.label, workoutTemplateId: slot.workoutTemplateId });
+        continue;
+      }
+      // Free-text label with no explicit template — auto-create/reuse a starter, same as
+      // the built-in splits (ensureTemplateForLabel dedupes by name prefix).
+      const templateId = await this.ensureTemplateForLabel(userId, slot.label!);
+      resolvedSlots.push({ label: slot.label, workoutTemplateId: templateId });
+    }
+    return db
+      .update(workoutSchedules)
+      .set({ customWeeklyTemplate: JSON.stringify(resolvedSlots) })
+      .where(eq(workoutSchedules.id, schedule.id))
+      .returning()
+      .get();
+  }
+
   /** Auto-generate (or continue) the active split's rotation for one calendar month (YYYY-MM). */
   async generateScheduleMonth(
     userId: number,
@@ -772,20 +819,24 @@ export class DatabaseStorage implements IStorage {
     yearMonth: string,
   ): Promise<WorkoutScheduleWithDays> {
     let schedule = this.getOrCreateScheduleRow(userId);
-    const cycle = splitRotationCycles[input.split];
     const isNewSplit = schedule.activeSplit !== input.split;
+    const isCustom = input.split === "custom";
     // Only align to the target weekday (Monday-start) the very first time this user ever
-    // generates a schedule. Once a schedule has been generated before, a later split change
-    // is a mid-stream swap — there's already a calendar with real dates in play, so we must
-    // NOT re-seed lead-in Rest days over whatever already exists there.
+    // generates a schedule (and only for rotating-cycle splits — "custom" is keyed purely by
+    // day-of-week, so there's no cursor to align and no lead-in concept at all). Once a
+    // schedule has been generated before, a later split change is a mid-stream swap —
+    // there's already a calendar with real dates in play, so we must NOT re-seed lead-in
+    // Rest days over whatever already exists there.
     const isFirstEverGeneration = schedule.lastGeneratedMonth == null;
+
+    const cycle = isCustom ? [] : splitRotationCycles[input.split as Exclude<GenerateScheduleInput["split"], "custom">];
 
     // On the very first generation, align cycle[0] (e.g. "Push") to the requested weekday
     // (default Monday) by pre-rolling the cursor and seeding lead-in Rest days before the
     // first occurrence of that weekday in the month.
     let initialCursor = isNewSplit ? 0 : schedule.rotationCursor;
     let leadInDates: string[] = [];
-    if (isFirstEverGeneration) {
+    if (isFirstEverGeneration && !isCustom) {
       const [monthStart] = monthBounds(yearMonth);
       const startDow = new Date(monthStart + "T00:00:00").getDay();
       const targetDow = input.startDayOfWeek;
@@ -858,20 +909,56 @@ export class DatabaseStorage implements IStorage {
     return { ...refreshed, days };
   }
 
-  /** Fill in every day of yearMonth that isn't manually overridden, continuing the rotation cursor. */
+  /** Fill in every day of yearMonth that isn't manually overridden. For rotating-cycle splits
+   *  this continues the rotation cursor; for "custom" it paints purely from the fixed Mon-Sun
+   *  weekly template keyed by day-of-week — no cursor, so continuing across month/week
+   *  boundaries (e.g. a month starting mid-week) is automatically correct with zero special-
+   *  casing: every Wednesday always gets whatever the template says for Wednesday. */
   async continueGeneration(userId: number, yearMonth: string): Promise<void> {
     const schedule = this.getOrCreateScheduleRow(userId);
     if (!schedule.activeSplit) return;
-    const cycle: string[] = JSON.parse(schedule.rotationCycle || "[]");
-    if (cycle.length === 0) return;
-    const weeklyRestDays: number[] = JSON.parse(schedule.weeklyRestDays || "[]");
 
     const [startDate, endDate] = monthBounds(yearMonth);
     const existingDays = await this.getDaysInRange(schedule.id, startDate, endDate);
     const existingByDate = new Map(existingDays.map((d) => [d.date, d]));
+    const weeklyRestDays: number[] = JSON.parse(schedule.weeklyRestDays || "[]");
+    const dates = enumerateDates(startDate, endDate);
+
+    const upsertDay = (date: string, values: { workoutTemplateId: number | null; label: string | null; isWeeklyBlocked: boolean }) => {
+      const existing = existingByDate.get(date);
+      if (existing) {
+        db.update(scheduleDays).set(values).where(eq(scheduleDays.id, existing.id)).run();
+      } else {
+        db.insert(scheduleDays).values({ scheduleId: schedule.id, date, ...values }).run();
+      }
+    };
+
+    if (schedule.activeSplit === "custom") {
+      const weeklyTemplate: CustomWeeklySlot[] = JSON.parse(
+        schedule.customWeeklyTemplate || "[null,null,null,null,null,null,null]",
+      );
+      for (const date of dates) {
+        const existing = existingByDate.get(date);
+        if (existing && existing.isManualOverride) continue; // never touch manual days
+
+        const dow = new Date(date + "T00:00:00").getDay();
+        const isRestDay = weeklyRestDays.includes(dow);
+        const slot = weeklyTemplate[dow];
+
+        if (isRestDay || !slot) {
+          upsertDay(date, { workoutTemplateId: null, label: "Rest", isWeeklyBlocked: isRestDay });
+        } else {
+          upsertDay(date, { workoutTemplateId: slot.workoutTemplateId, label: slot.label, isWeeklyBlocked: false });
+        }
+      }
+      db.update(workoutSchedules).set({ lastGeneratedMonth: yearMonth }).where(eq(workoutSchedules.id, schedule.id)).run();
+      return;
+    }
+
+    const cycle: string[] = JSON.parse(schedule.rotationCycle || "[]");
+    if (cycle.length === 0) return;
 
     let cursor = schedule.rotationCursor;
-    const dates = enumerateDates(startDate, endDate);
     for (const date of dates) {
       const existing = existingByDate.get(date);
       if (existing && existing.isManualOverride) continue; // never touch manual days
@@ -880,31 +967,13 @@ export class DatabaseStorage implements IStorage {
       const isRestDay = weeklyRestDays.includes(dow);
 
       if (isRestDay) {
-        if (existing) {
-          db.update(scheduleDays)
-            .set({ workoutTemplateId: null, label: "Rest", isWeeklyBlocked: true })
-            .where(eq(scheduleDays.id, existing.id))
-            .run();
-        } else {
-          db.insert(scheduleDays)
-            .values({ scheduleId: schedule.id, date, workoutTemplateId: null, label: "Rest", isWeeklyBlocked: true })
-            .run();
-        }
+        upsertDay(date, { workoutTemplateId: null, label: "Rest", isWeeklyBlocked: true });
         continue; // rest days don't consume a rotation slot
       }
 
       const label = cycle[cursor % cycle.length];
       const templateId = await this.ensureTemplateForLabel(userId, label);
-      if (existing) {
-        db.update(scheduleDays)
-          .set({ workoutTemplateId: templateId, label, isWeeklyBlocked: false })
-          .where(eq(scheduleDays.id, existing.id))
-          .run();
-      } else {
-        db.insert(scheduleDays)
-          .values({ scheduleId: schedule.id, date, workoutTemplateId: templateId, label, isWeeklyBlocked: false })
-          .run();
-      }
+      upsertDay(date, { workoutTemplateId: templateId, label, isWeeklyBlocked: false });
       cursor += 1;
     }
 

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks } from "lucide-react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -7,6 +7,14 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -27,7 +35,21 @@ import {
   workoutSplitLabels,
   type ThemeColorId,
   type WorkoutSplitId,
+  type CustomWeeklySlot,
 } from "@shared/schema";
+
+const WEEKDAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+// UI shows Mon–Sun left to right, but slots are stored keyed 0=Sun..6=Sat to match JS getDay().
+const WEEKDAY_DOW = [1, 2, 3, 4, 5, 6, 0];
+
+interface WorkoutTemplateLite {
+  id: number;
+  name: string;
+}
+
+interface ScheduleForTemplate {
+  customWeeklyTemplate: string;
+}
 
 // Light-mode --primary HSL for each palette id, used to render swatches for
 // colors that may not currently be active (can't rely on CSS vars for that).
@@ -47,6 +69,165 @@ const WORKOUT_SPLIT_DESCRIPTIONS: Record<WorkoutSplitId, string> = {
   bro_split: "Dedicate each session to a single muscle group.",
   custom: "Build your own rotation using workout templates.",
 };
+
+type SlotDraft = { mode: "rest" | "template" | "label"; workoutTemplateId: number | null; label: string };
+
+function slotToDraft(slot: CustomWeeklySlot): SlotDraft {
+  if (!slot) return { mode: "rest", workoutTemplateId: null, label: "" };
+  if (slot.workoutTemplateId != null) return { mode: "template", workoutTemplateId: slot.workoutTemplateId, label: slot.label ?? "" };
+  return { mode: "label", workoutTemplateId: null, label: slot.label ?? "" };
+}
+
+function CustomTemplateBuilder() {
+  const { toast } = useToast();
+
+  const { data: schedule, isLoading: scheduleLoading } = useQuery<ScheduleForTemplate>({
+    queryKey: ["/api/schedule"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/schedule");
+      return res.json();
+    },
+  });
+
+  const { data: templates, isLoading: templatesLoading } = useQuery<WorkoutTemplateLite[]>({
+    queryKey: ["/api/workout-templates"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/workout-templates");
+      return res.json();
+    },
+  });
+
+  // 7 drafts in Mon–Sun UI order (index 0=Mon..6=Sun).
+  const [drafts, setDrafts] = useState<SlotDraft[]>(
+    Array.from({ length: 7 }, () => ({ mode: "rest", workoutTemplateId: null, label: "" })),
+  );
+  const [loadedOnce, setLoadedOnce] = useState(false);
+
+  useEffect(() => {
+    if (!schedule || loadedOnce) return;
+    try {
+      const slots: CustomWeeklySlot[] = JSON.parse(schedule.customWeeklyTemplate || "[null,null,null,null,null,null,null]");
+      setDrafts(WEEKDAY_DOW.map((dow) => slotToDraft(slots[dow] ?? null)));
+    } catch {
+      // keep defaults
+    }
+    setLoadedOnce(true);
+  }, [schedule, loadedOnce]);
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      // Convert Mon-Sun UI drafts back into 0=Sun..6=Sat storage order.
+      const slots: (CustomWeeklySlot)[] = new Array(7).fill(null);
+      WEEKDAY_DOW.forEach((dow, uiIdx) => {
+        const d = drafts[uiIdx];
+        if (d.mode === "rest") {
+          slots[dow] = null;
+        } else if (d.mode === "template") {
+          const t = templates?.find((t) => t.id === d.workoutTemplateId);
+          slots[dow] = { label: t?.name ?? null, workoutTemplateId: d.workoutTemplateId };
+        } else {
+          slots[dow] = { label: d.label.trim() || null, workoutTemplateId: null };
+        }
+      });
+      const res = await apiRequest("PUT", "/api/schedule/custom-template", { slots });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/schedule"] });
+      toast({ title: "Custom template saved" });
+    },
+    onError: () => toast({ title: "Couldn't save custom template", variant: "destructive" }),
+  });
+
+  const updateDraft = (idx: number, patch: Partial<SlotDraft>) => {
+    setDrafts((prev) => prev.map((d, i) => (i === idx ? { ...d, ...patch } : d)));
+  };
+
+  if (scheduleLoading || templatesLoading) {
+    return <Skeleton className="h-64 w-full" data-testid="skeleton-custom-template" />;
+  }
+
+  return (
+    <Card data-testid="card-custom-template">
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <ListChecks className="h-4 w-4" />
+          Custom Weekly Template
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Assign each day of the week once — it repeats identically every week, forever. Pick one of your saved
+          templates, or just type a label (like "Push") and we'll build a starter workout for it automatically.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {WEEKDAY_LABELS.map((name, idx) => {
+          const draft = drafts[idx];
+          return (
+            <div
+              key={name}
+              className="flex flex-col sm:flex-row sm:items-center gap-2 rounded-md border p-2.5"
+              data-testid={`row-custom-template-${name.toLowerCase()}`}
+            >
+              <span className="text-sm font-medium w-20 shrink-0">{name}</span>
+              <Select
+                value={draft.mode}
+                onValueChange={(v) => updateDraft(idx, { mode: v as SlotDraft["mode"] })}
+              >
+                <SelectTrigger className="sm:w-36 shrink-0" data-testid={`select-custom-mode-${name.toLowerCase()}`}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="rest" data-testid={`option-custom-mode-rest-${name.toLowerCase()}`}>Rest</SelectItem>
+                  <SelectItem value="template" data-testid={`option-custom-mode-template-${name.toLowerCase()}`}>Saved Template</SelectItem>
+                  <SelectItem value="label" data-testid={`option-custom-mode-label-${name.toLowerCase()}`}>Custom Label</SelectItem>
+                </SelectContent>
+              </Select>
+              {draft.mode === "template" && (
+                <Select
+                  value={draft.workoutTemplateId != null ? String(draft.workoutTemplateId) : undefined}
+                  onValueChange={(v) => updateDraft(idx, { workoutTemplateId: Number(v) })}
+                >
+                  <SelectTrigger className="flex-1" data-testid={`select-custom-template-${name.toLowerCase()}`}>
+                    <SelectValue placeholder="Choose a template" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(templates ?? []).map((t) => (
+                      <SelectItem key={t.id} value={String(t.id)} data-testid={`option-custom-template-${t.id}`}>
+                        {t.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              {draft.mode === "label" && (
+                <Input
+                  value={draft.label}
+                  onChange={(e) => updateDraft(idx, { label: e.target.value })}
+                  placeholder="e.g. Push"
+                  className="flex-1"
+                  maxLength={40}
+                  data-testid={`input-custom-label-${name.toLowerCase()}`}
+                />
+              )}
+            </div>
+          );
+        })}
+        <Button
+          className="w-full gap-2"
+          disabled={saveMutation.isPending}
+          onClick={() => saveMutation.mutate()}
+          data-testid="button-save-custom-template"
+        >
+          {saveMutation.isPending ? "Saving..." : "Save Custom Template"}
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          Saving updates the template only. Go to the Schedule page and pick "Custom" under Change Split to apply it
+          to your calendar.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function Settings() {
   const { activeUser, activeUserId, isLoading } = useActiveUser();
@@ -229,6 +410,8 @@ export default function Settings() {
           </RadioGroup>
         </CardContent>
       </Card>
+
+      {activeUser.workoutSplit === "custom" && <CustomTemplateBuilder />}
 
       <AlertDialog open={pendingSplit != null} onOpenChange={(open) => !open && setPendingSplit(null)}>
         <AlertDialogContent>

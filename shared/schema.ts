@@ -312,11 +312,31 @@ export const workoutSchedules = sqliteTable("workout_schedules", {
   weeklyRestDays: text("weekly_rest_days").notNull().default("[]"),
   // Last calendar month (YYYY-MM) that has been auto-generated, so we know where to continue from.
   lastGeneratedMonth: text("last_generated_month"),
+  // Fixed Mon-Sun weekly template for the "custom" split, keyed purely by day-of-week (no
+  // rotation cursor involved). JSON array of exactly 7 CustomWeeklySlot entries, index
+  // 0=Sun..6=Sat. Built/edited from Settings, applied to the calendar from Schedule.
+  customWeeklyTemplate: text("custom_weekly_template").notNull().default("[null,null,null,null,null,null,null]"),
 });
 
 export const insertWorkoutScheduleSchema = createInsertSchema(workoutSchedules).omit({ id: true });
 export type InsertWorkoutSchedule = z.infer<typeof insertWorkoutScheduleSchema>;
 export type WorkoutSchedule = typeof workoutSchedules.$inferSelect;
+
+// One slot in the custom weekly template — either a saved template, a free-text label
+// (auto-creates/reuses a starter template, same as the other splits), or null (Rest).
+export const customWeeklySlotSchema = z
+  .object({
+    label: z.string().min(1).max(40).nullable(),
+    workoutTemplateId: z.number().int().nullable(),
+  })
+  .nullable();
+export type CustomWeeklySlot = z.infer<typeof customWeeklySlotSchema>;
+
+export const setCustomWeeklyTemplateSchema = z.object({
+  // Exactly 7 entries, index 0=Sun..6=Sat.
+  slots: z.array(customWeeklySlotSchema).length(7),
+});
+export type SetCustomWeeklyTemplateInput = z.infer<typeof setCustomWeeklyTemplateSchema>;
 
 // One row per calendar date (YYYY-MM-DD) that has content — training day or rest day.
 // Absence of a row for a date means "unplanned" (shown blank on the calendar).
@@ -355,7 +375,7 @@ export const splitRotationCycles: Record<Exclude<WorkoutSplitId, "custom">, stri
 };
 
 export const generateScheduleSchema = z.object({
-  split: z.enum(workoutSplitIds).exclude(["custom"]), // ppl | upper_lower | full_body | bro_split
+  split: z.enum(workoutSplitIds), // ppl | upper_lower | full_body | bro_split | custom
   // Day of week (0=Sun..6=Sat) that the first cycle entry (e.g. "Push") should land on
   // for a fresh generation. Defaults to Monday. Ignored when continuing an existing split.
   startDayOfWeek: z.number().int().min(0).max(6).default(1),
