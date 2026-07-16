@@ -83,9 +83,28 @@ const FALLBACK_COLORS = [
   "bg-chart-5/15 border-chart-5/40 text-chart-5",
 ];
 
+// Alternate substrings that should map to an existing LABEL_COLORS entry — handles custom-
+// template names/singulars like "Push Day", "Pull Day (Edited)", "Leg Day" (singular "Leg"
+// vs. the canonical plural "Legs" key).
+const LABEL_KEYWORD_ALIASES: Record<string, string> = {
+  push: "Push",
+  pull: "Pull",
+  leg: "Legs",
+  legs: "Legs",
+  upper: "Upper",
+  lower: "Lower",
+};
+
 function colorForLabel(label: string | null): string {
   if (!label) return "border-dashed border-border text-muted-foreground";
   if (LABEL_COLORS[label]) return LABEL_COLORS[label];
+  // Custom-template labels are often variations like "Push Day", "Pull Day (Edited)", or a
+  // renamed template name — match on the well-known keyword first so they inherit the same
+  // color as the base split label instead of falling into an arbitrary hash bucket.
+  const lower = label.toLowerCase();
+  for (const [keyword, canonicalKey] of Object.entries(LABEL_KEYWORD_ALIASES)) {
+    if (lower.includes(keyword)) return LABEL_COLORS[canonicalKey];
+  }
   // Stable fallback color derived from the label string for splits like "Full Body A" / "Chest".
   let hash = 0;
   for (let i = 0; i < label.length; i++) hash = (hash * 31 + label.charCodeAt(i)) | 0;
@@ -100,7 +119,15 @@ function monthKey(year: number, month0: number): string {
   return `${year}-${String(month0 + 1).padStart(2, "0")}`;
 }
 
-function DayBubble({ day, isOverlay = false }: { day: ScheduleDay; isOverlay?: boolean }) {
+function DayBubble({
+  day,
+  isOverlay = false,
+  onClear,
+}: {
+  day: ScheduleDay;
+  isOverlay?: boolean;
+  onClear?: (date: string) => void;
+}) {
   // Synthetic drag-preview bubble for the Core palette item (id === -1, label "Core").
   const isCorePreview = day.id === -1 && day.label === "Core";
   // A synthetic palette-label preview (id === -1) with a real label is never Rest, even before
@@ -108,19 +135,35 @@ function DayBubble({ day, isOverlay = false }: { day: ScheduleDay; isOverlay?: b
   // workoutTemplateId, since that's the authoritative Rest/workout signal from the backend.
   const isRest = !isCorePreview && (day.id === -1 ? day.label == null : day.workoutTemplateId == null);
   const text = isCorePreview ? "Core" : isRest ? "Rest" : day.label ?? "Workout";
+  const showClear = Boolean(onClear) && !isRest && !isCorePreview && !isOverlay;
   return (
     <div
-      className={`flex items-center justify-center rounded-full border px-2 py-1 text-[11px] font-medium truncate select-none ${
+      className={`group flex items-center justify-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium truncate select-none ${
         isCorePreview ? "bg-chart-5/15 border-chart-5/40 text-chart-5" : colorForLabel(isRest ? "Rest" : day.label)
       } ${isOverlay ? "shadow-lg" : ""}`}
       data-testid={`bubble-day-${day.date}`}
     >
       {isCorePreview ? (
-        <Dumbbell className="h-3 w-3 mr-1 shrink-0" />
+        <Dumbbell className="h-3 w-3 shrink-0" />
       ) : isRest ? (
-        <Moon className="h-3 w-3 mr-1 shrink-0" />
+        <Moon className="h-3 w-3 shrink-0" />
       ) : null}
       <span className="truncate">{text}</span>
+      {showClear && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onClear!(day.date);
+          }}
+          className="shrink-0"
+          title="Clear this day"
+          data-testid={`button-clear-day-${day.date}`}
+        >
+          <X className="h-2.5 w-2.5 opacity-0 group-hover:opacity-100" />
+        </button>
+      )}
     </div>
   );
 }
@@ -130,31 +173,15 @@ function DraggableBubble({ day, onClear }: { day: ScheduleDay; onClear?: (date: 
     id: `day:${day.date}`,
     data: { type: "day", day },
   });
-  const isRest = day.workoutTemplateId == null;
   return (
     <div
       ref={setNodeRef}
       {...listeners}
       {...attributes}
-      className={`relative group cursor-grab touch-none ${isDragging ? "opacity-30" : ""}`}
+      className={`cursor-grab touch-none ${isDragging ? "opacity-30" : ""}`}
       data-testid={`draggable-day-${day.date}`}
     >
-      <DayBubble day={day} />
-      {onClear && !isRest && (
-        <button
-          type="button"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            onClear(day.date);
-          }}
-          className="absolute -top-1.5 -right-1.5 flex items-center justify-center h-4 w-4 rounded-full bg-background border border-border text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity hover:text-foreground hover:border-foreground/40"
-          title="Clear this day"
-          data-testid={`button-clear-day-${day.date}`}
-        >
-          <X className="h-2.5 w-2.5" />
-        </button>
-      )}
+      <DayBubble day={day} onClear={onClear} />
     </div>
   );
 }

@@ -404,11 +404,11 @@ function TemplateStartPicker({
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent data-testid="dialog-start-template">
+      <DialogContent data-testid="dialog-start-template" className="max-h-[85vh] flex flex-col gap-4">
         <DialogHeader>
           <DialogTitle>Start from a template</DialogTitle>
         </DialogHeader>
-        <div className="space-y-2">
+        <div className="space-y-2 overflow-y-auto pr-1 -mr-1">
           {templates.map((t) => (
             <button
               key={t.id}
