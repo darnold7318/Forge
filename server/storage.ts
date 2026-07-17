@@ -206,6 +206,8 @@ function ensureTables() {
     { column: "theme_color", ddl: "ALTER TABLE users ADD COLUMN theme_color TEXT NOT NULL DEFAULT 'green'" },
     { column: "theme_mode", ddl: "ALTER TABLE users ADD COLUMN theme_mode TEXT NOT NULL DEFAULT 'dark'" },
     { column: "workout_split", ddl: "ALTER TABLE users ADD COLUMN workout_split TEXT NOT NULL DEFAULT 'ppl'" },
+    { column: "password_hash", ddl: "ALTER TABLE users ADD COLUMN password_hash TEXT" },
+    { column: "is_admin", ddl: "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0" },
   ];
   for (const { column, ddl } of migrations) {
     if (!existingColumns.has(column)) {
