@@ -553,14 +553,19 @@ export async function registerRoutes(
   app.get("/api/workouts", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
-    const list = await storage.getWorkouts(userId);
+    const list = await storage.getWorkoutsWithSets(userId);
     res.json(list);
   });
 
   app.get("/api/workouts/:id", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const id = Number(req.params.id);
     const workout = await storage.getWorkoutWithSets(id);
     if (!workout) return res.status(404).json({ message: "Workout not found" });
+    if (workout.userId !== userId) {
+      return res.status(403).json({ message: "Workout does not belong to the active user" });
+    }
     res.json(workout);
   });
 
@@ -579,7 +584,14 @@ export async function registerRoutes(
   });
 
   app.patch("/api/workouts/:id", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const id = Number(req.params.id);
+    const existing = await storage.getWorkout(id);
+    if (!existing) return res.status(404).json({ message: "Workout not found" });
+    if (existing.userId !== userId) {
+      return res.status(403).json({ message: "Workout does not belong to the active user" });
+    }
     const parsed = insertWorkoutSchema.partial().safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
@@ -590,7 +602,14 @@ export async function registerRoutes(
   });
 
   app.delete("/api/workouts/:id", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const id = Number(req.params.id);
+    const existing = await storage.getWorkout(id);
+    if (!existing) return res.status(404).json({ message: "Workout not found" });
+    if (existing.userId !== userId) {
+      return res.status(403).json({ message: "Workout does not belong to the active user" });
+    }
     await storage.deleteWorkout(id);
     res.status(204).end();
   });
@@ -632,7 +651,15 @@ export async function registerRoutes(
   });
 
   app.patch("/api/sets/:id", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const id = Number(req.params.id);
+    const existingSet = await storage.getSet(id);
+    if (!existingSet) return res.status(404).json({ message: "Set not found" });
+    const parentWorkout = await storage.getWorkout(existingSet.workoutId);
+    if (!parentWorkout || parentWorkout.userId !== userId) {
+      return res.status(403).json({ message: "Set does not belong to the active user" });
+    }
     const parsed = insertSetSchema.partial().safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
@@ -643,7 +670,15 @@ export async function registerRoutes(
   });
 
   app.delete("/api/sets/:id", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const id = Number(req.params.id);
+    const existingSet = await storage.getSet(id);
+    if (!existingSet) return res.status(404).json({ message: "Set not found" });
+    const parentWorkout = await storage.getWorkout(existingSet.workoutId);
+    if (!parentWorkout || parentWorkout.userId !== userId) {
+      return res.status(403).json({ message: "Set does not belong to the active user" });
+    }
     await storage.deleteSet(id);
     res.status(204).end();
   });

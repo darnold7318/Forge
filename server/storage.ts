@@ -418,6 +418,7 @@ export interface IStorage {
 
   // Workouts (scoped per user)
   getWorkouts(userId: number): Promise<Workout[]>;
+  getWorkoutsWithSets(userId: number): Promise<WorkoutWithSets[]>;
   getWorkout(id: number): Promise<Workout | undefined>;
   getWorkoutWithSets(id: number): Promise<WorkoutWithSets | undefined>;
   createWorkout(workout: InsertWorkout): Promise<Workout>;
@@ -428,6 +429,7 @@ export interface IStorage {
   getSetsForWorkout(workoutId: number): Promise<SetWithExercise[]>;
   getSetsForExercise(exerciseId: number, userId: number): Promise<SetWithExercise[]>;
   getAllSets(userId: number): Promise<SetWithExercise[]>;
+  getSet(id: number): Promise<Set | undefined>;
   createSet(set: InsertSet): Promise<Set>;
   updateSet(id: number, set: Partial<InsertSet>): Promise<Set | undefined>;
   deleteSet(id: number): Promise<void>;
@@ -687,6 +689,24 @@ export class DatabaseStorage implements IStorage {
       .all();
   }
 
+  async getWorkoutsWithSets(userId: number): Promise<WorkoutWithSets[]> {
+    const userWorkouts = await this.getWorkouts(userId);
+    const rows = db
+      .select()
+      .from(sets)
+      .innerJoin(exercises, eq(sets.exerciseId, exercises.id))
+      .innerJoin(workouts, eq(sets.workoutId, workouts.id))
+      .where(eq(workouts.userId, userId))
+      .all();
+    const byWorkout = new Map<number, SetWithExercise[]>();
+    for (const r of rows) {
+      const list = byWorkout.get(r.sets.workoutId) ?? [];
+      list.push({ ...r.sets, exercise: r.exercises });
+      byWorkout.set(r.sets.workoutId, list);
+    }
+    return userWorkouts.map((w) => ({ ...w, sets: byWorkout.get(w.id) ?? [] }));
+  }
+
   async getWorkout(id: number): Promise<Workout | undefined> {
     return db.select().from(workouts).where(eq(workouts.id, id)).get();
   }
@@ -742,6 +762,10 @@ export class DatabaseStorage implements IStorage {
       .where(eq(workouts.userId, userId))
       .all();
     return rows.map((r) => ({ ...r.sets, exercise: r.exercises }));
+  }
+
+  async getSet(id: number): Promise<Set | undefined> {
+    return db.select().from(sets).where(eq(sets.id, id)).get();
   }
 
   async createSet(set: InsertSet): Promise<Set> {

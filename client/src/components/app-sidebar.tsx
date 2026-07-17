@@ -1,4 +1,4 @@
-import { LayoutDashboard, Dumbbell, LineChart, Sparkles, BarChart3, ClipboardList, CalendarDays, HeartPulse, Settings, List } from "lucide-react";
+import { LayoutDashboard, Dumbbell, LineChart, Sparkles, BarChart3, ClipboardList, CalendarDays, HeartPulse, Settings, List, History } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import {
   Sidebar,
@@ -18,6 +18,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 const items = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
   { title: "Log Workout", url: "/log", icon: Dumbbell },
+  { title: "Workout History", url: "/history", icon: History },
   { title: "Templates", url: "/templates", icon: ClipboardList },
   { title: "Exercises", url: "/exercises", icon: List },
   { title: "Schedule", url: "/schedule", icon: CalendarDays },
@@ -43,7 +44,7 @@ export function AppSidebar() {
           <SidebarGroupContent>
             <SidebarMenu>
               {items.map((item) => {
-                const isActive = location === item.url;
+                const isActive = location === item.url || (item.url === "/history" && location.startsWith("/history/"));
                 return (
                   <SidebarMenuItem key={item.title}>
                     <SidebarMenuButton asChild isActive={isActive} data-testid={`link-nav-${item.title.toLowerCase().replace(/\s+/g, "-")}`}>

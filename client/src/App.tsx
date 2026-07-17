@@ -26,6 +26,8 @@ import TemplateEditor from "@/pages/template-editor";
 import SchedulePage from "@/pages/schedule";
 import RecoveryMap from "@/pages/recovery";
 import Settings from "@/pages/settings";
+import WorkoutHistory from "@/pages/workout-history";
+import WorkoutEdit from "@/pages/workout-edit";
 
 function AppRouter() {
   return (
@@ -40,6 +42,8 @@ function AppRouter() {
       <Route path="/exercises" component={Exercises} />
       <Route path="/templates/:id/edit" component={TemplateEditor} />
       <Route path="/schedule" component={SchedulePage} />
+      <Route path="/history" component={WorkoutHistory} />
+      <Route path="/history/:id" component={WorkoutEdit} />
       <Route path="/recovery" component={RecoveryMap} />
       <Route path="/settings" component={Settings} />
       <Route component={NotFound} />
