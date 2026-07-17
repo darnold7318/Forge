@@ -27,7 +27,13 @@ export async function apiRequest(
       ...authHeaders(),
     },
     body: data ? JSON.stringify(data) : undefined,
-    credentials: "include",
+    // No cookies are used for auth (see auth-token.ts) — the Authorization
+    // header carries the session. `credentials: "include"` must NOT be set:
+    // the deploy proxy responds with `Access-Control-Allow-Origin: *`, and
+    // browsers hard-block any credentialed request (fetch credentials mode
+    // "include"/"same-origin" sending cookies) against a wildcard CORS
+    // origin — this was the actual cause of every "Failed to fetch" error
+    // in the deployed preview.
   });
 
   await throwIfResNotOk(res);
@@ -41,7 +47,7 @@ export const getQueryFn: <T>(options: {
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
     const res = await fetch(`${API_BASE}${queryKey.join("/")}`, {
-      credentials: "include",
+      // See apiRequest() above — credentials must not be "include".
       headers: authHeaders(),
     });
 
