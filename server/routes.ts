@@ -1,11 +1,10 @@
 import type { Express, Request, Response } from "express";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
-import passport from "passport";
 import { z } from "zod";
 import { storage, parseExercise, db } from "./storage";
 import type { SetWithExercise } from "./storage";
-import { hashPassword, toPublicUser, requireAuth, requireAdmin } from "./auth";
+import { hashPassword, toPublicUser, requireAuth, requireAdmin, login as loginUser, issueTokenFor, logout as logoutToken } from "./auth";
 import {
   users as usersTable,
   muscleGroups as muscleGroupsTable,
@@ -68,17 +67,18 @@ import {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
-// Active-user resolution — reads the authenticated session (set by Passport
-// after /api/auth/login or /api/auth/signup). Replaces the old X-User-Id
-// header trust model: the server no longer believes any client-sent id, it
-// only trusts req.user, which Passport populates from the session cookie.
+// Active-user resolution — reads the authenticated bearer-token session
+// (set by /api/auth/login or /api/auth/signup, verified by the middleware in
+// configureAuth()). Replaces the old X-User-Id header trust model: the
+// server no longer believes any client-sent id, it only trusts req.authUser,
+// which is populated from a verified token, never from client-supplied data.
 // ---------------------------------------------------------------------------
 function getUserId(req: Request, res: Response): number | null {
-  if (!req.isAuthenticated || !req.isAuthenticated()) {
+  if (!req.authUser) {
     res.status(401).json({ message: "Not logged in" });
     return null;
   }
-  return (req.user as any).id;
+  return req.authUser.id;
 }
 
 function startOfWeekWindow(referenceDate: Date, weeksAgo: number): { start: Date; end: Date } {
@@ -166,6 +166,11 @@ export async function registerRoutes(
   app: Express,
 ): Promise<Server> {
   // ---------------- Auth ----------------
+  // Bearer-token based (see server/auth.ts for why: the deploy preview proxy
+  // strips Set-Cookie on credentialed cross-origin responses, so cookie
+  // sessions silently fail there even though they work locally). Every auth
+  // response includes a `token` field; the frontend sends it back as
+  // `Authorization: Bearer <token>` on all subsequent requests.
   app.post("/api/auth/signup", async (req, res) => {
     const parsed = signupSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -179,45 +184,39 @@ export async function registerRoutes(
       name: parsed.data.name,
       passwordHash: hashPassword(parsed.data.password),
     } as InsertUser & { passwordHash: string });
-    req.login(created, (err) => {
-      if (err) return res.status(500).json({ message: "Signed up but couldn't start session" });
-      res.status(201).json(toPublicUser(created));
-    });
+    const token = issueTokenFor(created);
+    res.status(201).json({ ...toPublicUser(created), token });
   });
 
-  app.post("/api/auth/login", (req, res, next) => {
+  app.post("/api/auth/login", (req, res) => {
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0]?.message ?? "Invalid input" });
     }
-    passport.authenticate("local", (err: any, user: any, info: any) => {
-      if (err) return res.status(500).json({ message: "Login failed" });
-      if (!user) return res.status(401).json({ message: info?.message || "Invalid name or password" });
-      req.login(user, (loginErr) => {
-        if (loginErr) return res.status(500).json({ message: "Login failed" });
-        res.json(toPublicUser(user));
-      });
-    })(req, res, next);
+    const result = loginUser(parsed.data.name, parsed.data.password);
+    if (!result) {
+      return res.status(401).json({ message: "Invalid name or password" });
+    }
+    res.json({ ...toPublicUser(result.user), token: result.token });
   });
 
   app.post("/api/auth/logout", (req, res) => {
-    req.logout(() => {
-      res.json({ success: true });
-    });
+    logoutToken(req);
+    res.json({ success: true });
   });
 
   app.get("/api/auth/me", (req, res) => {
-    if (!req.isAuthenticated || !req.isAuthenticated()) {
+    if (!req.authUser) {
       return res.status(401).json({ message: "Not logged in" });
     }
-    res.json(toPublicUser(req.user as any));
+    res.json(toPublicUser(req.authUser));
   });
 
   // Everything below this point requires an authenticated session. Auth
   // routes above (signup/login/logout/me) are intentionally exempt.
   app.use("/api", (req, res, next) => {
     if (req.path.startsWith("/auth/")) return next();
-    if (!req.isAuthenticated || !req.isAuthenticated()) {
+    if (!req.authUser) {
       return res.status(401).json({ message: "Not logged in" });
     }
     next();
@@ -250,7 +249,7 @@ export async function registerRoutes(
   });
 
   function isSelfOrAdmin(req: Request): boolean {
-    const authedUser = (req as any).user;
+    const authedUser = req.authUser;
     if (!authedUser) return false;
     const targetId = Number(req.params.id ?? req.params.userId);
     return authedUser.id === targetId || authedUser.isAdmin === true;
@@ -1031,7 +1030,7 @@ export async function registerRoutes(
     if (Number.isNaN(userId)) {
       return res.status(400).json({ message: "Invalid user id" });
     }
-    const authedUser = req.user as any;
+    const authedUser = req.authUser!;
     if (authedUser.id !== userId && !authedUser.isAdmin) {
       return res.status(403).json({ message: "Not allowed" });
     }

@@ -1,8 +1,5 @@
 import { scryptSync, randomBytes, timingSafeEqual } from "crypto";
-import session from "express-session";
-import passport from "passport";
-import { Strategy as LocalStrategy } from "passport-local";
-import type { Express } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { db } from "./storage";
 import { users as usersTable } from "@shared/schema";
 import { eq } from "drizzle-orm";
@@ -33,69 +30,104 @@ export function toPublicUser(user: UserRecord) {
   return rest;
 }
 
+// ---------------------------------------------------------------------------
+// Bearer-token sessions.
+//
+// This app is deployed behind a preview proxy that rewrites/strips
+// Set-Cookie on cross-origin credentialed responses (the proxy responds with
+// Access-Control-Allow-Origin: * which browsers refuse to pair with
+// credentialed cookies). Cookie-based sessions silently fail in that
+// environment: login succeeds server-side but the browser never persists a
+// session cookie, so every subsequent request looks unauthenticated.
+//
+// To work reliably both locally and behind the proxy, sessions are bearer
+// tokens: login/signup return a `token` in the JSON body, the frontend
+// stores it (via document.cookie, which — unlike localStorage/sessionStorage
+// — is not blocked in the sandboxed iframe) and sends it back as
+// `Authorization: Bearer <token>` on every request. The server keeps an
+// in-memory map from token -> user id. Tokens survive server restarts only
+// as long as the process is alive, matching the existing (non-persistent)
+// MemoryStore session behavior this replaces.
+// ---------------------------------------------------------------------------
+const tokenToUserId = new Map<string, number>();
+
+function issueToken(userId: number): string {
+  const token = randomBytes(32).toString("hex");
+  tokenToUserId.set(token, userId);
+  return token;
+}
+
+function revokeToken(token: string | undefined) {
+  if (token) tokenToUserId.delete(token);
+}
+
+function extractToken(req: Request): string | undefined {
+  const header = req.headers.authorization;
+  if (header?.startsWith("Bearer ")) return header.slice("Bearer ".length);
+  return undefined;
+}
+
+function loadUserFromToken(token: string | undefined): UserRecord | undefined {
+  if (!token) return undefined;
+  const userId = tokenToUserId.get(token);
+  if (userId == null) return undefined;
+  const user = db.select().from(usersTable).where(eq(usersTable.id, userId)).get();
+  if (!user) {
+    tokenToUserId.delete(token);
+    return undefined;
+  }
+  return user;
+}
+
 declare global {
   namespace Express {
-    interface User extends UserRecord {}
+    interface Request {
+      authUser?: UserRecord;
+      authToken?: string;
+    }
   }
 }
 
+// Populates req.authUser (if the bearer token is valid) on every request.
+// Does not reject unauthenticated requests — that's requireAuth's job.
 export function configureAuth(app: Express) {
-  app.use(
-    session({
-      secret: process.env.SESSION_SECRET || "forge-dev-session-secret-change-in-production",
-      resave: false,
-      saveUninitialized: false,
-      cookie: {
-        httpOnly: true,
-        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-        sameSite: "lax",
-      },
-    }),
-  );
-
-  app.use(passport.initialize());
-  app.use(passport.session());
-
-  passport.use(
-    new LocalStrategy(
-      { usernameField: "name", passwordField: "password" },
-      (name, password, done) => {
-        const user = db.select().from(usersTable).where(eq(usersTable.name, name)).get();
-        if (!user) return done(null, false, { message: "Invalid name or password" });
-        if (!user.passwordHash) return done(null, false, { message: "Invalid name or password" });
-        if (!verifyPassword(password, user.passwordHash)) {
-          return done(null, false, { message: "Invalid name or password" });
-        }
-        return done(null, user);
-      },
-    ),
-  );
-
-  passport.serializeUser((user, done) => {
-    done(null, user.id);
-  });
-
-  passport.deserializeUser((id: number, done) => {
-    const user = db.select().from(usersTable).where(eq(usersTable.id, id)).get();
-    if (!user) return done(null, false);
-    return done(null, user);
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    const token = extractToken(req);
+    req.authToken = token;
+    req.authUser = loadUserFromToken(token);
+    next();
   });
 }
 
-// Route guard: require an authenticated session. Attaches nothing extra —
-// req.user is already populated by passport.session().
-export function requireAuth(req: any, res: any, next: any) {
-  if (!req.isAuthenticated || !req.isAuthenticated()) {
+// Verifies name/password and issues a new bearer token. Returns undefined
+// (and does not issue a token) if the credentials are invalid.
+export function login(name: string, password: string): { user: UserRecord; token: string } | undefined {
+  const user = db.select().from(usersTable).where(eq(usersTable.name, name)).get();
+  if (!user || !user.passwordHash) return undefined;
+  if (!verifyPassword(password, user.passwordHash)) return undefined;
+  return { user, token: issueToken(user.id) };
+}
+
+export function issueTokenFor(user: UserRecord): string {
+  return issueToken(user.id);
+}
+
+export function logout(req: Request) {
+  revokeToken(req.authToken);
+}
+
+export function requireAuth(req: Request, res: Response, next: NextFunction) {
+  if (!req.authUser) {
     return res.status(401).json({ message: "Not logged in" });
   }
   next();
 }
 
-export function requireAdmin(req: any, res: any, next: any) {
-  if (!req.isAuthenticated || !req.isAuthenticated()) {
+export function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  if (!req.authUser) {
     return res.status(401).json({ message: "Not logged in" });
   }
-  if (!req.user?.isAdmin) {
+  if (!req.authUser.isAdmin) {
     return res.status(403).json({ message: "Admin access required" });
   }
   next();

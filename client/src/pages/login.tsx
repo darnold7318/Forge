@@ -7,7 +7,10 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Logo } from "@/components/logo";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { setAuthToken } from "@/lib/auth-token";
 import type { User } from "@shared/schema";
+
+type AuthResponse = User & { token: string };
 
 type Mode = "login" | "signup";
 
@@ -21,10 +24,11 @@ export default function Login() {
     mutationFn: async () => {
       const endpoint = mode === "login" ? "/api/auth/login" : "/api/auth/signup";
       const res = await apiRequest("POST", endpoint, { name: name.trim(), password });
-      return (await res.json()) as User;
+      return (await res.json()) as AuthResponse;
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       setError(null);
+      setAuthToken(data.token);
       queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
     },
     onError: (err: Error) => {
@@ -74,7 +78,7 @@ export default function Login() {
                   id="auth-name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. Derek"
+                  placeholder="Your name"
                   autoComplete="username"
                   autoFocus
                   data-testid="input-auth-name"
