@@ -262,6 +262,22 @@ function ensureTables() {
 
 ensureTables();
 
+// One-time bootstrap: if no user in this database has admin rights yet, promote
+// a user named "Derek" to admin (case-insensitive match). This self-heals fresh
+// deployments where the admin panel exists in the UI but no one can reach it
+// because zero accounts have is_admin set. Safe to run on every boot: it's a
+// no-op once any admin exists, and only ever touches a user literally named
+// "Derek" — it never grants admin to an arbitrary first user.
+function bootstrapAdminIfNoneExists() {
+  const anyAdmin = db.select().from(users).where(eq(users.isAdmin, true)).get();
+  if (anyAdmin) return;
+  const derek = db.select().from(users).all().find((u) => u.name.toLowerCase() === "derek");
+  if (derek) {
+    db.update(users).set({ isAdmin: true }).where(eq(users.id, derek.id)).run();
+  }
+}
+bootstrapAdminIfNoneExists();
+
 function seedIfEmpty() {
   // ---- Users: seed 2 default profiles if none exist ----
   let existingUsers = db.select().from(users).all();
