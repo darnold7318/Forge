@@ -16,8 +16,27 @@ const COOKIE_NAME = "forge_token";
 const ONE_YEAR_SECONDS = 60 * 60 * 24 * 365;
 
 function readCookie(name: string): string | null {
-  const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
-  return match ? decodeURIComponent(match[1]) : null;
+  try {
+    const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
+    return match ? decodeURIComponent(match[1]) : null;
+  } catch {
+    // Some embedding contexts (sandboxed iframes without allow-same-origin,
+    // strict cookie-partitioning policies) throw on document.cookie access.
+    // Never let that crash the whole app at module-init time — just treat
+    // it as "no persisted session" and fall back to in-memory-only tokens
+    // for this page load.
+    return null;
+  }
+}
+
+function writeCookie(nameValue: string) {
+  try {
+    document.cookie = nameValue;
+  } catch {
+    // See readCookie() above — swallow cookie-write failures too. The token
+    // still works for the current page load via inMemoryToken; it just
+    // won't survive a reload in that environment.
+  }
 }
 
 let inMemoryToken: string | null = readCookie(COOKIE_NAME);
@@ -45,13 +64,13 @@ export function getAuthToken(): string | null {
 
 export function setAuthToken(token: string) {
   inMemoryToken = token;
-  document.cookie = `${COOKIE_NAME}=${encodeURIComponent(token)}; path=/; max-age=${ONE_YEAR_SECONDS}; SameSite=Lax`;
+  writeCookie(`${COOKIE_NAME}=${encodeURIComponent(token)}; path=/; max-age=${ONE_YEAR_SECONDS}; SameSite=Lax`);
   notify();
 }
 
 export function clearAuthToken() {
   inMemoryToken = null;
-  document.cookie = `${COOKIE_NAME}=; path=/; max-age=0`;
+  writeCookie(`${COOKIE_NAME}=; path=/; max-age=0`);
   notify();
 }
 
