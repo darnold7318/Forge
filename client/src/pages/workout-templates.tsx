@@ -1,14 +1,13 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
-import { ClipboardList, Play, Clock, Dumbbell, Flame, AlertCircle, Copy, Lock, Pencil, Plus } from "lucide-react";
+import { ClipboardList, Play, Clock, Dumbbell, Flame, AlertCircle, Pencil, Plus } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
@@ -55,15 +54,9 @@ const FATIGUE_RATING_STYLE: Record<string, string> = {
 function TemplateCard({
   template,
   exerciseNameLookup,
-  readOnly,
-  onCopy,
-  copyPending,
 }: {
   template: WorkoutTemplateFull;
   exerciseNameLookup: Map<number, string>;
-  readOnly?: boolean;
-  onCopy?: () => void;
-  copyPending?: boolean;
 }) {
   const { data: analysis, isLoading } = useQuery<WorkoutComposition>({
     queryKey: ["/api/workout-templates", String(template.id), "analysis"],
@@ -84,33 +77,20 @@ function TemplateCard({
           </CardTitle>
           {template.notes && <p className="text-xs text-muted-foreground mt-1">{template.notes}</p>}
         </div>
-        {readOnly ? (
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={onCopy}
-            disabled={copyPending}
-            data-testid={`button-copy-template-${template.id}`}
-          >
-            <Copy className="h-3.5 w-3.5" />
-            {copyPending ? "Copying..." : "Copy to my templates"}
-          </Button>
-        ) : (
-          <div className="flex items-center gap-1.5 shrink-0">
-            <Link href={`/templates/${template.id}/edit`}>
-              <Button size="sm" variant="outline" data-testid={`button-edit-template-${template.id}`}>
-                <Pencil className="h-3.5 w-3.5" />
-                Edit
-              </Button>
-            </Link>
-            <Link href={`/log?template=${template.id}`}>
-              <Button size="sm" data-testid={`button-start-template-${template.id}`}>
-                <Play className="h-3.5 w-3.5" />
-                Start
-              </Button>
-            </Link>
-          </div>
-        )}
+        <div className="flex items-center gap-1.5 shrink-0">
+          <Link href={`/templates/${template.id}/edit`}>
+            <Button size="sm" variant="outline" data-testid={`button-edit-template-${template.id}`}>
+              <Pencil className="h-3.5 w-3.5" />
+              Edit
+            </Button>
+          </Link>
+          <Link href={`/log?template=${template.id}`}>
+            <Button size="sm" data-testid={`button-start-template-${template.id}`}>
+              <Play className="h-3.5 w-3.5" />
+              Start
+            </Button>
+          </Link>
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
         {isLoading && <Skeleton className="h-16 w-full" />}
@@ -166,14 +146,11 @@ function TemplateCard({
 }
 
 export default function WorkoutTemplates() {
-  const { activeUserId, activeUser, users } = useActiveUser();
+  const { activeUserId } = useActiveUser();
   const { toast } = useToast();
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState<"mine" | "other">("mine");
   const [newOpen, setNewOpen] = useState(false);
   const [newName, setNewName] = useState("");
-
-  const otherUser = users.find((u) => u.id !== activeUserId);
 
   const { data: templates, isLoading } = useQuery<WorkoutTemplateFull[]>({
     queryKey: ["/api/workout-templates", activeUserId],
@@ -183,43 +160,12 @@ export default function WorkoutTemplates() {
     },
     enabled: activeUserId != null,
   });
-  const { data: otherTemplates, isLoading: otherLoading } = useQuery<WorkoutTemplateFull[]>({
-    queryKey: ["/api/workout-templates/shared", otherUser?.id],
-    queryFn: async () => {
-      const res = await apiRequest("GET", `/api/workout-templates/shared/${otherUser!.id}`);
-      return res.json();
-    },
-    enabled: tab === "other" && otherUser != null,
-  });
   const { data: exercises } = useQuery<Exercise[]>({
     queryKey: ["/api/exercises"],
   });
 
   const exerciseNameLookup = new Map<number, string>();
   for (const e of exercises ?? []) exerciseNameLookup.set(e.id, e.name);
-
-  const [copyingId, setCopyingId] = useState<number | null>(null);
-  const copyMutation = useMutation({
-    mutationFn: async (templateId: number) => {
-      setCopyingId(templateId);
-      const res = await apiRequest("POST", `/api/workout-templates/${templateId}/copy`, {
-        targetUserId: activeUserId,
-      });
-      return res.json();
-    },
-    onSuccess: (created) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/workout-templates"] });
-      toast({ title: `Copied "${created.name}" to your templates` });
-      setCopyingId(null);
-    },
-    onError: () => {
-      toast({ title: "Couldn't copy template", variant: "destructive" });
-      setCopyingId(null);
-    },
-  });
-
-  const activeList = tab === "mine" ? templates : otherTemplates;
-  const activeLoading = tab === "mine" ? isLoading : otherLoading;
 
   const createMutation = useMutation({
     mutationFn: async (name: string) => {
@@ -295,44 +241,23 @@ export default function WorkoutTemplates() {
         </DialogContent>
       </Dialog>
 
-      {otherUser && (
-        <Tabs value={tab} onValueChange={(v) => setTab(v as "mine" | "other")}>
-          <TabsList data-testid="tabs-template-scope">
-            <TabsTrigger value="mine" data-testid="tab-my-templates">
-              {activeUser ? `${activeUser.name}'s Templates` : "My Templates"}
-            </TabsTrigger>
-            <TabsTrigger value="other" data-testid="tab-other-templates">
-              <Lock className="h-3 w-3 mr-1" />
-              {otherUser.name}'s Templates
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
-      )}
-
-      {activeLoading && (
+      {isLoading && (
         <div className="space-y-4">
           <Skeleton className="h-64 w-full" />
           <Skeleton className="h-64 w-full" />
         </div>
       )}
 
-      {!activeLoading && (activeList?.length ?? 0) === 0 && (
+      {!isLoading && (templates?.length ?? 0) === 0 && (
         <div className="flex flex-col items-center text-center gap-3 py-16 text-muted-foreground">
           <ClipboardList className="h-8 w-8 text-muted-foreground/60" />
-          <p>{tab === "mine" ? "No workout templates yet." : `${otherUser?.name} has no templates yet.`}</p>
+          <p>No workout templates yet.</p>
         </div>
       )}
 
-      <div className="space-y-4" data-testid={`list-templates-${tab}`}>
-        {activeList?.map((t) => (
-          <TemplateCard
-            key={t.id}
-            template={t}
-            exerciseNameLookup={exerciseNameLookup}
-            readOnly={tab === "other"}
-            onCopy={() => copyMutation.mutate(t.id)}
-            copyPending={copyingId === t.id}
-          />
+      <div className="space-y-4" data-testid="list-templates">
+        {templates?.map((t) => (
+          <TemplateCard key={t.id} template={t} exerciseNameLookup={exerciseNameLookup} />
         ))}
       </div>
     </div>

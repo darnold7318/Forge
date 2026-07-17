@@ -10,8 +10,8 @@ import { BottomNav } from "@/components/bottom-nav";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Logo } from "@/components/logo";
-import { UserProvider } from "@/lib/user-context";
-import { UserSwitcher } from "@/components/user-switcher";
+import { UserProvider, useActiveUser } from "@/lib/user-context";
+import Login from "@/pages/login";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/dashboard";
 import LogWorkout from "@/pages/log-workout";
@@ -45,47 +45,64 @@ function AppRouter() {
   );
 }
 
-export default function App() {
+function AuthGate() {
+  const { activeUser, isLoading, isAuthenticated } = useActiveUser();
   const style = {
     "--sidebar-width": "16rem",
     "--sidebar-width-icon": "3rem",
   };
 
+  if (isLoading) {
+    return <div className="flex min-h-screen items-center justify-center bg-background" data-testid="status-auth-loading" />;
+  }
+
+  if (!isAuthenticated || !activeUser) {
+    return <Login />;
+  }
+
+  return (
+    <ThemeProvider>
+      <TooltipProvider>
+        <Router hook={useHashLocation}>
+          <SidebarProvider style={style as React.CSSProperties}>
+            <div className="flex h-screen w-full">
+              <AppSidebar />
+              <div className="flex flex-col flex-1 min-w-0">
+                <header className="flex items-center justify-between gap-2 p-2 border-b h-14 shrink-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <SidebarTrigger data-testid="button-sidebar-toggle" />
+                    <div className="md:hidden">
+                      <Logo />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-xs font-medium text-muted-foreground" data-testid="text-active-user-name">
+                      {activeUser.name}
+                    </span>
+                    <div className="md:hidden">
+                      <ThemeToggle />
+                    </div>
+                  </div>
+                </header>
+                <main className="flex-1 overflow-y-auto pb-16 md:pb-0">
+                  <AppRouter />
+                </main>
+                <BottomNav />
+              </div>
+            </div>
+          </SidebarProvider>
+        </Router>
+        <Toaster />
+      </TooltipProvider>
+    </ThemeProvider>
+  );
+}
+
+export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <UserProvider>
-        <ThemeProvider>
-          <TooltipProvider>
-            <Router hook={useHashLocation}>
-              <SidebarProvider style={style as React.CSSProperties}>
-                <div className="flex h-screen w-full">
-                  <AppSidebar />
-                  <div className="flex flex-col flex-1 min-w-0">
-                    <header className="flex items-center justify-between gap-2 p-2 border-b h-14 shrink-0">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <SidebarTrigger data-testid="button-sidebar-toggle" />
-                        <div className="md:hidden">
-                          <Logo />
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <UserSwitcher />
-                        <div className="md:hidden">
-                          <ThemeToggle />
-                        </div>
-                      </div>
-                    </header>
-                    <main className="flex-1 overflow-y-auto pb-16 md:pb-0">
-                      <AppRouter />
-                    </main>
-                    <BottomNav />
-                  </div>
-                </div>
-              </SidebarProvider>
-            </Router>
-            <Toaster />
-          </TooltipProvider>
-        </ThemeProvider>
+        <AuthGate />
       </UserProvider>
     </QueryClientProvider>
   );

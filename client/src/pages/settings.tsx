@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2, Trash2 } from "lucide-react";
+import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2, Trash2, ShieldCheck, UserPlus, KeyRound, LogOut } from "lucide-react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,6 +15,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -36,6 +44,7 @@ import {
   type ThemeColorId,
   type WorkoutSplitId,
   type CustomWeeklySlot,
+  type User,
 } from "@shared/schema";
 
 const WEEKDAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -247,60 +256,26 @@ async function downloadResponse(res: Response, fallbackFilename: string) {
   URL.revokeObjectURL(url);
 }
 
+// Every logged-in user can back up their own data. Admins additionally get
+// a "download everyone" button in the Account Management card below.
 function BackupExportCard() {
-  const { activeUser, activeUserId, users, setActiveUserId } = useActiveUser();
+  const { activeUser } = useActiveUser();
   const { toast } = useToast();
-  const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<{ id: number; name: string } | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
-  const downloadProfile = async (userId: number, name: string) => {
-    setDownloadingKey(`user-${userId}`);
+  const downloadOwn = async () => {
+    if (!activeUser) return;
+    setDownloading(true);
     try {
-      const res = await apiRequest("GET", `/api/export/user/${userId}`);
-      await downloadResponse(res, `forge-backup-${name}.json`);
-      toast({ title: `Backup downloaded for ${name}` });
+      const res = await apiRequest("GET", `/api/export/user/${activeUser.id}`);
+      await downloadResponse(res, `forge-backup-${activeUser.name}.json`);
+      toast({ title: "Backup downloaded" });
     } catch {
       toast({ title: "Couldn't create backup", variant: "destructive" });
     } finally {
-      setDownloadingKey(null);
+      setDownloading(false);
     }
   };
-
-  const downloadAll = async () => {
-    setDownloadingKey("all");
-    try {
-      const res = await apiRequest("GET", "/api/export/all");
-      await downloadResponse(res, "forge-full-backup.json");
-      toast({ title: "Full backup downloaded" });
-    } catch {
-      toast({ title: "Couldn't create backup", variant: "destructive" });
-    } finally {
-      setDownloadingKey(null);
-    }
-  };
-
-  const deleteMutation = useMutation({
-    mutationFn: async (userId: number) => {
-      const res = await apiRequest("DELETE", `/api/users/${userId}`);
-      return res.json();
-    },
-    onSuccess: async (_data, userId) => {
-      const wasActive = activeUserId === userId;
-      await queryClient.invalidateQueries({ queryKey: ["/api/users"] });
-      if (wasActive) {
-        const remaining = (users ?? []).filter((u) => u.id !== userId);
-        if (remaining[0]) setActiveUserId(remaining[0].id);
-      }
-      toast({ title: `${deleteTarget?.name ?? "Profile"} deleted` });
-      setDeleteTarget(null);
-    },
-    onError: (err: Error) => {
-      toast({ title: err.message.includes("only remaining") ? "Can't delete the only profile" : "Couldn't delete profile", variant: "destructive" });
-      setDeleteTarget(null);
-    },
-  });
-
-  const canDelete = (users ?? []).length > 1;
 
   return (
     <Card data-testid="card-backup-export">
@@ -310,93 +285,280 @@ function BackupExportCard() {
           Backup & Export
         </CardTitle>
         <p className="text-xs text-muted-foreground">
-          Download your data as a JSON file you can keep somewhere safe. Useful before switching devices, or just in
-          case. Bring the file back to us if you ever need it restored.
+          Download your data as a JSON file you can keep somewhere safe — templates, logged workouts, sets,
+          schedule, and body weight history.
+        </p>
+      </CardHeader>
+      <CardContent>
+        <Button
+          className="w-full gap-2"
+          disabled={downloading}
+          onClick={downloadOwn}
+          data-testid="button-backup-own"
+        >
+          {downloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+          Download my backup
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Admin-only: create accounts, reset anyone's password, delete accounts, and
+// download a full multi-profile backup. Hidden entirely for non-admins.
+function AdminUserManagementCard() {
+  const { toast } = useToast();
+  const [addOpen, setAddOpen] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [resetTarget, setResetTarget] = useState<{ id: number; name: string } | null>(null);
+  const [resetPassword, setResetPassword] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<{ id: number; name: string } | null>(null);
+  const [downloadingAll, setDownloadingAll] = useState(false);
+
+  const { data: users, isLoading } = useQuery<User[]>({ queryKey: ["/api/users"] });
+
+  const createUser = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/users", { name: newName.trim(), password: newPassword });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      toast({ title: `Account "${newName.trim()}" created` });
+      setAddOpen(false);
+      setNewName("");
+      setNewPassword("");
+    },
+    onError: (err: Error) => {
+      toast({ title: err.message.includes("taken") ? "That name is already taken" : "Couldn't create account", variant: "destructive" });
+    },
+  });
+
+  const resetPasswordMutation = useMutation({
+    mutationFn: async () => {
+      if (!resetTarget) throw new Error("No target");
+      const res = await apiRequest("PATCH", `/api/users/${resetTarget.id}/password`, { password: resetPassword });
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: `Password reset for ${resetTarget?.name}` });
+      setResetTarget(null);
+      setResetPassword("");
+    },
+    onError: () => toast({ title: "Couldn't reset password", variant: "destructive" }),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (userId: number) => {
+      const res = await apiRequest("DELETE", `/api/users/${userId}`);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      toast({ title: `${deleteTarget?.name ?? "Account"} deleted` });
+      setDeleteTarget(null);
+    },
+    onError: (err: Error) => {
+      toast({ title: err.message.includes("only remaining") ? "Can't delete the only account" : "Couldn't delete account", variant: "destructive" });
+      setDeleteTarget(null);
+    },
+  });
+
+  const downloadAll = async () => {
+    setDownloadingAll(true);
+    try {
+      const res = await apiRequest("GET", "/api/export/all");
+      await downloadResponse(res, "forge-full-backup.json");
+      toast({ title: "Full backup downloaded" });
+    } catch {
+      toast({ title: "Couldn't create backup", variant: "destructive" });
+    } finally {
+      setDownloadingAll(false);
+    }
+  };
+
+  const canDelete = (users ?? []).length > 1;
+
+  return (
+    <Card data-testid="card-admin-user-management">
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4" />
+          Account Management
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Admin tools — add accounts, reset passwords, or remove accounts. Only you can see this section.
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="space-y-2">
-          {(users ?? []).map((u) => (
-            <div
-              key={u.id}
-              className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-md border p-2.5"
-              data-testid={`row-backup-profile-${u.id}`}
-            >
-              <div className="text-sm font-medium">
-                {u.name}
-                {activeUser?.id === u.id && (
-                  <span className="ml-2 text-xs text-muted-foreground">(current)</span>
-                )}
+        {isLoading ? (
+          <Skeleton className="h-24 w-full" />
+        ) : (
+          <div className="space-y-2">
+            {(users ?? []).map((u) => (
+              <div
+                key={u.id}
+                className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-md border p-2.5"
+                data-testid={`row-admin-user-${u.id}`}
+              >
+                <div className="text-sm font-medium">
+                  {u.name}
+                  {u.isAdmin && <span className="ml-2 text-xs text-muted-foreground">(admin)</span>}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5"
+                    onClick={() => {
+                      setResetTarget({ id: u.id, name: u.name });
+                      setResetPassword("");
+                    }}
+                    data-testid={`button-reset-password-${u.id}`}
+                  >
+                    <KeyRound className="h-3.5 w-3.5" />
+                    Reset password
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5 text-destructive hover:text-destructive"
+                    disabled={!canDelete}
+                    title={canDelete ? undefined : "Can't delete the only remaining account"}
+                    onClick={() => setDeleteTarget({ id: u.id, name: u.name })}
+                    data-testid={`button-delete-account-${u.id}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Delete
+                  </Button>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="gap-1.5"
-                  disabled={downloadingKey === `user-${u.id}`}
-                  onClick={() => downloadProfile(u.id, u.name)}
-                  data-testid={`button-backup-profile-${u.id}`}
-                >
-                  {downloadingKey === `user-${u.id}` ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Download className="h-3.5 w-3.5" />
-                  )}
-                  Download backup
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="gap-1.5 text-destructive hover:text-destructive"
-                  disabled={!canDelete}
-                  title={canDelete ? undefined : "Can't delete the only remaining profile"}
-                  onClick={() => setDeleteTarget({ id: u.id, name: u.name })}
-                  data-testid={`button-delete-profile-${u.id}`}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Delete
-                </Button>
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
+
+        <Button
+          variant="outline"
+          className="w-full gap-2"
+          onClick={() => {
+            setNewName("");
+            setNewPassword("");
+            setAddOpen(true);
+          }}
+          data-testid="button-add-account"
+        >
+          <UserPlus className="h-4 w-4" />
+          Add account
+        </Button>
+
         <Button
           className="w-full gap-2"
-          disabled={downloadingKey === "all"}
+          disabled={downloadingAll}
           onClick={downloadAll}
           data-testid="button-backup-all"
         >
-          {downloadingKey === "all" ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <DatabaseBackup className="h-4 w-4" />
-          )}
-          Download full backup (all profiles)
+          {downloadingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <DatabaseBackup className="h-4 w-4" />}
+          Download full backup (all accounts)
         </Button>
-        <p className="text-xs text-muted-foreground">
-          A full backup includes every profile, its templates, logged workouts, sets, schedule, and body weight
-          history, plus the shared exercise library.
-        </p>
       </CardContent>
 
+      {/* Add account dialog */}
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent data-testid="dialog-add-account">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <UserPlus className="h-4 w-4" /> Add account
+            </DialogTitle>
+            <DialogDescription>Create a new login for someone else to use.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <Label htmlFor="new-account-name">Name</Label>
+              <Input
+                id="new-account-name"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="e.g. Alex"
+                data-testid="input-new-account-name"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="new-account-password">Temporary password</Label>
+              <Input
+                id="new-account-password"
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="At least 4 characters"
+                data-testid="input-new-account-password"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={() => createUser.mutate()}
+              disabled={!newName.trim() || newPassword.length < 4 || createUser.isPending}
+              data-testid="button-confirm-add-account"
+            >
+              {createUser.isPending ? "Creating..." : "Create account"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Reset password dialog */}
+      <Dialog open={resetTarget != null} onOpenChange={(open) => !open && setResetTarget(null)}>
+        <DialogContent data-testid="dialog-reset-password">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <KeyRound className="h-4 w-4" /> Reset password for {resetTarget?.name}
+            </DialogTitle>
+            <DialogDescription>Set a new password. Share it with them directly.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="reset-password-input">New password</Label>
+            <Input
+              id="reset-password-input"
+              type="password"
+              value={resetPassword}
+              onChange={(e) => setResetPassword(e.target.value)}
+              placeholder="At least 4 characters"
+              data-testid="input-reset-password"
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={() => resetPasswordMutation.mutate()}
+              disabled={resetPassword.length < 4 || resetPasswordMutation.isPending}
+              data-testid="button-confirm-reset-password"
+            >
+              {resetPasswordMutation.isPending ? "Saving..." : "Reset password"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete account confirmation */}
       <AlertDialog open={deleteTarget != null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete {deleteTarget?.name}?</AlertDialogTitle>
             <AlertDialogDescription>
-              This permanently deletes this profile and everything tied to it — workout templates, logged workouts
-              and sets, schedule, and body weight history. This can't be undone. Consider downloading a backup first.
+              This permanently deletes this account and everything tied to it — workout templates, logged workouts
+              and sets, schedule, and body weight history. This can't be undone. Consider downloading a backup
+              first.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel data-testid="button-cancel-delete-profile">Cancel</AlertDialogCancel>
+            <AlertDialogCancel data-testid="button-cancel-delete-account">Cancel</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               disabled={deleteMutation.isPending}
               onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
-              data-testid="button-confirm-delete-profile"
+              data-testid="button-confirm-delete-account"
             >
-              {deleteMutation.isPending ? "Deleting..." : "Delete Profile"}
+              {deleteMutation.isPending ? "Deleting..." : "Delete Account"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -406,7 +568,7 @@ function BackupExportCard() {
 }
 
 export default function Settings() {
-  const { activeUser, activeUserId, isLoading } = useActiveUser();
+  const { activeUser, activeUserId, isLoading, logout } = useActiveUser();
   const { theme, themeColor, setTheme } = useTheme();
   const { toast } = useToast();
 
@@ -419,7 +581,7 @@ export default function Settings() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
       toast({ title: "Preferences saved" });
     },
     onError: () => {
@@ -433,7 +595,7 @@ export default function Settings() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
       queryClient.invalidateQueries({ queryKey: ["/api/schedule"] });
       toast({ title: "Calendar updated" });
     },
@@ -473,14 +635,20 @@ export default function Settings() {
 
   return (
     <div className="mx-auto max-w-3xl p-4 md:p-6 space-y-6">
-      <div>
-        <h1 className="text-xl font-display font-bold flex items-center gap-2" data-testid="text-page-title">
-          <SettingsIcon className="h-5 w-5" />
-          Settings
-        </h1>
-        <p className="text-sm text-muted-foreground" data-testid="text-settings-subtitle">
-          Preferences for {activeUser.name}
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-display font-bold flex items-center gap-2" data-testid="text-page-title">
+            <SettingsIcon className="h-5 w-5" />
+            Settings
+          </h1>
+          <p className="text-sm text-muted-foreground" data-testid="text-settings-subtitle">
+            Preferences for {activeUser.name}
+          </p>
+        </div>
+        <Button variant="outline" size="sm" className="gap-1.5 shrink-0" onClick={() => logout()} data-testid="button-logout">
+          <LogOut className="h-3.5 w-3.5" />
+          Log out
+        </Button>
       </div>
 
       {/* Appearance — Mode */}
@@ -590,6 +758,8 @@ export default function Settings() {
       {activeUser.workoutSplit === "custom" && <CustomTemplateBuilder />}
 
       <BackupExportCard />
+
+      {activeUser.isAdmin && <AdminUserManagementCard />}
 
       <AlertDialog open={pendingSplit != null} onOpenChange={(open) => !open && setPendingSplit(null)}>
         <AlertDialogContent>

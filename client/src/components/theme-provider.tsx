@@ -61,7 +61,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       themeColor: color,
     })
       .then(() => {
-        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
       })
       .catch(() => {
         // Revert optimistic state on failure so the UI doesn't lie about

@@ -3,11 +3,18 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
-// Users — lightweight named profiles for data separation (no auth/passwords)
+// Users — accounts with password-based login. Each account is a private
+// training profile; there is no data sharing between accounts.
 // ---------------------------------------------------------------------------
 export const users = sqliteTable("users", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull().unique(),
+  // scrypt hash in the form "salt:hash" (hex). Null only for legacy rows
+  // that haven't been migrated yet; login is blocked until a password is set.
+  passwordHash: text("password_hash"),
+  // Admins can create/delete other users' accounts and reset their passwords
+  // from Settings. Regular users can only manage their own account.
+  isAdmin: integer("is_admin", { mode: "boolean" }).notNull().default(false),
   colorAccent: text("color_accent"),
   // App-wide accent theme (distinct from colorAccent, which is used only for
   // profile badge coloring in user-switcher.tsx). One of themeColorIds below.
@@ -18,10 +25,22 @@ export const users = sqliteTable("users", {
   workoutSplit: text("workout_split").notNull().default("ppl"),
 });
 
-export const insertUserSchema = createInsertSchema(users).omit({ id: true });
+export const insertUserSchema = createInsertSchema(users).omit({ id: true, passwordHash: true, isAdmin: true });
+
+export const signupSchema = z.object({
+  name: z.string().min(1, "Name is required"),
+  password: z.string().min(4, "Password must be at least 4 characters"),
+});
+
+export const loginSchema = z.object({
+  name: z.string().min(1, "Name is required"),
+  password: z.string().min(1, "Password is required"),
+});
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
-export type User = typeof users.$inferSelect;
+// Public-facing user shape (never send passwordHash to the client).
+export type User = Omit<typeof users.$inferSelect, "passwordHash">;
+export type UserRecord = typeof users.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // User preferences — theme color, theme mode, workout split

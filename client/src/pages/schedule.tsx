@@ -362,7 +362,7 @@ export default function SchedulePage() {
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/schedule"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
     queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
   };
 

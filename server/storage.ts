@@ -13,6 +13,7 @@ import {
 } from "@shared/schema";
 import type {
   User,
+  UserRecord,
   InsertUser,
   MuscleGroup,
   InsertMuscleGroup,
@@ -374,14 +375,14 @@ export interface WorkoutScheduleWithDays extends WorkoutSchedule {
 // ---------------------------------------------------------------------------
 export interface IStorage {
   // Users
-  getUsers(): Promise<User[]>;
-  getUser(id: number): Promise<User | undefined>;
-  createUser(user: InsertUser): Promise<User>;
-  renameUser(id: number, name: string): Promise<User | undefined>;
+  getUsers(): Promise<UserRecord[]>;
+  getUser(id: number): Promise<UserRecord | undefined>;
+  createUser(user: InsertUser & { passwordHash: string; isAdmin?: boolean }): Promise<UserRecord>;
+  renameUser(id: number, name: string): Promise<UserRecord | undefined>;
   updateUserPreferences(
     id: number,
-    prefs: Partial<Pick<User, "themeColor" | "themeMode" | "workoutSplit">>,
-  ): Promise<User | undefined>;
+    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit">>,
+  ): Promise<UserRecord | undefined>;
 
   // Muscle groups (shared/global)
   getMuscleGroups(): Promise<MuscleGroup[]>;
@@ -449,26 +450,29 @@ export interface IStorage {
 
 export class DatabaseStorage implements IStorage {
   // ---------------- Users ----------------
-  async getUsers(): Promise<User[]> {
+  // NOTE: these return the full UserRecord (including passwordHash) since
+  // storage is not the trust boundary — routes.ts strips the hash via
+  // toPublicUser() before anything reaches the client.
+  async getUsers(): Promise<UserRecord[]> {
     return db.select().from(users).orderBy(users.id).all();
   }
 
-  async getUser(id: number): Promise<User | undefined> {
+  async getUser(id: number): Promise<UserRecord | undefined> {
     return db.select().from(users).where(eq(users.id, id)).get();
   }
 
-  async createUser(user: InsertUser): Promise<User> {
+  async createUser(user: InsertUser & { passwordHash: string; isAdmin?: boolean }): Promise<UserRecord> {
     return db.insert(users).values(user).returning().get();
   }
 
-  async renameUser(id: number, name: string): Promise<User | undefined> {
+  async renameUser(id: number, name: string): Promise<UserRecord | undefined> {
     return db.update(users).set({ name }).where(eq(users.id, id)).returning().get();
   }
 
   async updateUserPreferences(
     id: number,
-    prefs: Partial<Pick<User, "themeColor" | "themeMode" | "workoutSplit">>,
-  ): Promise<User | undefined> {
+    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit">>,
+  ): Promise<UserRecord | undefined> {
     return db.update(users).set(prefs).where(eq(users.id, id)).returning().get();
   }
 

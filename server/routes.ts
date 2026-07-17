@@ -1,8 +1,11 @@
 import type { Express, Request, Response } from "express";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
+import passport from "passport";
+import { z } from "zod";
 import { storage, parseExercise, db } from "./storage";
 import type { SetWithExercise } from "./storage";
+import { hashPassword, toPublicUser, requireAuth, requireAdmin } from "./auth";
 import {
   users as usersTable,
   muscleGroups as muscleGroupsTable,
@@ -24,6 +27,8 @@ import {
   insertWorkoutTemplateSchema,
   insertWorkoutTemplateExerciseSchema,
   insertUserSchema,
+  signupSchema,
+  loginSchema,
   updateUserPreferencesSchema,
   generateScheduleSchema,
   setWeeklyRestDaysSchema,
@@ -37,6 +42,7 @@ import {
   type Exercise,
   type Workout,
   type User,
+  type InsertUser,
 } from "@shared/schema";
 import {
   categorizeVolume,
@@ -62,18 +68,17 @@ import {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
-// Active-user resolution — reads the `X-User-Id` header set by the frontend's
-// apiRequest helper. No session/cookie infra; this is profile separation for
-// shared-device convenience only, not a security boundary.
+// Active-user resolution — reads the authenticated session (set by Passport
+// after /api/auth/login or /api/auth/signup). Replaces the old X-User-Id
+// header trust model: the server no longer believes any client-sent id, it
+// only trusts req.user, which Passport populates from the session cookie.
 // ---------------------------------------------------------------------------
 function getUserId(req: Request, res: Response): number | null {
-  const header = req.header("x-user-id");
-  const id = header ? Number(header) : NaN;
-  if (!header || Number.isNaN(id)) {
-    res.status(400).json({ message: "Missing or invalid X-User-Id header" });
+  if (!req.isAuthenticated || !req.isAuthenticated()) {
+    res.status(401).json({ message: "Not logged in" });
     return null;
   }
-  return id;
+  return (req.user as any).id;
 }
 
 function startOfWeekWindow(referenceDate: Date, weeksAgo: number): { start: Date; end: Date } {
@@ -160,42 +165,142 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express,
 ): Promise<Server> {
-  // ---------------- Users (profiles) ----------------
-  app.get("/api/users", async (_req, res) => {
-    const list = await storage.getUsers();
-    res.json(list);
-  });
-
-  app.post("/api/users", async (req, res) => {
-    const parsed = insertUserSchema.safeParse(req.body);
+  // ---------------- Auth ----------------
+  app.post("/api/auth/signup", async (req, res) => {
+    const parsed = signupSchema.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json({ message: parsed.error.message });
+      return res.status(400).json({ message: parsed.error.issues[0]?.message ?? "Invalid input" });
     }
-    const created = await storage.createUser(parsed.data);
-    res.status(201).json(created);
+    const existing = db.select().from(usersTable).where(eq(usersTable.name, parsed.data.name)).get();
+    if (existing) {
+      return res.status(409).json({ message: "That name is already taken" });
+    }
+    const created = await storage.createUser({
+      name: parsed.data.name,
+      passwordHash: hashPassword(parsed.data.password),
+    } as InsertUser & { passwordHash: string });
+    req.login(created, (err) => {
+      if (err) return res.status(500).json({ message: "Signed up but couldn't start session" });
+      res.status(201).json(toPublicUser(created));
+    });
   });
 
-  app.patch("/api/users/:id", async (req, res) => {
+  app.post("/api/auth/login", (req, res, next) => {
+    const parsed = loginSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.issues[0]?.message ?? "Invalid input" });
+    }
+    passport.authenticate("local", (err: any, user: any, info: any) => {
+      if (err) return res.status(500).json({ message: "Login failed" });
+      if (!user) return res.status(401).json({ message: info?.message || "Invalid name or password" });
+      req.login(user, (loginErr) => {
+        if (loginErr) return res.status(500).json({ message: "Login failed" });
+        res.json(toPublicUser(user));
+      });
+    })(req, res, next);
+  });
+
+  app.post("/api/auth/logout", (req, res) => {
+    req.logout(() => {
+      res.json({ success: true });
+    });
+  });
+
+  app.get("/api/auth/me", (req, res) => {
+    if (!req.isAuthenticated || !req.isAuthenticated()) {
+      return res.status(401).json({ message: "Not logged in" });
+    }
+    res.json(toPublicUser(req.user as any));
+  });
+
+  // Everything below this point requires an authenticated session. Auth
+  // routes above (signup/login/logout/me) are intentionally exempt.
+  app.use("/api", (req, res, next) => {
+    if (req.path.startsWith("/auth/")) return next();
+    if (!req.isAuthenticated || !req.isAuthenticated()) {
+      return res.status(401).json({ message: "Not logged in" });
+    }
+    next();
+  });
+
+  // ---------------- Users (profiles) ----------------
+  // Only admins can list/manage all accounts. Regular users only ever see
+  // (and can only ever act on) their own account via /api/auth/me and the
+  // :id routes below, which are self-or-admin gated.
+  app.get("/api/users", requireAdmin, async (_req, res) => {
+    const list = await storage.getUsers();
+    res.json(list.map(toPublicUser));
+  });
+
+  // Admin-only: create a new account for someone else (e.g. from Settings).
+  app.post("/api/users", requireAdmin, async (req, res) => {
+    const parsed = signupSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.issues[0]?.message ?? "Invalid input" });
+    }
+    const existing = db.select().from(usersTable).where(eq(usersTable.name, parsed.data.name)).get();
+    if (existing) {
+      return res.status(409).json({ message: "That name is already taken" });
+    }
+    const created = await storage.createUser({
+      name: parsed.data.name,
+      passwordHash: hashPassword(parsed.data.password),
+    } as InsertUser & { passwordHash: string });
+    res.status(201).json(toPublicUser(created));
+  });
+
+  function isSelfOrAdmin(req: Request): boolean {
+    const authedUser = (req as any).user;
+    if (!authedUser) return false;
+    const targetId = Number(req.params.id ?? req.params.userId);
+    return authedUser.id === targetId || authedUser.isAdmin === true;
+  }
+
+  app.patch("/api/users/:id", requireAuth, async (req, res) => {
     const id = Number(req.params.id);
+    if (!isSelfOrAdmin(req)) return res.status(403).json({ message: "Not allowed" });
     const nameSchema = insertUserSchema.pick({ name: true });
     const parsed = nameSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
+    const existing = db.select().from(usersTable).where(eq(usersTable.name, parsed.data.name)).get();
+    if (existing && existing.id !== id) {
+      return res.status(409).json({ message: "That name is already taken" });
+    }
     const updated = await storage.renameUser(id, parsed.data.name);
     if (!updated) return res.status(404).json({ message: "User not found" });
-    res.json(updated);
+    res.json(toPublicUser(updated));
   });
 
-  app.patch("/api/users/:id/preferences", async (req, res) => {
+  // Admin-only: reset another user's password (or your own) from Settings.
+  app.patch("/api/users/:id/password", requireAuth, async (req, res) => {
     const id = Number(req.params.id);
+    if (!isSelfOrAdmin(req)) return res.status(403).json({ message: "Not allowed" });
+    const parsed = z.object({ password: z.string().min(4) }).safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Password must be at least 4 characters" });
+    }
+    const updated = db
+      .update(usersTable)
+      .set({ passwordHash: hashPassword(parsed.data.password) })
+      .where(eq(usersTable.id, id))
+      .returning()
+      .get();
+    if (!updated) return res.status(404).json({ message: "User not found" });
+    res.json({ success: true });
+  });
+
+  app.patch("/api/users/:id/preferences", requireAuth, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!isSelfOrAdmin(req)) return res.status(403).json({ message: "Not allowed" });
     const parsed = updateUserPreferencesSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
     const updated = await storage.updateUserPreferences(id, parsed.data);
     if (!updated) return res.status(404).json({ message: "User not found" });
-    res.json(updated);
+    res.json(toPublicUser(updated));
   });
 
   // ---------------- Muscle Groups (shared/global) ----------------
@@ -288,13 +393,6 @@ export async function registerRoutes(
     res.json(templates);
   });
 
-  // Browse another user's templates, read-only (for cross-user template copying UI)
-  app.get("/api/workout-templates/shared/:userId", async (req, res) => {
-    const targetUserId = Number(req.params.userId);
-    const templates = await storage.getAllWorkoutTemplatesWithExercises(targetUserId);
-    res.json(templates);
-  });
-
   app.get("/api/workout-templates/:id", async (req, res) => {
     const id = Number(req.params.id);
     const template = await storage.getWorkoutTemplateWithExercises(id);
@@ -331,18 +429,6 @@ export async function registerRoutes(
     }
     const created = await storage.createWorkoutTemplateExercise(parsed.data);
     res.status(201).json(created);
-  });
-
-  // Deep-copy another user's template into the requesting (or specified target) user's library.
-  app.post("/api/workout-templates/:id/copy", async (req, res) => {
-    const id = Number(req.params.id);
-    const bodyTargetUserId = req.body?.targetUserId != null ? Number(req.body.targetUserId) : undefined;
-    const headerUserId = getUserId(req, res);
-    const targetUserId = bodyTargetUserId ?? headerUserId;
-    if (targetUserId == null) return; // getUserId already responded with 400 if header missing/invalid
-    const copy = await storage.copyWorkoutTemplate(id, targetUserId);
-    if (!copy) return res.status(404).json({ message: "Template not found" });
-    res.status(201).json(copy);
   });
 
   app.delete("/api/workout-templates/:id", async (req, res) => {
@@ -868,7 +954,7 @@ export async function registerRoutes(
   // the frontend is expected to confirm with the user and offer a backup
   // download first. Refuses to delete the last remaining profile.
   // -------------------------------------------------------------------------
-  app.delete("/api/users/:userId", async (req, res) => {
+  app.delete("/api/users/:userId", requireAdmin, async (req, res) => {
     const userId = Number(req.params.userId);
     if (Number.isNaN(userId)) {
       return res.status(400).json({ message: "Invalid user id" });
@@ -940,10 +1026,14 @@ export async function registerRoutes(
     };
   }
 
-  app.get("/api/export/user/:userId", async (req, res) => {
+  app.get("/api/export/user/:userId", requireAuth, async (req, res) => {
     const userId = Number(req.params.userId);
     if (Number.isNaN(userId)) {
       return res.status(400).json({ message: "Invalid user id" });
+    }
+    const authedUser = req.user as any;
+    if (authedUser.id !== userId && !authedUser.isAdmin) {
+      return res.status(403).json({ message: "Not allowed" });
     }
     const user = db.select().from(usersTable).where(eq(usersTable.id, userId)).get();
     if (!user) {
@@ -963,7 +1053,7 @@ export async function registerRoutes(
     res.send(JSON.stringify(payload, null, 2));
   });
 
-  app.get("/api/export/all", async (_req, res) => {
+  app.get("/api/export/all", requireAdmin, async (_req, res) => {
     const allUsers = db.select().from(usersTable).orderBy(usersTable.id).all();
     const allMuscleGroups = db.select().from(muscleGroupsTable).all();
     const allExercises = db.select().from(exercisesTable).all();

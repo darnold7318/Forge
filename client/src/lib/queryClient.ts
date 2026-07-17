@@ -1,12 +1,6 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
-import { getActiveUserIdForRequests } from "./active-user";
 
 const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
-
-function activeUserHeaders(): Record<string, string> {
-  const id = getActiveUserIdForRequests();
-  return id != null ? { "X-User-Id": String(id) } : {};
-}
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
@@ -24,9 +18,9 @@ export async function apiRequest(
     method,
     headers: {
       ...(data ? { "Content-Type": "application/json" } : {}),
-      ...activeUserHeaders(),
     },
     body: data ? JSON.stringify(data) : undefined,
+    credentials: "include",
   });
 
   await throwIfResNotOk(res);
@@ -40,7 +34,7 @@ export const getQueryFn: <T>(options: {
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
     const res = await fetch(`${API_BASE}${queryKey.join("/")}`, {
-      headers: activeUserHeaders(),
+      credentials: "include",
     });
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
