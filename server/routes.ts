@@ -50,6 +50,8 @@ import {
   evaluateRecovery,
   evaluateFatigueTrend,
   getPersonalRecords,
+  checkLivePersonalRecord,
+  markHistoricalPrs,
   buildWorkoutSuggestion,
   getDashboardSnapshot,
   analyzeWorkoutComposition,
@@ -61,6 +63,7 @@ import {
   type HistorySetInput,
   type MuscleGroupLookup,
   type DashboardTemplateInput,
+  type LivePrResult,
   monthBounds,
 } from "@shared/coaching";
 
@@ -365,9 +368,19 @@ export async function registerRoutes(
     const list = await storage.getSetsForExercise(id, userId);
     const workoutsList = await storage.getWorkouts(userId);
     const workoutDateMap = new Map(workoutsList.map((w) => [w.id, w.date]));
-    const enriched = list
-      .map((s) => ({ ...s, workoutDate: workoutDateMap.get(s.workoutId) ?? "" }))
-      .sort((a, b) => a.workoutDate.localeCompare(b.workoutDate) || a.id - b.id);
+    const chronological = [...list].sort(
+      (a, b) =>
+        (workoutDateMap.get(a.workoutId) ?? "").localeCompare(workoutDateMap.get(b.workoutId) ?? "") ||
+        a.id - b.id,
+    );
+    const prIds = markHistoricalPrs(chronological);
+    const enriched = chronological
+      .map((s) => ({
+        ...s,
+        workoutDate: workoutDateMap.get(s.workoutId) ?? "",
+        isPr: prIds.has(s.id),
+      }))
+      .sort((a, b) => b.workoutDate.localeCompare(a.workoutDate) || b.id - a.id);
     res.json(enriched);
   });
 
@@ -597,7 +610,25 @@ export async function registerRoutes(
       return res.status(403).json({ message: "Workout does not belong to the active user" });
     }
     const created = await storage.createSet(parsed.data);
-    res.status(201).json(created);
+
+    // Live PR check: compare this set against the user's prior working sets
+    // for the same exercise (excluding the one just created) so the client
+    // can show an immediate "New PR!" toast instead of waiting for the
+    // Progress page's retrospective scan.
+    let pr: LivePrResult = { isPr: false };
+    try {
+      const priorSets = (await storage.getSetsForExercise(created.exerciseId, userId)).filter(
+        (s) => s.id !== created.id,
+      );
+      pr = checkLivePersonalRecord(
+        { weight: created.weight, reps: created.reps, isWarmup: created.isWarmup },
+        priorSets.map((s) => ({ weight: s.weight, reps: s.reps, isWarmup: s.isWarmup })),
+      );
+    } catch (err) {
+      console.error("PR check failed for set", created.id, err);
+    }
+
+    res.status(201).json({ ...created, pr });
   });
 
   app.patch("/api/sets/:id", async (req, res) => {

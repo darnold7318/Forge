@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronsUpDown, Plus, Trash2, X, ClipboardList } from "lucide-react";
+import { Check, ChevronsUpDown, Plus, Trash2, X, ClipboardList, Trophy, Flame, TimerIcon } from "lucide-react";
 import { apiRequest, queryClient as qc } from "@/lib/queryClient";
 import { useActiveUser } from "@/lib/user-context";
+import { useRestTimer } from "@/lib/rest-timer-context";
+import { WarmupCalculator } from "@/components/warmup-calculator";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -76,6 +78,8 @@ interface DraftSet {
   reps: string;
   rir: string;
   isWarmup: boolean;
+  /** Set once this set has been individually logged via the "Log set" button. */
+  loggedSetId?: number;
 }
 
 interface DraftExercise {
@@ -103,6 +107,7 @@ interface HistorySet {
   rir: number | null;
   isWarmup: boolean;
   workoutDate: string;
+  isPr?: boolean;
 }
 
 function ExerciseHistory({ exerciseId }: { exerciseId: number }) {
@@ -145,7 +150,15 @@ function ExerciseHistory({ exerciseId }: { exerciseId: number }) {
             {sets
               .filter((s) => !s.isWarmup)
               .map((s) => (
-                <span key={s.id} className="tabular-nums font-mono bg-muted rounded px-1.5 py-0.5">
+                <span
+                  key={s.id}
+                  className={cn(
+                    "tabular-nums font-mono rounded px-1.5 py-0.5 inline-flex items-center gap-1",
+                    s.isPr ? "bg-primary/15 text-primary font-semibold" : "bg-muted",
+                  )}
+                  data-testid={`text-history-set-${s.id}`}
+                >
+                  {s.isPr && <Trophy className="h-3 w-3" data-testid={`icon-pr-badge-${s.id}`} />}
                   {s.weight}×{s.reps}
                   {s.rir != null ? ` @${s.rir}RIR` : ""}
                 </span>
@@ -440,6 +453,7 @@ function TemplateStartPicker({
 
 export default function LogWorkout() {
   const { toast } = useToast();
+  const restTimer = useRestTimer();
   const [location] = useLocation();
   const [workoutName, setWorkoutName] = useState("");
   const [date, setDate] = useState(todayIso());
@@ -448,6 +462,13 @@ export default function LogWorkout() {
   const [newExerciseName, setNewExerciseName] = useState("");
   const [saved, setSaved] = useState(false);
   const [activeTemplateId, setActiveTemplateId] = useState<number | null>(null);
+  // Lazily-created workout id, set the first time any individual set is
+  // logged mid-session (via "Log set"). Reused for subsequent per-set logs
+  // and for the final batch save, so we never create duplicate workouts.
+  const [liveWorkoutId, setLiveWorkoutId] = useState<number | null>(null);
+  const [warmupDialogFor, setWarmupDialogFor] = useState<{ exerciseName: string; weight?: number } | null>(
+    null,
+  );
 
   const { data: exercises, isLoading: exercisesLoading } = useQuery<Exercise[]>({
     queryKey: ["/api/exercises"],
@@ -496,7 +517,11 @@ export default function LogWorkout() {
     for (const te of sorted) {
       const ex = exerciseMap.get(te.exerciseId);
       if (!ex) continue;
-      const totalSets = Math.max(1, te.warmupSets + te.topSets + te.backoffSets || te.targetSets);
+      // Working sets come from the explicit top+backoff breakdown when the
+      // template specifies one; otherwise fall back to targetSets. Warm-up
+      // sets are always additive on top of the working sets.
+      const workingSets = te.topSets + te.backoffSets > 0 ? te.topSets + te.backoffSets : te.targetSets;
+      const totalSets = Math.max(1, te.warmupSets + workingSets);
       const sets: DraftSet[] = [];
       for (let i = 0; i < totalSets; i++) {
         const isWarmup = i < te.warmupSets;
@@ -507,6 +532,7 @@ export default function LogWorkout() {
     setDraftExercises(newDrafts);
     setWorkoutName(template.name);
     setActiveTemplateId(template.id);
+    setLiveWorkoutId(null);
     toast({ title: `Started ${template.name}`, description: `${newDrafts.length} exercises loaded.` });
   };
 
@@ -557,22 +583,85 @@ export default function LogWorkout() {
     [draftExercises],
   );
 
+  const invalidateWorkoutQueries = () => {
+    qc.invalidateQueries({ queryKey: ["/api/workouts"] });
+    qc.invalidateQueries({ queryKey: ["/api/dashboard/volume"] });
+    qc.invalidateQueries({ queryKey: ["/api/volume-tracker"] });
+    qc.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
+    qc.invalidateQueries({ queryKey: ["/api/recovery"] });
+    qc.invalidateQueries({ queryKey: ["/api/dashboard"] });
+  };
+
+  /** Create the workout row on first individual set-log, and reuse afterward. */
+  const ensureWorkoutId = async (): Promise<number> => {
+    if (liveWorkoutId != null) return liveWorkoutId;
+    const res = await apiRequest("POST", "/api/workouts", {
+      date,
+      name: workoutName || null,
+      notes: null,
+      workoutTemplateId: activeTemplateId,
+    });
+    const workout = await res.json();
+    setLiveWorkoutId(workout.id);
+    return workout.id;
+  };
+
+  // Logs a single set immediately (used by the per-row "Log set" action).
+  // Starts the rest timer from the exercise's prescribed restSeconds and
+  // surfaces an instant "New PR!" toast when the backend flags one.
+  const logSetMutation = useMutation({
+    mutationFn: async ({ exKey, setKey }: { exKey: string; setKey: string }) => {
+      const draftExercise = draftExercises.find((d) => d.key === exKey);
+      const draftSet = draftExercise?.sets.find((s) => s.key === setKey);
+      if (!draftExercise || !draftSet) throw new Error("Set not found");
+      const setNumber = draftExercise.sets.filter((s) => !!s.loggedSetId).length + 1;
+      const workoutId = await ensureWorkoutId();
+      const res = await apiRequest("POST", "/api/sets", {
+        workoutId,
+        exerciseId: draftExercise.exercise.id,
+        setNumber,
+        weight: Number(draftSet.weight),
+        reps: Number(draftSet.reps),
+        rir: draftSet.rir === "" ? null : Number(draftSet.rir),
+        isWarmup: draftSet.isWarmup,
+      });
+      const created = await res.json();
+      return { exKey, setKey, draftExercise, draftSet, created };
+    },
+    onSuccess: ({ exKey, setKey, draftExercise, draftSet, created }) => {
+      updateSet(exKey, setKey, { loggedSetId: created.id });
+      qc.invalidateQueries({ queryKey: ["/api/exercises", String(draftExercise.exercise.id), "sets"] });
+
+      if (!draftSet.isWarmup) {
+        const restSeconds = draftExercise.prescription?.restSeconds ?? 90;
+        restTimer.start(restSeconds, draftExercise.exercise.name);
+      }
+
+      if (created.pr?.isPr) {
+        toast({
+          title: `New PR! ${draftExercise.exercise.name}`,
+          description: `${created.pr.recordType}: ${created.pr.displayValue}${
+            created.pr.previousBest ? ` (prev. ${created.pr.previousBest})` : ""
+          }`,
+        });
+      }
+    },
+    onError: () => {
+      toast({ title: "Failed to log set", variant: "destructive" });
+    },
+  });
+
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const workoutRes = await apiRequest("POST", "/api/workouts", {
-        date,
-        name: workoutName || null,
-        notes: null,
-        workoutTemplateId: activeTemplateId,
-      });
-      const workout = await workoutRes.json();
+      const workoutId = await ensureWorkoutId();
 
       for (const d of draftExercises) {
-        let setNumber = 1;
+        let setNumber = d.sets.filter((s) => !!s.loggedSetId).length + 1;
         for (const s of d.sets) {
+          if (s.loggedSetId) continue; // already saved via "Log set"
           if (s.weight === "" || s.reps === "") continue;
           await apiRequest("POST", "/api/sets", {
-            workoutId: workout.id,
+            workoutId,
             exerciseId: d.exercise.id,
             setNumber: setNumber++,
             weight: Number(s.weight),
@@ -582,20 +671,16 @@ export default function LogWorkout() {
           });
         }
       }
-      return workout;
+      return { id: workoutId };
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["/api/workouts"] });
-      qc.invalidateQueries({ queryKey: ["/api/dashboard/volume"] });
-      qc.invalidateQueries({ queryKey: ["/api/volume-tracker"] });
-      qc.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
-      qc.invalidateQueries({ queryKey: ["/api/recovery"] });
-      qc.invalidateQueries({ queryKey: ["/api/dashboard"] });
+      invalidateWorkoutQueries();
       toast({ title: "Workout saved", description: `Logged ${totalValidSets} ${totalValidSets === 1 ? "set" : "sets"}.` });
       setDraftExercises([]);
       setWorkoutName("");
       setDate(todayIso());
       setActiveTemplateId(null);
+      setLiveWorkoutId(null);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     },
@@ -675,31 +760,51 @@ export default function LogWorkout() {
                 )}
               </div>
             </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => removeExercise(d.key)}
-              data-testid={`button-remove-exercise-${d.exercise.id}`}
-            >
-              <X className="h-4 w-4" />
-            </Button>
+            <div className="flex items-center gap-1 shrink-0">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() =>
+                  setWarmupDialogFor({
+                    exerciseName: d.exercise.name,
+                    weight: (() => {
+                      const lastWorking = [...d.sets].reverse().find((s) => !s.isWarmup && s.weight !== "");
+                      return lastWorking ? Number(lastWorking.weight) : undefined;
+                    })(),
+                  })
+                }
+                data-testid={`button-warmup-calc-${d.exercise.id}`}
+                aria-label="Warm-up calculator"
+              >
+                <Flame className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => removeExercise(d.key)}
+                data-testid={`button-remove-exercise-${d.exercise.id}`}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
             <ExerciseHistory exerciseId={d.exercise.id} />
 
             <div className="space-y-2">
-              <div className="grid grid-cols-[1.5rem_1fr_1fr_1fr_2.5rem_2rem] gap-2 text-xs text-muted-foreground px-1">
+              <div className="grid grid-cols-[1.5rem_1fr_1fr_1fr_2.5rem_2.25rem_2rem] gap-2 text-xs text-muted-foreground px-1">
                 <span>#</span>
                 <span>Weight</span>
                 <span>Reps</span>
                 <span>RIR</span>
                 <span className="text-center">Warm</span>
                 <span />
+                <span />
               </div>
               {d.sets.map((s, idx) => (
                 <div
                   key={s.key}
-                  className="grid grid-cols-[1.5rem_1fr_1fr_1fr_2.5rem_2rem] gap-2 items-center"
+                  className="grid grid-cols-[1.5rem_1fr_1fr_1fr_2.5rem_2.25rem_2rem] gap-2 items-center"
                   data-testid={`row-set-${d.exercise.id}-${idx}`}
                 >
                   <span className="text-sm text-muted-foreground">{idx + 1}</span>
@@ -708,6 +813,7 @@ export default function LogWorkout() {
                     inputMode="decimal"
                     placeholder="lb"
                     value={s.weight}
+                    disabled={!!s.loggedSetId}
                     onChange={(e) => updateSet(d.key, s.key, { weight: e.target.value })}
                     data-testid={`input-weight-${d.exercise.id}-${idx}`}
                   />
@@ -716,6 +822,7 @@ export default function LogWorkout() {
                     inputMode="numeric"
                     placeholder="reps"
                     value={s.reps}
+                    disabled={!!s.loggedSetId}
                     onChange={(e) => updateSet(d.key, s.key, { reps: e.target.value })}
                     data-testid={`input-reps-${d.exercise.id}-${idx}`}
                   />
@@ -726,22 +833,39 @@ export default function LogWorkout() {
                     min={0}
                     max={5}
                     value={s.rir}
+                    disabled={!!s.loggedSetId}
                     onChange={(e) => updateSet(d.key, s.key, { rir: e.target.value })}
                     data-testid={`input-rir-${d.exercise.id}-${idx}`}
                   />
                   <div className="flex justify-center">
                     <Checkbox
                       checked={s.isWarmup}
+                      disabled={!!s.loggedSetId}
                       onCheckedChange={(v) => updateSet(d.key, s.key, { isWarmup: Boolean(v) })}
                       data-testid={`checkbox-warmup-${d.exercise.id}-${idx}`}
                     />
                   </div>
                   <Button
+                    variant={s.loggedSetId ? "ghost" : "outline"}
+                    size="icon"
+                    className="h-8 w-8"
+                    disabled={!!s.loggedSetId || s.weight === "" || s.reps === "" || logSetMutation.isPending}
+                    onClick={() => logSetMutation.mutate({ exKey: d.key, setKey: s.key })}
+                    data-testid={`button-log-set-${d.exercise.id}-${idx}`}
+                    aria-label={s.loggedSetId ? "Set logged" : "Log this set"}
+                  >
+                    {s.loggedSetId ? (
+                      <Check className="h-3.5 w-3.5 text-primary" />
+                    ) : (
+                      <TimerIcon className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                  <Button
                     variant="ghost"
                     size="icon"
                     className="h-8 w-8"
                     onClick={() => removeSet(d.key, s.key)}
-                    disabled={d.sets.length === 1}
+                    disabled={d.sets.length === 1 || !!s.loggedSetId}
                     data-testid={`button-remove-set-${d.exercise.id}-${idx}`}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
@@ -762,6 +886,15 @@ export default function LogWorkout() {
           </CardContent>
         </Card>
       ))}
+
+      <WarmupCalculator
+        open={warmupDialogFor != null}
+        onOpenChange={(open) => {
+          if (!open) setWarmupDialogFor(null);
+        }}
+        exerciseName={warmupDialogFor?.exerciseName}
+        defaultWorkingWeight={warmupDialogFor?.weight}
+      />
 
       {!exercisesLoading && (
         <ExercisePicker

@@ -704,6 +704,102 @@ export function getPersonalRecords(
 }
 
 // ---------------------------------------------------------------------------
+// 5b. Live PR check — used at set-save time to flag a newly logged set as a
+// personal record immediately, without waiting for a Progress-page re-scan.
+// Lighter than getPersonalRecords(): only needs prior working sets for ONE
+// exercise, not the full session history.
+// ---------------------------------------------------------------------------
+
+export interface LivePrCheckInput {
+  weight: number;
+  reps: number;
+  isWarmup: boolean;
+}
+
+export interface LivePrResult {
+  isPr: boolean;
+  recordType?: "Heaviest Set" | "Estimated 1RM";
+  displayValue?: string;
+  previousBest?: string;
+}
+
+/**
+ * Compare a just-logged set against the exercise's prior working sets and
+ * report whether it's a new heaviest-weight or estimated-1RM personal record.
+ * `priorSets` must NOT include the set being checked. Warmup sets are
+ * ignored on both sides — PRs only apply to working sets.
+ */
+export function checkLivePersonalRecord(
+  newSet: LivePrCheckInput,
+  priorSets: LivePrCheckInput[],
+): LivePrResult {
+  if (newSet.isWarmup || newSet.weight <= 0 || newSet.reps <= 0) {
+    return { isPr: false };
+  }
+  const priorWorking = priorSets.filter((s) => !s.isWarmup && s.weight > 0 && s.reps > 0);
+
+  // No history yet — first working set ever logged establishes a baseline,
+  // not a PR event (mirrors getPersonalRecords()'s "first occurrence" rule).
+  if (priorWorking.length === 0) return { isPr: false };
+
+  const prevBestWeight = Math.max(...priorWorking.map((s) => s.weight));
+  if (newSet.weight > prevBestWeight) {
+    return {
+      isPr: true,
+      recordType: "Heaviest Set",
+      displayValue: `${fmt1(newSet.weight)} x ${newSet.reps}`,
+      previousBest: `${fmt1(prevBestWeight)} lb`,
+    };
+  }
+
+  const newE1rm = estimateOneRepMax(newSet.weight, newSet.reps);
+  const prevBestE1rm = Math.max(...priorWorking.map((s) => estimateOneRepMax(s.weight, s.reps)));
+  if (newE1rm > prevBestE1rm) {
+    return {
+      isPr: true,
+      recordType: "Estimated 1RM",
+      displayValue: `${fmt1(newE1rm)} lb e1RM`,
+      previousBest: `${fmt1(prevBestE1rm)} lb`,
+    };
+  }
+
+  return { isPr: false };
+}
+
+/**
+ * Given a chronologically-ordered (oldest first) list of sets for a single
+ * exercise, return the ids of sets that were a personal record (heaviest
+ * weight OR best e1RM) at the moment they were logged. Used to render PR
+ * badges next to historical sets, consistent with checkLivePersonalRecord's
+ * rules (warmups never count, first working set is a baseline not a PR).
+ */
+export function markHistoricalPrs<T extends LivePrCheckInput & { id: number }>(
+  setsChronological: T[],
+): Set<number> {
+  const prIds = new Set<number>();
+  let bestWeight = -Infinity;
+  let bestE1rm = -Infinity;
+  let seenAny = false;
+
+  for (const s of setsChronological) {
+    if (s.isWarmup || s.weight <= 0 || s.reps <= 0) continue;
+    if (!seenAny) {
+      seenAny = true;
+      bestWeight = s.weight;
+      bestE1rm = estimateOneRepMax(s.weight, s.reps);
+      continue; // baseline, not a PR
+    }
+    const e1rm = estimateOneRepMax(s.weight, s.reps);
+    if (s.weight > bestWeight || e1rm > bestE1rm) {
+      prIds.add(s.id);
+    }
+    bestWeight = Math.max(bestWeight, s.weight);
+    bestE1rm = Math.max(bestE1rm, e1rm);
+  }
+  return prIds;
+}
+
+// ---------------------------------------------------------------------------
 // 6. WorkoutRecommendationEngine — buildWorkoutSuggestion
 // ---------------------------------------------------------------------------
 

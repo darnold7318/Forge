@@ -11,6 +11,8 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Logo } from "@/components/logo";
 import { UserProvider, useActiveUser } from "@/lib/user-context";
+import { RestTimerProvider } from "@/lib/rest-timer-context";
+import { RestTimerWidget } from "@/components/rest-timer-widget";
 import Login from "@/pages/login";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/dashboard";
@@ -90,6 +92,7 @@ function AuthGate() {
                 <BottomNav />
               </div>
             </div>
+            <RestTimerWidget />
           </SidebarProvider>
         </Router>
         <Toaster />
@@ -102,7 +105,9 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <UserProvider>
-        <AuthGate />
+        <RestTimerProvider>
+          <AuthGate />
+        </RestTimerProvider>
       </UserProvider>
     </QueryClientProvider>
   );
