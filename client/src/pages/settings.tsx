@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2, Trash2, ShieldCheck, UserPlus, KeyRound, LogOut } from "lucide-react";
+import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2, Trash2, ShieldCheck, ShieldOff, UserPlus, KeyRound, LogOut } from "lucide-react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -317,6 +317,24 @@ function AdminUserManagementCard() {
   const [downloadingAll, setDownloadingAll] = useState(false);
 
   const { data: users, isLoading } = useQuery<User[]>({ queryKey: ["/api/users"] });
+  const adminCount = (users ?? []).filter((u) => u.isAdmin).length;
+
+  const setAdminMutation = useMutation({
+    mutationFn: async ({ id, isAdmin }: { id: number; isAdmin: boolean }) => {
+      const res = await apiRequest("PATCH", `/api/users/${id}/admin`, { isAdmin });
+      return res.json();
+    },
+    onSuccess: (_data, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      toast({ title: vars.isAdmin ? "Admin access granted" : "Admin access removed" });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: err.message.includes("last remaining") ? "Can't remove the last remaining admin" : "Couldn't update admin status",
+        variant: "destructive",
+      });
+    },
+  });
 
   const createUser = useMutation({
     mutationFn: async () => {
@@ -402,11 +420,20 @@ function AdminUserManagementCard() {
                 className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-md border p-2.5"
                 data-testid={`row-admin-user-${u.id}`}
               >
-                <div className="text-sm font-medium">
-                  {u.name}
-                  {u.isAdmin && <span className="ml-2 text-xs text-muted-foreground">(admin)</span>}
-                </div>
-                <div className="flex items-center gap-2">
+                <div className="text-sm font-medium">{u.name}</div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Button
+                    variant={u.isAdmin ? "default" : "outline"}
+                    size="sm"
+                    className="gap-1.5"
+                    disabled={setAdminMutation.isPending || (u.isAdmin && adminCount <= 1)}
+                    title={u.isAdmin && adminCount <= 1 ? "Can't remove the last remaining admin" : undefined}
+                    onClick={() => setAdminMutation.mutate({ id: u.id, isAdmin: !u.isAdmin })}
+                    data-testid={`button-toggle-admin-${u.id}`}
+                  >
+                    {u.isAdmin ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldOff className="h-3.5 w-3.5" />}
+                    {u.isAdmin ? "Admin" : "Non-Admin"}
+                  </Button>
                   <Button
                     variant="outline"
                     size="sm"

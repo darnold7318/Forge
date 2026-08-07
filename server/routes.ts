@@ -293,6 +293,34 @@ export async function registerRoutes(
     res.json({ success: true });
   });
 
+  // Admin-only: promote or demote another account's admin status. Blocks
+  // demoting the last remaining admin so the app can never end up with zero
+  // admins (which would require another manual recovery like before).
+  app.patch("/api/users/:id/admin", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    const parsed = z.object({ isAdmin: z.boolean() }).safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "isAdmin must be a boolean" });
+    }
+    const target = db.select().from(usersTable).where(eq(usersTable.id, id)).get();
+    if (!target) return res.status(404).json({ message: "User not found" });
+
+    if (!parsed.data.isAdmin && target.isAdmin) {
+      const adminCount = db.select().from(usersTable).where(eq(usersTable.isAdmin, true)).all().length;
+      if (adminCount <= 1) {
+        return res.status(409).json({ message: "Can't remove the last remaining admin" });
+      }
+    }
+
+    const updated = db
+      .update(usersTable)
+      .set({ isAdmin: parsed.data.isAdmin })
+      .where(eq(usersTable.id, id))
+      .returning()
+      .get();
+    res.json(toPublicUser(updated));
+  });
+
   app.patch("/api/users/:id/preferences", requireAuth, async (req, res) => {
     const id = Number(req.params.id);
     if (!isSelfOrAdmin(req)) return res.status(403).json({ message: "Not allowed" });
