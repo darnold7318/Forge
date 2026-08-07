@@ -52,8 +52,17 @@ import Database from "better-sqlite3";
 import { eq, desc, and, gte } from "drizzle-orm";
 import { MUSCLE_GROUPS, EXERCISES, WORKOUT_TEMPLATES } from "./seed-data";
 
-const sqlite = new Database("data.db");
-sqlite.pragma("journal_mode = WAL");
+const DB_PATH = process.env.DATABASE_PATH || "data.db";
+console.log("[startup-diagnostic] storage.ts loading, cwd=", process.cwd(), "DB_PATH=", DB_PATH);
+let sqlite: Database.Database;
+try {
+  sqlite = new Database(DB_PATH);
+  sqlite.pragma("journal_mode = WAL");
+  console.log("[startup-diagnostic] database opened successfully at", DB_PATH, ", WAL mode set");
+} catch (err) {
+  console.error("[startup-diagnostic] FAILED to open database at", DB_PATH, ":", err);
+  throw err;
+}
 
 export const db = drizzle(sqlite);
 

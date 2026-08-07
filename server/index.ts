@@ -6,6 +6,14 @@ import { configureAuth } from "./auth";
 import { serveStatic } from "./static";
 import { createServer } from "node:http";
 
+process.on("uncaughtException", (err) => {
+  console.error("[startup-diagnostic] UNCAUGHT EXCEPTION:", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[startup-diagnostic] UNHANDLED REJECTION:", reason);
+});
+console.log("[startup-diagnostic] process boot, node", process.version, "cwd", process.cwd());
+
 const app = express();
 const httpServer = createServer(app);
 
@@ -94,14 +102,28 @@ app.use((req, res, next) => {
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
-  httpServer.listen(
-    {
-      port,
-      host: "0.0.0.0",
-      reusePort: true,
-    },
-    () => {
-      log(`serving on port ${port}`);
-    },
-  );
-})();
+  console.log(`[startup-diagnostic] about to listen on port ${port}`);
+  httpServer.on("error", (err) => {
+    console.error("[startup-diagnostic] httpServer error event:", err);
+  });
+  try {
+    httpServer.listen(
+      {
+        port,
+        host: "0.0.0.0",
+        reusePort: true,
+      },
+      () => {
+        log(`serving on port ${port}`);
+        console.log("[startup-diagnostic] listen callback fired successfully");
+      },
+    );
+  } catch (err) {
+    console.error("[startup-diagnostic] listen() threw synchronously, retrying without reusePort:", err);
+    httpServer.listen(port, "0.0.0.0", () => {
+      log(`serving on port ${port} (fallback, no reusePort)`);
+    });
+  }
+})().catch((err) => {
+  console.error("[startup-diagnostic] async IIFE rejected:", err);
+});
