@@ -470,7 +470,12 @@ export default function TemplateEditor() {
   }
 
   const usedExerciseIds = new Set(template.exercises.map((te) => te.exerciseId));
-  const availableExercises = (exercises ?? []).filter((e) => !usedExerciseIds.has(e.id));
+  const availableExercises = (exercises ?? [])
+    .filter((e) => !usedExerciseIds.has(e.id))
+    .sort(
+      (a, b) =>
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) || a.id - b.id,
+    );
 
   return (
     <div className="mx-auto max-w-3xl p-4 md:p-6 space-y-6">
