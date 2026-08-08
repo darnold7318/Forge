@@ -44,11 +44,14 @@ import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { formatDate, todayIso } from "@/lib/format";
 import type {
-  Exercise,
+  ExerciseView,
   MuscleGroup,
   Equipment,
 } from "@shared/schema";
 import { equipmentTypes } from "@shared/schema";
+
+type Exercise = ExerciseView;
+type MuscleGroupView = MuscleGroup & { displayName: string };
 
 interface WorkoutTemplateExerciseLite {
   id: number;
@@ -261,34 +264,44 @@ function CreateExerciseDialog({
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  muscleGroups: MuscleGroup[];
+  muscleGroups: MuscleGroupView[];
   onCreated: (ex: Exercise) => void;
   initialName: string;
 }) {
   const { toast } = useToast();
   const [name, setName] = useState(initialName);
+  const [stimulus, setStimulus] = useState<{ muscleGroupId: string; stimulusRatio: string }[]>([]);
 
   useEffect(() => {
-    if (open) setName(initialName);
+    if (open) {
+      setName(initialName);
+      setStimulus([]);
+    }
   }, [open, initialName]);
-  const [primaryId, setPrimaryId] = useState<string>("");
-  const [secondaryIds, setSecondaryIds] = useState<number[]>([]);
   const [equipment, setEquipment] = useState<Equipment>("Barbell");
   const [isCompound, setIsCompound] = useState(false);
   const [isUnilateral, setIsUnilateral] = useState(false);
 
-  const toggleSecondary = (id: number) => {
-    setSecondaryIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-    );
+  const addStimulus = () => {
+    const used = new Set(stimulus.map((row) => row.muscleGroupId));
+    const next = muscleGroups.find((group) => !used.has(String(group.id)));
+    if (!next) return;
+    setStimulus((rows) => [
+      ...rows,
+      { muscleGroupId: String(next.id), stimulusRatio: rows.length === 0 ? "1.00" : "0.50" },
+    ]);
   };
+
+  const normalizedStimulus = stimulus.map((row) => ({
+    muscleGroupId: Number(row.muscleGroupId),
+    stimulusRatio: Number(row.stimulusRatio),
+  }));
 
   const createMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/exercises", {
         name,
-        primaryMuscleGroupId: Number(primaryId),
-        secondaryMuscles: secondaryIds,
+        stimulus: normalizedStimulus,
         equipment,
         movementPattern: null,
         isCompound,
@@ -301,8 +314,7 @@ function CreateExerciseDialog({
       toast({ title: "Exercise created", description: `${ex.name} added to your library.` });
       onCreated(ex);
       setName("");
-      setPrimaryId("");
-      setSecondaryIds([]);
+      setStimulus([]);
       setEquipment("Barbell");
       setIsCompound(false);
       setIsUnilateral(false);
@@ -330,38 +342,51 @@ function CreateExerciseDialog({
               data-testid="input-new-exercise-name"
             />
           </div>
-          <div className="space-y-1.5">
-            <Label>Primary muscle group</Label>
-            <Select value={primaryId} onValueChange={setPrimaryId}>
-              <SelectTrigger data-testid="select-primary-muscle">
-                <SelectValue placeholder="Select primary muscle" />
-              </SelectTrigger>
-              <SelectContent>
-                {muscleGroups.map((mg) => (
-                  <SelectItem key={mg.id} value={String(mg.id)}>
-                    {mg.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label>Secondary muscles (optional)</Label>
-            <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto p-2 border rounded-md">
-              {muscleGroups
-                .filter((mg) => String(mg.id) !== primaryId)
-                .map((mg) => (
-                  <Badge
-                    key={mg.id}
-                    variant={secondaryIds.includes(mg.id) ? "default" : "outline"}
-                    className="cursor-pointer select-none"
-                    onClick={() => toggleSecondary(mg.id)}
-                    data-testid={`badge-secondary-muscle-${mg.id}`}
-                  >
-                    {mg.name}
-                  </Badge>
-                ))}
+          <div className="space-y-2 rounded-md border p-3">
+            <div>
+              <Label>Muscle Stimulus</Label>
+              <p className="text-xs text-muted-foreground">1.00 = one full effective set; 0.50 = half an effective set.</p>
             </div>
+            {stimulus.map((row, index) => (
+              <div key={`${row.muscleGroupId}-${index}`} className="grid grid-cols-[minmax(0,1fr)_6rem_2rem] gap-2 items-center">
+                <Select
+                  value={row.muscleGroupId}
+                  onValueChange={(value) =>
+                    setStimulus((rows) => rows.map((item, i) => (i === index ? { ...item, muscleGroupId: value } : item)))
+                  }
+                >
+                  <SelectTrigger data-testid={`select-stimulus-muscle-${index}`}><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {muscleGroups
+                      .filter(
+                        (group) =>
+                          String(group.id) === row.muscleGroupId ||
+                          !stimulus.some((item) => item.muscleGroupId === String(group.id)),
+                      )
+                      .map((group) => (
+                        <SelectItem key={group.id} value={String(group.id)}>{group.displayName}</SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+                <Input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={row.stimulusRatio}
+                  onChange={(event) =>
+                    setStimulus((rows) => rows.map((item, i) => (i === index ? { ...item, stimulusRatio: event.target.value } : item)))
+                  }
+                  aria-label="Effective-set ratio"
+                />
+                <Button type="button" size="icon" variant="ghost" className="h-8 w-8" onClick={() => setStimulus((rows) => rows.filter((_, i) => i !== index))}>
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            ))}
+            <Button type="button" size="sm" variant="outline" onClick={addStimulus} disabled={stimulus.length >= muscleGroups.length}>
+              <Plus className="h-3.5 w-3.5 mr-1" /> Add muscle
+            </Button>
           </div>
           <div className="space-y-1.5">
             <Label>Equipment</Label>
@@ -401,7 +426,12 @@ function CreateExerciseDialog({
         </div>
         <DialogFooter>
           <Button
-            disabled={!name || !primaryId || createMutation.isPending}
+            disabled={
+              !name.trim() ||
+              !normalizedStimulus.some((row) => row.stimulusRatio > 0) ||
+              normalizedStimulus.some((row) => !Number.isFinite(row.stimulusRatio) || row.stimulusRatio < 0 || row.stimulusRatio > 1) ||
+              createMutation.isPending
+            }
             onClick={() => createMutation.mutate()}
             data-testid="button-submit-new-exercise"
           >
@@ -481,7 +511,7 @@ export default function LogWorkout() {
   const { data: exercises, isLoading: exercisesLoading } = useQuery<Exercise[]>({
     queryKey: ["/api/exercises"],
   });
-  const { data: muscleGroups } = useQuery<MuscleGroup[]>({
+  const { data: muscleGroups } = useQuery<MuscleGroupView[]>({
     queryKey: ["/api/muscle-groups"],
   });
   const { activeUserId } = useActiveUser();

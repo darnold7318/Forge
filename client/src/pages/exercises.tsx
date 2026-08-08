@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Dumbbell, Plus, Pencil, Trash2, Search } from "lucide-react";
+import { Dumbbell, Plus, Pencil, Trash2, Search, RotateCcw, X } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,15 +34,19 @@ import {
 } from "@/components/ui/alert-dialog";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { equipmentTypes, type Equipment, type MuscleGroup, type ExerciseWithParsedMuscles } from "@shared/schema";
+import { equipmentTypes, type Equipment, type MuscleGroup, type ExerciseView } from "@shared/schema";
 
-type Exercise = ExerciseWithParsedMuscles;
+type Exercise = ExerciseView;
 type MuscleGroupWithDisplay = MuscleGroup & { displayName: string };
+
+interface StimulusFormRow {
+  muscleGroupId: string;
+  stimulusRatio: string;
+}
 
 interface ExerciseFormState {
   name: string;
-  primaryMuscleGroupId: string;
-  secondaryMuscles: number[];
+  stimulus: StimulusFormRow[];
   equipment: Equipment;
   isCompound: boolean;
   isUnilateral: boolean;
@@ -50,8 +54,7 @@ interface ExerciseFormState {
 
 const emptyForm: ExerciseFormState = {
   name: "",
-  primaryMuscleGroupId: "",
-  secondaryMuscles: [],
+  stimulus: [],
   equipment: "Barbell",
   isCompound: false,
   isUnilateral: false,
@@ -60,8 +63,10 @@ const emptyForm: ExerciseFormState = {
 function toFormState(ex: Exercise): ExerciseFormState {
   return {
     name: ex.name,
-    primaryMuscleGroupId: String(ex.primaryMuscleGroupId),
-    secondaryMuscles: ex.secondaryMuscles,
+    stimulus: ex.stimulus.map((row) => ({
+      muscleGroupId: String(row.muscleGroupId),
+      stimulusRatio: row.stimulusRatio.toFixed(2),
+    })),
     equipment: ex.equipment as Equipment,
     isCompound: ex.isCompound,
     isUnilateral: ex.isUnilateral,
@@ -93,31 +98,52 @@ function ExerciseFormDialog({
     setForm(initial ? toFormState(initial) : emptyForm);
   }
 
-  const toggleSecondary = (id: number) => {
+  const addStimulusRow = () => {
+    const used = new Set(form.stimulus.map((row) => row.muscleGroupId));
+    const next = muscleGroups.find((group) => !used.has(String(group.id)));
+    if (!next) return;
     setForm((prev) => ({
       ...prev,
-      secondaryMuscles: prev.secondaryMuscles.includes(id)
-        ? prev.secondaryMuscles.filter((x) => x !== id)
-        : [...prev.secondaryMuscles, id],
+      stimulus: [
+        ...prev.stimulus,
+        { muscleGroupId: String(next.id), stimulusRatio: prev.stimulus.length === 0 ? "1.00" : "0.50" },
+      ],
     }));
   };
+
+  const normalizedStimulus = form.stimulus
+    .map((row) => ({ muscleGroupId: Number(row.muscleGroupId), stimulusRatio: Number(row.stimulusRatio) }))
+    .filter((row) => Number.isInteger(row.muscleGroupId) && Number.isFinite(row.stimulusRatio));
+  const mappingKey = (rows: { muscleGroupId: number; stimulusRatio: number }[]) =>
+    [...rows]
+      .filter((row) => row.stimulusRatio > 0)
+      .sort((a, b) => a.muscleGroupId - b.muscleGroupId)
+      .map((row) => `${row.muscleGroupId}:${row.stimulusRatio.toFixed(4)}`)
+      .join("|");
+  const stimulusChanged = initial ? mappingKey(normalizedStimulus) !== mappingKey(initial.stimulus) : true;
 
   const saveMutation = useMutation({
     mutationFn: async () => {
       const payload = {
         name: form.name.trim(),
-        primaryMuscleGroupId: Number(form.primaryMuscleGroupId),
-        secondaryMuscles: form.secondaryMuscles,
         equipment: form.equipment,
         movementPattern: initial?.movementPattern ?? null,
         isCompound: form.isCompound,
         isUnilateral: form.isUnilateral,
       };
-      const res =
-        mode === "create"
-          ? await apiRequest("POST", "/api/exercises", payload)
-          : await apiRequest("PATCH", `/api/exercises/${initial!.id}`, payload);
-      return res.json();
+      if (mode === "create") {
+        const res = await apiRequest("POST", "/api/exercises", { ...payload, stimulus: normalizedStimulus });
+        return res.json();
+      }
+      const metadataResponse = await apiRequest("PATCH", `/api/exercises/${initial!.id}`, payload);
+      let exercise = await metadataResponse.json();
+      if (stimulusChanged) {
+        const stimulusResponse = await apiRequest("PUT", `/api/exercises/${initial!.id}/stimulus`, {
+          stimulus: normalizedStimulus,
+        });
+        exercise = await stimulusResponse.json();
+      }
+      return exercise;
     },
     onSuccess: (ex: Exercise) => {
       queryClient.invalidateQueries({ queryKey: ["/api/exercises"] });
@@ -133,7 +159,27 @@ function ExerciseFormDialog({
     },
   });
 
-  const canSave = form.name.trim().length > 0 && form.primaryMuscleGroupId !== "" && !saveMutation.isPending;
+  const resetMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("DELETE", `/api/exercises/${initial!.id}/stimulus-override`);
+      return res.json();
+    },
+    onSuccess: (exercise: Exercise) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/exercises"] });
+      setForm(toFormState(exercise));
+      onSaved(exercise);
+      toast({ title: "Forge defaults restored" });
+    },
+    onError: () => toast({ title: "Couldn't reset stimulus", variant: "destructive" }),
+  });
+
+  const canSave =
+    form.name.trim().length > 0 &&
+    normalizedStimulus.length === form.stimulus.length &&
+    normalizedStimulus.some((row) => row.stimulusRatio > 0) &&
+    normalizedStimulus.every((row) => row.stimulusRatio >= 0 && row.stimulusRatio <= 1) &&
+    new Set(normalizedStimulus.map((row) => row.muscleGroupId)).size === normalizedStimulus.length &&
+    !saveMutation.isPending;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -152,40 +198,96 @@ function ExerciseFormDialog({
               data-testid="input-exercise-name"
             />
           </div>
-          <div className="space-y-1.5">
-            <Label>Primary muscle group</Label>
-            <Select
-              value={form.primaryMuscleGroupId}
-              onValueChange={(v) => setForm((p) => ({ ...p, primaryMuscleGroupId: v }))}
-            >
-              <SelectTrigger data-testid="select-exercise-primary-muscle">
-                <SelectValue placeholder="Select primary muscle" />
-              </SelectTrigger>
-              <SelectContent>
-                {muscleGroups.map((mg) => (
-                  <SelectItem key={mg.id} value={String(mg.id)}>
-                    {mg.displayName}
-                  </SelectItem>
+          <div className="space-y-2 rounded-md border p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <Label>Muscle Stimulus</Label>
+                <p className="text-xs text-muted-foreground">Effective-set ratio: 1.00 = one full effective set; 0.50 = half a set.</p>
+                <p className="text-xs text-muted-foreground">Custom ratios also recalculate your historical volume and recovery.</p>
+              </div>
+              {mode === "edit" && (
+                <Badge variant={initial?.hasStimulusOverride ? "default" : "outline"}>
+                  {initial?.hasStimulusOverride ? "Customized" : "Using Forge defaults"}
+                </Badge>
+              )}
+            </div>
+            <div className="space-y-2">
+              {form.stimulus
+                .map((row, index) => ({ row, index }))
+                .sort((a, b) => {
+                  const ratio = Number(b.row.stimulusRatio) - Number(a.row.stimulusRatio);
+                  if (ratio !== 0) return ratio;
+                  const aName = muscleGroups.find((group) => String(group.id) === a.row.muscleGroupId)?.displayName ?? "";
+                  const bName = muscleGroups.find((group) => String(group.id) === b.row.muscleGroupId)?.displayName ?? "";
+                  return aName.localeCompare(bName);
+                })
+                .map(({ row, index }) => (
+                  <div key={`${row.muscleGroupId}-${index}`} className="grid grid-cols-[minmax(0,1fr)_6rem_2rem] gap-2 items-center">
+                    <Select
+                      value={row.muscleGroupId}
+                      onValueChange={(value) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          stimulus: prev.stimulus.map((item, itemIndex) =>
+                            itemIndex === index ? { ...item, muscleGroupId: value } : item,
+                          ),
+                        }))
+                      }
+                    >
+                      <SelectTrigger data-testid={`select-stimulus-muscle-${index}`}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {muscleGroups
+                          .filter(
+                            (group) =>
+                              String(group.id) === row.muscleGroupId ||
+                              !form.stimulus.some((item) => item.muscleGroupId === String(group.id)),
+                          )
+                          .map((group) => (
+                            <SelectItem key={group.id} value={String(group.id)}>{group.displayName}</SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                    <Input
+                      type="number"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value={row.stimulusRatio}
+                      onChange={(event) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          stimulus: prev.stimulus.map((item, itemIndex) =>
+                            itemIndex === index ? { ...item, stimulusRatio: event.target.value } : item,
+                          ),
+                        }))
+                      }
+                      aria-label="Effective-set ratio"
+                      data-testid={`input-stimulus-ratio-${index}`}
+                    />
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="h-8 w-8 text-muted-foreground"
+                      onClick={() => setForm((prev) => ({ ...prev, stimulus: prev.stimulus.filter((_, i) => i !== index) }))}
+                      aria-label="Remove muscle stimulus"
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
                 ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label>Secondary muscles (optional)</Label>
-            <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto p-2 border rounded-md">
-              {muscleGroups
-                .filter((mg) => String(mg.id) !== form.primaryMuscleGroupId)
-                .map((mg) => (
-                  <Badge
-                    key={mg.id}
-                    variant={form.secondaryMuscles.includes(mg.id) ? "default" : "outline"}
-                    className="cursor-pointer select-none"
-                    onClick={() => toggleSecondary(mg.id)}
-                    data-testid={`badge-exercise-secondary-muscle-${mg.id}`}
-                  >
-                    {mg.displayName}
-                  </Badge>
-                ))}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" size="sm" variant="outline" onClick={addStimulusRow} disabled={form.stimulus.length >= muscleGroups.length}>
+                <Plus className="h-3.5 w-3.5 mr-1" /> Add muscle
+              </Button>
+              {mode === "edit" && initial?.hasStimulusOverride && (
+                <Button type="button" size="sm" variant="ghost" onClick={() => resetMutation.mutate()} disabled={resetMutation.isPending}>
+                  <RotateCcw className="h-3.5 w-3.5 mr-1" /> Reset to defaults
+                </Button>
+              )}
             </div>
           </div>
           <div className="space-y-1.5">
@@ -341,12 +443,6 @@ export default function Exercises() {
     queryKey: ["/api/muscle-groups"],
   });
 
-  const muscleGroupLookup = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const mg of muscleGroups ?? []) m.set(mg.id, mg.displayName);
-    return m;
-  }, [muscleGroups]);
-
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = exercises ?? [];
@@ -420,12 +516,10 @@ export default function Exercises() {
                   {ex.name}
                 </CardTitle>
                 <div className="flex flex-wrap items-center gap-1.5 mt-2">
-                  <Badge variant="secondary" className="text-xs">
-                    {muscleGroupLookup.get(ex.primaryMuscleGroupId) ?? "Unknown"}
-                  </Badge>
-                  {ex.secondaryMuscles.map((id) => (
-                    <Badge key={id} variant="outline" className="text-xs">
-                      {muscleGroupLookup.get(id) ?? "Unknown"}
+                  {ex.hasStimulusOverride && <Badge className="text-xs">Customized</Badge>}
+                  {ex.stimulus.map((row, index) => (
+                    <Badge key={row.muscleGroupId} variant={index === 0 ? "secondary" : "outline"} className="text-xs">
+                      {row.displayName} {row.stimulusRatio.toFixed(2)}
                     </Badge>
                   ))}
                   <Badge variant="outline" className="text-xs">{ex.equipment}</Badge>
@@ -463,7 +557,7 @@ export default function Exercises() {
         mode={formMode}
         initial={formMode === "edit" ? editingExercise : null}
         muscleGroups={muscleGroups ?? []}
-        onSaved={() => {}}
+        onSaved={setEditingExercise}
       />
 
       <DeleteExerciseDialog exercise={deletingExercise} onOpenChange={(open) => { if (!open) setDeletingExercise(null); }} />

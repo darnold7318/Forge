@@ -38,22 +38,24 @@ const STATUS_BORDER: Record<string, string> = {
   excessive: "border-volume-excessive text-volume-excessive",
 };
 
+const formatSets = (value: number) => value.toFixed(1);
+
 function DeltaIndicator({ delta }: { delta: number }) {
   if (delta > 0)
     return (
       <span className="flex items-center gap-0.5 text-volume-optimal text-xs font-medium">
-        <ArrowUp className="h-3 w-3" /> +{delta}
+        <ArrowUp className="h-3 w-3" /> +{formatSets(delta)}
       </span>
     );
   if (delta < 0)
     return (
       <span className="flex items-center gap-0.5 text-volume-excessive text-xs font-medium">
-        <ArrowDown className="h-3 w-3" /> {delta}
+        <ArrowDown className="h-3 w-3" /> {formatSets(delta)}
       </span>
     );
   return (
     <span className="flex items-center gap-0.5 text-muted-foreground text-xs font-medium">
-      <Minus className="h-3 w-3" /> 0
+      <Minus className="h-3 w-3" /> 0.0
     </span>
   );
 }
@@ -76,13 +78,13 @@ function MuscleGroupCard({ entry }: { entry: VolumeTrackerEntry }) {
         <div className="flex items-center justify-between">
           <div>
             <p className="text-2xl font-display font-bold tabular-nums" data-testid={`text-current-sets-${entry.muscleGroupId}`}>
-              {entry.currentWeekSets}
+              {formatSets(entry.currentWeekSets)}
             </p>
-            <p className="text-xs text-muted-foreground">sets this week</p>
+            <p className="text-xs text-muted-foreground">effective sets this week</p>
           </div>
           <div className="text-right space-y-1">
             <DeltaIndicator delta={entry.delta} />
-            <p className="text-xs text-muted-foreground">vs {entry.lastWeekSets} last week</p>
+            <p className="text-xs text-muted-foreground">vs {formatSets(entry.lastWeekSets)} last week</p>
           </div>
         </div>
 
@@ -142,7 +144,8 @@ export default function VolumeTracker() {
           Volume Tracker
         </h1>
         <p className="text-sm text-muted-foreground">
-          Weekly sets across 19 muscle groups vs MEV / MAV / MRV landmarks, with 6-week trend
+          Weekly effective sets across 20 muscle groups vs MEV / MAV / MRV landmarks, with 6-week trend.
+          Partial exercise stimulus is counted proportionally.
         </p>
       </div>
 

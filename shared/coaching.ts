@@ -41,6 +41,7 @@ export interface HistoryExerciseInput {
   exerciseOrder: number;
   exerciseName: string;
   primaryMuscleGroupId: number;
+  stimulus?: { muscleGroupId: number; stimulusRatio: number }[];
   intensityTechnique: string; // default "Normal"
   failureTarget: string; // default "Never"
   sets: HistorySetInput[];
@@ -318,25 +319,26 @@ export interface MuscleRecoveryState {
 }
 
 const HALF_LIFE_HOURS: Record<MuscleGroupName, number> = {
-  LowerBack: 72,
+  UpperChest: 48,
+  MidLowerChest: 48,
+  Lats: 48,
+  UpperMidBack: 48,
+  Traps: 40,
+  SpinalErectors: 72,
+  FrontDelts: 40,
+  SideDelts: 40,
+  RearDelts: 40,
+  Biceps: 40,
+  Triceps: 40,
+  Forearms: 30,
   Quads: 60,
   Hamstrings: 60,
   Glutes: 60,
-  Chest: 48,
-  Back: 48,
-  Lats: 48,
-  Calves: 30,
-  Forearms: 30,
-  Abs: 30,
-  Traps: 40,
-  RearDelts: 40,
-  SideDelts: 40,
-  FrontDelts: 40,
-  Biceps: 40,
-  Triceps: 40,
-  Obliques: 40,
   Adductors: 40,
   Abductors: 40,
+  Calves: 30,
+  Abs: 30,
+  Obliques: 40,
 };
 
 function resolveDecay(muscle: MuscleGroupName, hoursAgo: number): number {
@@ -344,20 +346,8 @@ function resolveDecay(muscle: MuscleGroupName, hoursAgo: number): number {
   return Math.pow(0.5, hoursAgo / halfLife);
 }
 
-const RELATED_MUSCLES: Partial<Record<MuscleGroupName, MuscleGroupName[]>> = {
-  Chest: ["FrontDelts", "Triceps"],
-  Lats: ["Back", "Biceps", "RearDelts"],
-  Back: ["Lats", "Traps", "RearDelts"],
-  Quads: ["Glutes", "Adductors"],
-  Hamstrings: ["Glutes", "LowerBack"],
-  Glutes: ["Hamstrings", "Quads"],
-  SideDelts: ["FrontDelts", "RearDelts", "Traps"],
-  Biceps: ["Forearms", "Lats"],
-  Triceps: ["Chest", "FrontDelts"],
-};
-
 function estimateFatigue(ex: HistoryExerciseInput): number {
-  const completed = completedSetsOf(ex.sets);
+  const completed = completedSetsOf(ex.sets).filter((set) => set.setType !== "Warmup");
   const setLoad = completed.length * 8;
   const rirVals = completed.filter((s) => s.rir != null).map((s) => s.rir as number);
   const averageRir = rirVals.length > 0 ? rirVals.reduce((a, b) => a + b, 0) / rirVals.length : 2;
@@ -389,25 +379,21 @@ export function evaluateRecovery(
   for (const session of recentSessions) {
     const hoursAgo = Math.max(0, (now.getTime() - session.startedAt.getTime()) / (1000 * 60 * 60));
     for (const ex of session.exercises) {
-      const completed = completedSetsOf(ex.sets);
+      const completed = completedSetsOf(ex.sets).filter((set) => set.setType !== "Warmup");
       if (completed.length === 0) continue;
-      const primary = lookup.idToName.get(ex.primaryMuscleGroupId);
-      if (!primary) continue;
 
       const baseFatigue = estimateFatigue(ex);
-      const decayed = baseFatigue * resolveDecay(primary, hoursAgo);
-
-      fatigueSum.set(primary, (fatigueSum.get(primary) ?? 0) + decayed);
-      if (!lastTrained.has(primary) || session.startedAt > lastTrained.get(primary)!) {
-        lastTrained.set(primary, session.startedAt);
-      }
-
-      const related = RELATED_MUSCLES[primary] ?? [];
-      for (const rel of related) {
-        const relDecayed = baseFatigue * 0.45 * resolveDecay(rel, hoursAgo);
-        fatigueSum.set(rel, (fatigueSum.get(rel) ?? 0) + relDecayed);
-        if (!lastTrained.has(rel) || session.startedAt > lastTrained.get(rel)!) {
-          lastTrained.set(rel, session.startedAt);
+      const stimulus = ex.stimulus?.length
+        ? ex.stimulus
+        : [{ muscleGroupId: ex.primaryMuscleGroupId, stimulusRatio: 1 }];
+      for (const row of stimulus) {
+        if (row.stimulusRatio <= 0) continue;
+        const muscle = lookup.idToName.get(row.muscleGroupId);
+        if (!muscle) continue;
+        const decayed = baseFatigue * row.stimulusRatio * resolveDecay(muscle, hoursAgo);
+        fatigueSum.set(muscle, (fatigueSum.get(muscle) ?? 0) + decayed);
+        if (!lastTrained.has(muscle) || session.startedAt > lastTrained.get(muscle)!) {
+          lastTrained.set(muscle, session.startedAt);
         }
       }
     }
@@ -1324,8 +1310,8 @@ export const VOLUME_STATUS_LABEL: Record<VolumeStatus, string> = {
 };
 
 export interface SetMuscleTag {
-  primaryMuscleGroupId: number;
-  secondaryMuscleGroupIds: number[];
+  exerciseId: number;
+  stimulus: { muscleGroupId: number; stimulusRatio: number }[];
   isWarmup: boolean;
 }
 
@@ -1333,9 +1319,9 @@ export function computeWeeklyVolumeByMuscleGroup(taggedSets: SetMuscleTag[]): Ma
   const volume = new Map<number, number>();
   for (const s of taggedSets) {
     if (s.isWarmup) continue;
-    volume.set(s.primaryMuscleGroupId, (volume.get(s.primaryMuscleGroupId) ?? 0) + 1);
-    for (const secId of s.secondaryMuscleGroupIds) {
-      volume.set(secId, (volume.get(secId) ?? 0) + 0.5);
+    for (const row of s.stimulus) {
+      if (row.stimulusRatio <= 0) continue;
+      volume.set(row.muscleGroupId, (volume.get(row.muscleGroupId) ?? 0) + row.stimulusRatio);
     }
   }
   return volume;
@@ -1371,16 +1357,16 @@ const DEFAULT_TRAINING_DAYS: Record<Exclude<WorkoutSplitId, "custom">, number[]>
 // Archetype -> primary muscle groups to draw exercises from when a starter
 // template must be generated (order matters: first = primary compound focus).
 const ARCHETYPE_MUSCLE_FOCUS: Record<string, MuscleGroupName[]> = {
-  Push: ["Chest", "FrontDelts", "SideDelts", "Triceps"],
-  Pull: ["Lats", "Back", "Biceps", "RearDelts"],
+  Push: ["MidLowerChest", "UpperChest", "FrontDelts", "SideDelts", "Triceps"],
+  Pull: ["Lats", "UpperMidBack", "Biceps", "RearDelts"],
   Legs: ["Quads", "Hamstrings", "Glutes", "Calves"],
-  Upper: ["Chest", "Lats", "Back", "FrontDelts", "SideDelts", "Biceps", "Triceps"],
+  Upper: ["MidLowerChest", "UpperChest", "Lats", "UpperMidBack", "FrontDelts", "SideDelts", "Biceps", "Triceps"],
   Lower: ["Quads", "Hamstrings", "Glutes", "Calves"],
-  "Full Body A": ["Quads", "Chest", "Lats", "SideDelts"],
-  "Full Body B": ["Hamstrings", "Back", "FrontDelts", "Biceps"],
-  "Full Body C": ["Glutes", "Chest", "Lats", "Triceps"],
-  Chest: ["Chest", "FrontDelts", "Triceps"],
-  Back: ["Back", "Lats", "Traps", "Biceps"],
+  "Full Body A": ["Quads", "MidLowerChest", "Lats", "SideDelts"],
+  "Full Body B": ["Hamstrings", "UpperMidBack", "FrontDelts", "Biceps"],
+  "Full Body C": ["Glutes", "UpperChest", "Lats", "Triceps"],
+  Chest: ["MidLowerChest", "UpperChest", "FrontDelts", "Triceps"],
+  Back: ["UpperMidBack", "Lats", "Traps", "Biceps"],
   Shoulders: ["SideDelts", "FrontDelts", "RearDelts", "Traps"],
   Arms: ["Biceps", "Triceps", "Forearms"],
 };

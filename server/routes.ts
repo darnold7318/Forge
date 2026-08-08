@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import { z } from "zod";
-import { storage, parseExercise, db } from "./storage";
+import { storage, db } from "./storage";
 import type { SetWithExercise } from "./storage";
 import { hashPassword, verifyPassword, toPublicUser, requireAuth, requireAdmin, login as loginUser, issueTokenFor, logout as logoutToken } from "./auth";
 import {
@@ -16,6 +16,8 @@ import {
   workoutSchedules as workoutSchedulesTable,
   scheduleDays as scheduleDaysTable,
   bodyweightLogs as bodyweightLogsTable,
+  exerciseMuscleStimulus as exerciseMuscleStimulusTable,
+  userExerciseMuscleStimulusOverrides as userExerciseMuscleStimulusOverridesTable,
 } from "@shared/schema";
 import {
   CLIENT_TZ_HEADER,
@@ -27,7 +29,9 @@ import {
 } from "@shared/timezone";
 import { inArray, eq } from "drizzle-orm";
 import {
-  insertExerciseSchema,
+  createExerciseWithStimulusSchema,
+  exerciseMetadataSchema,
+  updateExerciseStimulusSchema,
   insertWorkoutSchema,
   insertSetSchema,
   insertBodyweightLogSchema,
@@ -45,8 +49,8 @@ import {
   setCoreAddonSchema,
   muscleGroupNames,
   muscleGroupDisplayNames,
+  primaryStimulusMuscle,
   type MuscleGroupName,
-  type Exercise,
   type Workout,
   type User,
   type InsertUser,
@@ -162,6 +166,26 @@ async function buildMuscleGroupLookup(): Promise<{
   return { lookup: { idToName }, idByName, nameById: idToName };
 }
 
+async function buildExerciseViews(userId: number) {
+  const exercises = await storage.getExercisesWithStimulus(userId);
+  const groups = await storage.getMuscleGroups();
+  const groupById = new Map(groups.map((group) => [group.id, group]));
+  return exercises.map((exercise) => ({
+    ...exercise,
+    stimulus: exercise.stimulus
+      .map((row) => {
+        const group = groupById.get(row.muscleGroupId);
+        const muscleGroupName = group?.name as MuscleGroupName;
+        return {
+          ...row,
+          muscleGroupName,
+          displayName: muscleGroupDisplayNames[muscleGroupName] ?? group?.name ?? "Unknown",
+        };
+      })
+      .sort((a, b) => b.stimulusRatio - a.stimulusRatio || a.displayName.localeCompare(b.displayName)),
+  }));
+}
+
 function toHistorySet(s: SetWithExercise): HistorySetInput {
   return {
     setNumber: s.setNumber,
@@ -177,6 +201,7 @@ function toHistorySet(s: SetWithExercise): HistorySetInput {
 async function buildHistory(userId: number, zone: string = "UTC"): Promise<HistorySessionInput[]> {
   const workoutsList = await storage.getWorkouts(userId); // already ordered desc by date, id
   const allSets = await storage.getAllSets(userId);
+  const stimulusMap = await storage.getEffectiveStimulusMapForUser(userId);
 
   const setsByWorkout = new Map<number, SetWithExercise[]>();
   for (const s of allSets) {
@@ -195,11 +220,13 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
     const exercisesForSession: HistoryExerciseInput[] = Array.from(byExercise.entries()).map(
       ([exerciseId, exSets], idx) => {
         const exercise = exSets[0].exercise;
+        const stimulus = stimulusMap.get(exerciseId) ?? [];
         return {
           exerciseId,
           exerciseOrder: idx,
           exerciseName: exercise.name,
-          primaryMuscleGroupId: exercise.primaryMuscleGroupId,
+          primaryMuscleGroupId: primaryStimulusMuscle(stimulus)?.muscleGroupId ?? exercise.primaryMuscleGroupId,
+          stimulus,
           intensityTechnique: "Normal",
           failureTarget: "Never",
           sets: exSets.sort((a, b) => a.setNumber - b.setNumber).map(toHistorySet),
@@ -416,29 +443,68 @@ export async function registerRoutes(
   });
 
   // ---------------- Exercises (shared/global) ----------------
-  app.get("/api/exercises", async (_req, res) => {
-    const list = await storage.getExercises();
-    res.json(list.map(parseExercise));
+  app.get("/api/exercises", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    res.json(await buildExerciseViews(userId));
   });
 
   app.post("/api/exercises", async (req, res) => {
-    const parsed = insertExerciseSchema.safeParse(req.body);
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = createExerciseWithStimulusSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
-    const created = await storage.createExercise(parsed.data);
-    res.status(201).json(parseExercise(created));
+    const { stimulus, ...metadata } = parsed.data;
+    const created = await storage.createExercise(metadata, stimulus);
+    res.status(201).json((await buildExerciseViews(userId)).find((exercise) => exercise.id === created.id));
   });
 
   app.patch("/api/exercises/:id", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const id = Number(req.params.id);
-    const parsed = insertExerciseSchema.safeParse(req.body);
+    const parsed = exerciseMetadataSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
     const updated = await storage.updateExercise(id, parsed.data);
     if (!updated) return res.status(404).json({ message: "Exercise not found" });
-    res.json(parseExercise(updated));
+    res.json((await buildExerciseViews(userId)).find((exercise) => exercise.id === updated.id));
+  });
+
+  app.get("/api/exercises/:id", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const id = Number(req.params.id);
+    const exercise = (await buildExerciseViews(userId)).find((row) => row.id === id);
+    if (!exercise) return res.status(404).json({ message: "Exercise not found" });
+    res.json(exercise);
+  });
+
+  app.put("/api/exercises/:id/stimulus", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const id = Number(req.params.id);
+    const parsed = updateExerciseStimulusSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+    try {
+      await storage.replaceExerciseStimulusOverride(userId, id, parsed.data.stimulus);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Invalid stimulus mapping";
+      return res.status(message === "Exercise not found" ? 404 : 400).json({ message });
+    }
+    res.json((await buildExerciseViews(userId)).find((exercise) => exercise.id === id));
+  });
+
+  app.delete("/api/exercises/:id/stimulus-override", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const id = Number(req.params.id);
+    if (!(await storage.getExercise(id))) return res.status(404).json({ message: "Exercise not found" });
+    await storage.deleteExerciseStimulusOverride(userId, id);
+    res.json((await buildExerciseViews(userId)).find((exercise) => exercise.id === id));
   });
 
   app.get("/api/exercises/:id/usage", async (req, res) => {
@@ -556,10 +622,12 @@ export async function registerRoutes(
 
   // Workout composition analysis for a template (or ad-hoc exercise list)
   app.get("/api/workout-templates/:id/analysis", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
     const id = Number(req.params.id);
     const template = await storage.getWorkoutTemplateWithExercises(id);
     if (!template) return res.status(404).json({ message: "Template not found" });
-    const exercisesList = await storage.getExercises();
+    const exercisesList = await storage.getExercisesWithStimulus(userId);
     const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
     const { nameById } = await buildMuscleGroupLookup();
 
@@ -823,7 +891,7 @@ export async function registerRoutes(
     res.status(201).json(created);
   });
 
-  // ---------------- Dashboard: weekly volume per muscle group (19 groups) ----------------
+  // ---------------- Dashboard: weekly effective volume per muscle group (20 groups) ----------------
   app.get("/api/dashboard/volume", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
@@ -831,6 +899,7 @@ export async function registerRoutes(
     const workoutsList = await storage.getWorkouts(userId);
     const workoutMap = new Map(workoutsList.map((w) => [w.id, w]));
     const allSets = await storage.getAllSets(userId);
+    const stimulusMap = await storage.getEffectiveStimulusMapForUser(userId);
 
     const now = new Date();
     const zone = zoneOf(req);
@@ -845,8 +914,8 @@ export async function registerRoutes(
     });
 
     const tagged = inWindow.map((s) => ({
-      primaryMuscleGroupId: s.exercise.primaryMuscleGroupId,
-      secondaryMuscleGroupIds: JSON.parse(s.exercise.secondaryMuscles ?? "[]") as number[],
+      exerciseId: s.exerciseId,
+      stimulus: stimulusMap.get(s.exerciseId) ?? [],
       isWarmup: s.isWarmup,
     }));
 
@@ -869,7 +938,7 @@ export async function registerRoutes(
     res.json(result);
   });
 
-  // ---------------- Volume tracker: current vs last week + trend (19 groups) ----------------
+  // ---------------- Volume tracker: current vs last week + trend (20 groups) ----------------
   app.get("/api/volume-tracker", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
@@ -877,6 +946,7 @@ export async function registerRoutes(
     const workoutsList = await storage.getWorkouts(userId);
     const workoutMap = new Map(workoutsList.map((w) => [w.id, w]));
     const allSets = await storage.getAllSets(userId);
+    const stimulusMap = await storage.getEffectiveStimulusMapForUser(userId);
 
     const now = new Date();
     const zone = zoneOf(req);
@@ -890,8 +960,8 @@ export async function registerRoutes(
         return d >= start && d < end;
       });
       const tagged = inWindow.map((s) => ({
-        primaryMuscleGroupId: s.exercise.primaryMuscleGroupId,
-        secondaryMuscleGroupIds: JSON.parse(s.exercise.secondaryMuscles ?? "[]") as number[],
+        exerciseId: s.exerciseId,
+        stimulus: stimulusMap.get(s.exerciseId) ?? [],
         isWarmup: s.isWarmup,
       }));
       return computeWeeklyVolumeByMuscleGroup(tagged);
@@ -959,7 +1029,7 @@ export async function registerRoutes(
   app.get("/api/coach/suggestions", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
-    const exercisesList = await storage.getExercises();
+    const exercisesList = await storage.getExercisesWithStimulus(userId);
     const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
     const history = await buildHistory(userId, zoneOf(req));
     const { lookup, nameById } = await buildMuscleGroupLookup();
@@ -975,7 +1045,7 @@ export async function registerRoutes(
       if (template) {
         targetExercises = template.exercises
           .map((te) => exerciseMap.get(te.exerciseId))
-          .filter((e): e is Exercise => !!e);
+          .filter((e): e is (typeof exercisesList)[number] => !!e);
         for (const te of template.exercises) {
           prescriptionByExercise.set(te.exerciseId, {
             targetRepsMin: te.targetRepsMin,
@@ -1089,7 +1159,7 @@ export async function registerRoutes(
     const userId = getUserId(req, res);
     if (userId == null) return;
     const templates = await storage.getAllWorkoutTemplatesWithExercises(userId);
-    const exercisesList = await storage.getExercises();
+    const exercisesList = await storage.getExercisesWithStimulus(userId);
     const exerciseNameLookup = new Map(exercisesList.map((e) => [e.id, e.name]));
     const { lookup, nameById } = await buildMuscleGroupLookup();
     const exercisePrimaryMuscleLookup = new Map<number, MuscleGroupName>();
@@ -1200,6 +1270,9 @@ export async function registerRoutes(
       db.delete(workoutSchedulesTable).where(eq(workoutSchedulesTable.id, schedule.id)).run();
     }
     db.delete(bodyweightLogsTable).where(eq(bodyweightLogsTable.userId, userId)).run();
+    db.delete(userExerciseMuscleStimulusOverridesTable)
+      .where(eq(userExerciseMuscleStimulusOverridesTable.userId, userId))
+      .run();
     db.delete(usersTable).where(eq(usersTable.id, userId)).run();
 
     // Drop the now-orphaned session so the bearer token can't outlive the account.
@@ -1229,6 +1302,11 @@ export async function registerRoutes(
       ? db.select().from(scheduleDaysTable).where(eq(scheduleDaysTable.scheduleId, schedule.id)).all()
       : [];
     const bodyweightRows = db.select().from(bodyweightLogsTable).where(eq(bodyweightLogsTable.userId, userId)).all();
+    const exerciseStimulusOverrides = db
+      .select()
+      .from(userExerciseMuscleStimulusOverridesTable)
+      .where(eq(userExerciseMuscleStimulusOverridesTable.userId, userId))
+      .all();
 
     return {
       user,
@@ -1239,6 +1317,7 @@ export async function registerRoutes(
       workoutSchedule: schedule ?? null,
       scheduleDays: days,
       bodyweightLogs: bodyweightRows,
+      exerciseStimulusOverrides,
     };
   }
 
@@ -1259,7 +1338,7 @@ export async function registerRoutes(
     const payload = {
       exportType: "forge-profile-backup" as const,
       exportedAt: new Date().toISOString(),
-      version: 1,
+      version: 2,
       data: buildUserExport(user),
     };
 
@@ -1273,16 +1352,18 @@ export async function registerRoutes(
     const allUsers = db.select().from(usersTable).orderBy(usersTable.id).all();
     const allMuscleGroups = db.select().from(muscleGroupsTable).all();
     const allExercises = db.select().from(exercisesTable).all();
+    const allExerciseStimulus = db.select().from(exerciseMuscleStimulusTable).all();
 
     const profiles = allUsers.map((user) => buildUserExport(user));
 
     const payload = {
       exportType: "forge-full-backup" as const,
       exportedAt: new Date().toISOString(),
-      version: 1,
+      version: 2,
       data: {
         muscleGroups: allMuscleGroups,
         exercises: allExercises,
+        exerciseMuscleStimulus: allExerciseStimulus,
         profiles,
       },
     };

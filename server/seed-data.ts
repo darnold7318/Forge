@@ -1,41 +1,40 @@
 import type { MuscleGroupName, Equipment, ExerciseRole, FailureTarget } from "@shared/schema";
 
 // ---------------------------------------------------------------------------
-// Muscle groups — 19 groups, MEV/MAV/MRV landmarks (sets/week) derived
-// proportionally from the old 10-group values. Shoulders (8/16/24) split
-// across FrontDelts/SideDelts/RearDelts with SideDelts weighted highest
-// since it responds well to higher frequency/volume.
+// Muscle groups — starter MEV/MAV/MRV landmarks for the 20-group hypertrophy
+// taxonomy. These application defaults are editable in code and are not
+// individualized physiological constants.
 // ---------------------------------------------------------------------------
 export const MUSCLE_GROUPS: { name: MuscleGroupName; mev: number; mav: number; mrv: number }[] = [
-  { name: "Chest", mev: 8, mav: 16, mrv: 22 },
-  { name: "Back", mev: 8, mav: 16, mrv: 24 },
-  { name: "Lats", mev: 8, mav: 16, mrv: 24 },
-  { name: "Traps", mev: 4, mav: 12, mrv: 20 },
-  { name: "RearDelts", mev: 6, mav: 14, mrv: 22 },
-  { name: "SideDelts", mev: 8, mav: 18, mrv: 26 },
-  { name: "FrontDelts", mev: 2, mav: 8, mrv: 14 },
+  // Starter application defaults, not individualized physiological constants.
+  { name: "UpperChest", mev: 4, mav: 9, mrv: 14 },
+  { name: "MidLowerChest", mev: 6, mav: 12, mrv: 18 },
+  { name: "Lats", mev: 6, mav: 14, mrv: 22 },
+  { name: "UpperMidBack", mev: 6, mav: 14, mrv: 22 },
+  { name: "Traps", mev: 4, mav: 10, mrv: 18 },
+  { name: "SpinalErectors", mev: 3, mav: 7, mrv: 12 },
+  { name: "FrontDelts", mev: 2, mav: 7, mrv: 12 },
+  { name: "SideDelts", mev: 6, mav: 16, mrv: 24 },
+  { name: "RearDelts", mev: 5, mav: 13, mrv: 20 },
   { name: "Biceps", mev: 6, mav: 14, mrv: 22 },
   { name: "Triceps", mev: 6, mav: 14, mrv: 22 },
   { name: "Forearms", mev: 4, mav: 10, mrv: 16 },
-  { name: "Abs", mev: 6, mav: 16, mrv: 25 },
-  { name: "Obliques", mev: 4, mav: 12, mrv: 20 },
   { name: "Quads", mev: 8, mav: 16, mrv: 22 },
   { name: "Hamstrings", mev: 6, mav: 14, mrv: 20 },
   { name: "Glutes", mev: 4, mav: 12, mrv: 20 },
+  { name: "Adductors", mev: 3, mav: 8, mrv: 14 },
+  { name: "Abductors", mev: 3, mav: 8, mrv: 14 },
   { name: "Calves", mev: 8, mav: 16, mrv: 25 },
-  { name: "Adductors", mev: 4, mav: 10, mrv: 16 },
-  { name: "Abductors", mev: 4, mav: 10, mrv: 16 },
-  { name: "LowerBack", mev: 4, mav: 9, mrv: 14 },
+  { name: "Abs", mev: 6, mav: 16, mrv: 25 },
+  { name: "Obliques", mev: 4, mav: 10, mrv: 18 },
 ];
 
 // ---------------------------------------------------------------------------
-// Exercises — ~33 exercises remapped with structured primary/secondary
-// muscles, equipment, movement pattern, compound/unilateral flags.
+// Exercises — built-in catalog with curated effective-set stimulus defaults.
 // ---------------------------------------------------------------------------
 export interface SeedExercise {
   name: string;
-  primaryMuscleGroup: MuscleGroupName;
-  secondaryMuscleGroups: MuscleGroupName[];
+  stimulus: Partial<Record<MuscleGroupName, number>>;
   equipment: Equipment;
   movementPattern: string;
   isCompound: boolean;
@@ -44,50 +43,50 @@ export interface SeedExercise {
 
 export const EXERCISES: SeedExercise[] = [
   // Chest
-  { name: "Barbell Bench Press", primaryMuscleGroup: "Chest", secondaryMuscleGroups: ["FrontDelts", "Triceps"], equipment: "Barbell", movementPattern: "Horizontal Push", isCompound: true, isUnilateral: false },
-  { name: "Incline Dumbbell Press", primaryMuscleGroup: "Chest", secondaryMuscleGroups: ["FrontDelts", "Triceps"], equipment: "Dumbbell", movementPattern: "Horizontal Push", isCompound: true, isUnilateral: false },
-  { name: "Cable Fly", primaryMuscleGroup: "Chest", secondaryMuscleGroups: ["FrontDelts"], equipment: "Cable", movementPattern: "Horizontal Push", isCompound: false, isUnilateral: false },
-  { name: "Dip (Chest-Focused)", primaryMuscleGroup: "Chest", secondaryMuscleGroups: ["Triceps", "FrontDelts"], equipment: "Bodyweight", movementPattern: "Horizontal Push", isCompound: true, isUnilateral: false },
+  { name: "Barbell Bench Press", stimulus: { MidLowerChest: 1, UpperChest: 0.35, FrontDelts: 0.4, Triceps: 0.35 }, equipment: "Barbell", movementPattern: "Horizontal Push", isCompound: true, isUnilateral: false },
+  { name: "Incline Dumbbell Press", stimulus: { UpperChest: 1, MidLowerChest: 0.5, FrontDelts: 0.4, Triceps: 0.35 }, equipment: "Dumbbell", movementPattern: "Horizontal Push", isCompound: true, isUnilateral: false },
+  { name: "Cable Fly", stimulus: { MidLowerChest: 1, UpperChest: 0.3, FrontDelts: 0.15 }, equipment: "Cable", movementPattern: "Horizontal Push", isCompound: false, isUnilateral: false },
+  { name: "Dip (Chest-Focused)", stimulus: { MidLowerChest: 1, Triceps: 0.45, FrontDelts: 0.25 }, equipment: "Bodyweight", movementPattern: "Horizontal Push", isCompound: true, isUnilateral: false },
   // Back / Lats
-  { name: "Lat Pulldown", primaryMuscleGroup: "Lats", secondaryMuscleGroups: ["Back", "Biceps"], equipment: "Cable", movementPattern: "Vertical Pull", isCompound: true, isUnilateral: false },
-  { name: "Pull-Up", primaryMuscleGroup: "Lats", secondaryMuscleGroups: ["Back", "Biceps"], equipment: "Bodyweight", movementPattern: "Vertical Pull", isCompound: true, isUnilateral: false },
-  { name: "Barbell Row", primaryMuscleGroup: "Back", secondaryMuscleGroups: ["Lats", "RearDelts", "Biceps"], equipment: "Barbell", movementPattern: "Horizontal Pull", isCompound: true, isUnilateral: false },
-  { name: "Seated Cable Row", primaryMuscleGroup: "Back", secondaryMuscleGroups: ["Lats", "RearDelts", "Biceps"], equipment: "Cable", movementPattern: "Horizontal Pull", isCompound: true, isUnilateral: false },
-  { name: "Deadlift", primaryMuscleGroup: "Back", secondaryMuscleGroups: ["Hamstrings", "Glutes", "Traps", "LowerBack"], equipment: "Barbell", movementPattern: "Hinge", isCompound: true, isUnilateral: false },
-  { name: "Straight-Arm Pulldown", primaryMuscleGroup: "Lats", secondaryMuscleGroups: ["Triceps"], equipment: "Cable", movementPattern: "Vertical Pull", isCompound: false, isUnilateral: false },
+  { name: "Lat Pulldown", stimulus: { Lats: 1, UpperMidBack: 0.3, Biceps: 0.4, Forearms: 0.15 }, equipment: "Cable", movementPattern: "Vertical Pull", isCompound: true, isUnilateral: false },
+  { name: "Pull-Up", stimulus: { Lats: 1, UpperMidBack: 0.35, Biceps: 0.4, Forearms: 0.2 }, equipment: "Bodyweight", movementPattern: "Vertical Pull", isCompound: true, isUnilateral: false },
+  { name: "Barbell Row", stimulus: { UpperMidBack: 1, Lats: 0.65, RearDelts: 0.35, Biceps: 0.4, Forearms: 0.2, SpinalErectors: 0.35 }, equipment: "Barbell", movementPattern: "Horizontal Pull", isCompound: true, isUnilateral: false },
+  { name: "Seated Cable Row", stimulus: { UpperMidBack: 1, Lats: 0.7, RearDelts: 0.3, Biceps: 0.4, Forearms: 0.15 }, equipment: "Cable", movementPattern: "Horizontal Pull", isCompound: true, isUnilateral: false },
+  { name: "Deadlift", stimulus: { SpinalErectors: 1, Glutes: 0.7, Hamstrings: 0.55, Traps: 0.5, UpperMidBack: 0.25, Forearms: 0.3, Quads: 0.2 }, equipment: "Barbell", movementPattern: "Hinge", isCompound: true, isUnilateral: false },
+  { name: "Straight-Arm Pulldown", stimulus: { Lats: 1, Triceps: 0.1 }, equipment: "Cable", movementPattern: "Vertical Pull", isCompound: false, isUnilateral: false },
   // Traps
-  { name: "Barbell Shrug", primaryMuscleGroup: "Traps", secondaryMuscleGroups: ["Forearms"], equipment: "Barbell", movementPattern: "Shrug", isCompound: false, isUnilateral: false },
+  { name: "Barbell Shrug", stimulus: { Traps: 1, Forearms: 0.2 }, equipment: "Barbell", movementPattern: "Shrug", isCompound: false, isUnilateral: false },
   // Delts
-  { name: "Overhead Press", primaryMuscleGroup: "FrontDelts", secondaryMuscleGroups: ["SideDelts", "Triceps"], equipment: "Barbell", movementPattern: "Vertical Push", isCompound: true, isUnilateral: false },
-  { name: "Dumbbell Lateral Raise", primaryMuscleGroup: "SideDelts", secondaryMuscleGroups: [], equipment: "Dumbbell", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
-  { name: "Cable Lateral Raise", primaryMuscleGroup: "SideDelts", secondaryMuscleGroups: [], equipment: "Cable", movementPattern: "Isolation", isCompound: false, isUnilateral: true },
-  { name: "Rear Delt Fly", primaryMuscleGroup: "RearDelts", secondaryMuscleGroups: ["Traps"], equipment: "Dumbbell", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
-  { name: "Face Pull", primaryMuscleGroup: "RearDelts", secondaryMuscleGroups: ["Traps", "SideDelts"], equipment: "Cable", movementPattern: "Horizontal Pull", isCompound: false, isUnilateral: false },
+  { name: "Overhead Press", stimulus: { FrontDelts: 1, SideDelts: 0.45, Triceps: 0.45, UpperChest: 0.15 }, equipment: "Barbell", movementPattern: "Vertical Push", isCompound: true, isUnilateral: false },
+  { name: "Dumbbell Lateral Raise", stimulus: { SideDelts: 1, Traps: 0.1 }, equipment: "Dumbbell", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
+  { name: "Cable Lateral Raise", stimulus: { SideDelts: 1, Traps: 0.1 }, equipment: "Cable", movementPattern: "Isolation", isCompound: false, isUnilateral: true },
+  { name: "Rear Delt Fly", stimulus: { RearDelts: 1, UpperMidBack: 0.3, Traps: 0.2 }, equipment: "Dumbbell", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
+  { name: "Face Pull", stimulus: { RearDelts: 1, UpperMidBack: 0.45, Traps: 0.35, SideDelts: 0.15 }, equipment: "Cable", movementPattern: "Horizontal Pull", isCompound: false, isUnilateral: false },
   // Arms
-  { name: "Barbell Curl", primaryMuscleGroup: "Biceps", secondaryMuscleGroups: ["Forearms"], equipment: "Barbell", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
-  { name: "Incline Dumbbell Curl", primaryMuscleGroup: "Biceps", secondaryMuscleGroups: ["Forearms"], equipment: "Dumbbell", movementPattern: "Isolation", isCompound: false, isUnilateral: true },
-  { name: "Hammer Curl", primaryMuscleGroup: "Biceps", secondaryMuscleGroups: ["Forearms"], equipment: "Dumbbell", movementPattern: "Isolation", isCompound: false, isUnilateral: true },
-  { name: "Triceps Pushdown", primaryMuscleGroup: "Triceps", secondaryMuscleGroups: [], equipment: "Cable", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
-  { name: "Overhead Triceps Extension", primaryMuscleGroup: "Triceps", secondaryMuscleGroups: [], equipment: "Dumbbell", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
-  { name: "Close-Grip Bench Press", primaryMuscleGroup: "Triceps", secondaryMuscleGroups: ["Chest", "FrontDelts"], equipment: "Barbell", movementPattern: "Horizontal Push", isCompound: true, isUnilateral: false },
-  { name: "Wrist Curl", primaryMuscleGroup: "Forearms", secondaryMuscleGroups: [], equipment: "Dumbbell", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
+  { name: "Barbell Curl", stimulus: { Biceps: 1, Forearms: 0.25 }, equipment: "Barbell", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
+  { name: "Incline Dumbbell Curl", stimulus: { Biceps: 1, Forearms: 0.2 }, equipment: "Dumbbell", movementPattern: "Isolation", isCompound: false, isUnilateral: true },
+  { name: "Hammer Curl", stimulus: { Biceps: 0.75, Forearms: 0.65 }, equipment: "Dumbbell", movementPattern: "Isolation", isCompound: false, isUnilateral: true },
+  { name: "Triceps Pushdown", stimulus: { Triceps: 1 }, equipment: "Cable", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
+  { name: "Overhead Triceps Extension", stimulus: { Triceps: 1 }, equipment: "Dumbbell", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
+  { name: "Close-Grip Bench Press", stimulus: { Triceps: 1, MidLowerChest: 0.5, FrontDelts: 0.3, UpperChest: 0.15 }, equipment: "Barbell", movementPattern: "Horizontal Push", isCompound: true, isUnilateral: false },
+  { name: "Wrist Curl", stimulus: { Forearms: 1 }, equipment: "Dumbbell", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
   // Core
-  { name: "Cable Crunch", primaryMuscleGroup: "Abs", secondaryMuscleGroups: [], equipment: "Cable", movementPattern: "Flexion", isCompound: false, isUnilateral: false },
-  { name: "Hanging Leg Raise", primaryMuscleGroup: "Abs", secondaryMuscleGroups: ["Obliques"], equipment: "Bodyweight", movementPattern: "Flexion", isCompound: false, isUnilateral: false },
-  { name: "Cable Woodchopper", primaryMuscleGroup: "Obliques", secondaryMuscleGroups: ["Abs"], equipment: "Cable", movementPattern: "Rotation", isCompound: false, isUnilateral: true },
+  { name: "Cable Crunch", stimulus: { Abs: 1 }, equipment: "Cable", movementPattern: "Flexion", isCompound: false, isUnilateral: false },
+  { name: "Hanging Leg Raise", stimulus: { Abs: 1, Obliques: 0.2 }, equipment: "Bodyweight", movementPattern: "Flexion", isCompound: false, isUnilateral: false },
+  { name: "Cable Woodchopper", stimulus: { Obliques: 1, Abs: 0.4 }, equipment: "Cable", movementPattern: "Rotation", isCompound: false, isUnilateral: true },
   // Legs
-  { name: "Barbell Back Squat", primaryMuscleGroup: "Quads", secondaryMuscleGroups: ["Glutes", "Adductors", "LowerBack"], equipment: "Barbell", movementPattern: "Squat", isCompound: true, isUnilateral: false },
-  { name: "Leg Press", primaryMuscleGroup: "Quads", secondaryMuscleGroups: ["Glutes", "Adductors"], equipment: "Machine", movementPattern: "Squat", isCompound: true, isUnilateral: false },
-  { name: "Leg Extension", primaryMuscleGroup: "Quads", secondaryMuscleGroups: [], equipment: "Machine", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
-  { name: "Romanian Deadlift", primaryMuscleGroup: "Hamstrings", secondaryMuscleGroups: ["Glutes", "LowerBack"], equipment: "Barbell", movementPattern: "Hinge", isCompound: true, isUnilateral: false },
-  { name: "Lying Leg Curl", primaryMuscleGroup: "Hamstrings", secondaryMuscleGroups: [], equipment: "Machine", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
-  { name: "Hip Thrust", primaryMuscleGroup: "Glutes", secondaryMuscleGroups: ["Hamstrings", "Quads"], equipment: "Barbell", movementPattern: "Hinge", isCompound: true, isUnilateral: false },
-  { name: "Cable Kickback", primaryMuscleGroup: "Glutes", secondaryMuscleGroups: [], equipment: "Cable", movementPattern: "Isolation", isCompound: false, isUnilateral: true },
-  { name: "Standing Calf Raise", primaryMuscleGroup: "Calves", secondaryMuscleGroups: [], equipment: "Machine", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
-  { name: "Seated Calf Raise", primaryMuscleGroup: "Calves", secondaryMuscleGroups: [], equipment: "Machine", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
-  { name: "Cable Hip Adduction", primaryMuscleGroup: "Adductors", secondaryMuscleGroups: [], equipment: "Cable", movementPattern: "Isolation", isCompound: false, isUnilateral: true },
-  { name: "Cable Hip Abduction", primaryMuscleGroup: "Abductors", secondaryMuscleGroups: ["Glutes"], equipment: "Cable", movementPattern: "Isolation", isCompound: false, isUnilateral: true },
-  { name: "Back Extension", primaryMuscleGroup: "LowerBack", secondaryMuscleGroups: ["Glutes", "Hamstrings"], equipment: "Bodyweight", movementPattern: "Hinge", isCompound: false, isUnilateral: false },
+  { name: "Barbell Back Squat", stimulus: { Quads: 1, Glutes: 0.7, Adductors: 0.4, SpinalErectors: 0.3, Hamstrings: 0.15 }, equipment: "Barbell", movementPattern: "Squat", isCompound: true, isUnilateral: false },
+  { name: "Leg Press", stimulus: { Quads: 1, Glutes: 0.6, Adductors: 0.3, Hamstrings: 0.1 }, equipment: "Machine", movementPattern: "Squat", isCompound: true, isUnilateral: false },
+  { name: "Leg Extension", stimulus: { Quads: 1 }, equipment: "Machine", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
+  { name: "Romanian Deadlift", stimulus: { Hamstrings: 1, Glutes: 0.75, SpinalErectors: 0.4, Forearms: 0.15 }, equipment: "Barbell", movementPattern: "Hinge", isCompound: true, isUnilateral: false },
+  { name: "Lying Leg Curl", stimulus: { Hamstrings: 1 }, equipment: "Machine", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
+  { name: "Hip Thrust", stimulus: { Glutes: 1, Hamstrings: 0.25, Quads: 0.15 }, equipment: "Barbell", movementPattern: "Hinge", isCompound: true, isUnilateral: false },
+  { name: "Cable Kickback", stimulus: { Glutes: 1, Hamstrings: 0.1 }, equipment: "Cable", movementPattern: "Isolation", isCompound: false, isUnilateral: true },
+  { name: "Standing Calf Raise", stimulus: { Calves: 1 }, equipment: "Machine", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
+  { name: "Seated Calf Raise", stimulus: { Calves: 1 }, equipment: "Machine", movementPattern: "Isolation", isCompound: false, isUnilateral: false },
+  { name: "Cable Hip Adduction", stimulus: { Adductors: 1 }, equipment: "Cable", movementPattern: "Isolation", isCompound: false, isUnilateral: true },
+  { name: "Cable Hip Abduction", stimulus: { Abductors: 1, Glutes: 0.25 }, equipment: "Cable", movementPattern: "Isolation", isCompound: false, isUnilateral: true },
+  { name: "Back Extension", stimulus: { SpinalErectors: 1, Glutes: 0.55, Hamstrings: 0.45 }, equipment: "Bodyweight", movementPattern: "Hinge", isCompound: false, isUnilateral: false },
 ];
 
 // ---------------------------------------------------------------------------

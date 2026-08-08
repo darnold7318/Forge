@@ -72,7 +72,7 @@ export default function RecoveryMap() {
           Muscle Recovery Map
         </h1>
         <p className="text-sm text-muted-foreground">
-          Fatigue decay across all 19 muscle groups, including spillover from related muscles
+          Fatigue decay across all 20 muscle groups, distributed by each exercise's effective stimulus ratios
         </p>
       </div>
 

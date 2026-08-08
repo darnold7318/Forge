@@ -85,6 +85,7 @@ interface Exercise {
 interface MuscleGroup {
   id: number;
   name: string;
+  displayName: string;
 }
 
 function useDebouncedCallback<T extends (...args: any[]) => void>(fn: T, delay = 450) {
@@ -354,7 +355,7 @@ export default function TemplateEditor() {
   const exerciseNameLookup = new Map<number, string>();
   for (const e of exercises ?? []) exerciseNameLookup.set(e.id, e.name);
   const muscleGroupNameLookup = new Map<number, string>();
-  for (const mg of muscleGroups ?? []) muscleGroupNameLookup.set(mg.id, mg.name);
+  for (const mg of muscleGroups ?? []) muscleGroupNameLookup.set(mg.id, mg.displayName);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/workout-templates", String(templateId)] });

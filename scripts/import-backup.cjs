@@ -41,7 +41,9 @@ CREATE TABLE users (
   color_accent TEXT,
   theme_color TEXT NOT NULL DEFAULT 'green',
   theme_mode TEXT NOT NULL DEFAULT 'dark',
-  workout_split TEXT NOT NULL DEFAULT 'ppl'
+  workout_split TEXT NOT NULL DEFAULT 'ppl',
+  timezone_mode TEXT NOT NULL DEFAULT 'home',
+  home_timezone TEXT
 );
 
 CREATE TABLE muscle_groups (
@@ -61,6 +63,23 @@ CREATE TABLE exercises (
   movement_pattern TEXT,
   is_compound INTEGER NOT NULL DEFAULT 0,
   is_unilateral INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE exercise_muscle_stimulus (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+  muscle_group_id INTEGER NOT NULL REFERENCES muscle_groups(id),
+  stimulus_ratio REAL NOT NULL CHECK(stimulus_ratio >= 0 AND stimulus_ratio <= 1),
+  UNIQUE(exercise_id, muscle_group_id)
+);
+
+CREATE TABLE user_exercise_muscle_stimulus_overrides (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+  muscle_group_id INTEGER NOT NULL REFERENCES muscle_groups(id),
+  stimulus_ratio REAL NOT NULL CHECK(stimulus_ratio >= 0 AND stimulus_ratio <= 1),
+  UNIQUE(user_id, exercise_id, muscle_group_id)
 );
 
 CREATE TABLE workout_templates (
@@ -95,6 +114,8 @@ CREATE TABLE workouts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id),
   date TEXT NOT NULL,
+  started_at TEXT,
+  tz TEXT,
   name TEXT,
   notes TEXT,
   workout_template_id INTEGER REFERENCES workout_templates(id)
@@ -175,6 +196,12 @@ counts.exercises = insertMany(
   ]
 );
 
+counts.exerciseMuscleStimulus = insertMany(
+  `INSERT INTO exercise_muscle_stimulus (id, exercise_id, muscle_group_id, stimulus_ratio) VALUES (?, ?, ?, ?)`,
+  d.exerciseMuscleStimulus || [],
+  (row) => [row.id, row.exerciseId, row.muscleGroupId, row.stimulusRatio]
+);
+
 let userCount = 0,
   templateCount = 0,
   wteCount = 0,
@@ -182,10 +209,11 @@ let userCount = 0,
   setCount = 0,
   scheduleCount = 0,
   scheduleDayCount = 0,
-  bwCount = 0;
+  bwCount = 0,
+  stimulusOverrideCount = 0;
 
 const insertUser = db.prepare(
-  `INSERT INTO users (id, name, password_hash, is_admin, color_accent, theme_color, theme_mode, workout_split) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  `INSERT INTO users (id, name, password_hash, is_admin, color_accent, theme_color, theme_mode, workout_split, timezone_mode, home_timezone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const insertTemplate = db.prepare(
   `INSERT INTO workout_templates (id, user_id, name, notes) VALUES (?, ?, ?, ?)`
@@ -194,7 +222,7 @@ const insertWte = db.prepare(
   `INSERT INTO workout_template_exercises (id, workout_template_id, exercise_id, exercise_order, exercise_role, warmup_sets, top_sets, backoff_sets, backoff_reduction_percent, target_sets, target_reps_min, target_reps_max, tempo, target_rir, failure_target, intensity_technique, rest_seconds, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const insertWorkout = db.prepare(
-  `INSERT INTO workouts (id, user_id, date, name, notes, workout_template_id) VALUES (?, ?, ?, ?, ?, ?)`
+  `INSERT INTO workouts (id, user_id, date, started_at, tz, name, notes, workout_template_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const insertSet = db.prepare(
   `INSERT INTO sets (id, workout_id, exercise_id, set_number, weight, reps, rir, is_warmup) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -207,6 +235,9 @@ const insertScheduleDay = db.prepare(
 );
 const insertBw = db.prepare(
   `INSERT INTO bodyweight_logs (id, user_id, date, weight) VALUES (?, ?, ?, ?)`
+);
+const insertStimulusOverride = db.prepare(
+  `INSERT INTO user_exercise_muscle_stimulus_overrides (id, user_id, exercise_id, muscle_group_id, stimulus_ratio) VALUES (?, ?, ?, ?, ?)`
 );
 
 const importAll = db.transaction(() => {
@@ -223,7 +254,9 @@ const importAll = db.transaction(() => {
       u.colorAccent,
       u.themeColor,
       u.themeMode,
-      u.workoutSplit
+      u.workoutSplit,
+      u.timezoneMode || "home",
+      u.homeTimezone || null
     );
     userCount++;
 
@@ -255,7 +288,7 @@ const importAll = db.transaction(() => {
       wteCount++;
     }
     for (const w of profile.workouts || []) {
-      insertWorkout.run(w.id, w.userId, w.date, w.name, w.notes, w.workoutTemplateId);
+      insertWorkout.run(w.id, w.userId, w.date, w.startedAt || null, w.tz || null, w.name, w.notes, w.workoutTemplateId);
       workoutCount++;
     }
     for (const s of profile.sets || []) {
@@ -294,6 +327,10 @@ const importAll = db.transaction(() => {
       insertBw.run(bw.id, bw.userId, bw.date, bw.weight);
       bwCount++;
     }
+    for (const row of profile.exerciseStimulusOverrides || []) {
+      insertStimulusOverride.run(row.id, row.userId, row.exerciseId, row.muscleGroupId, row.stimulusRatio);
+      stimulusOverrideCount++;
+    }
   }
 });
 importAll();
@@ -311,6 +348,8 @@ const tables = [
   "bodyweight_logs",
   "muscle_groups",
   "exercises",
+  "exercise_muscle_stimulus",
+  "user_exercise_muscle_stimulus_overrides",
 ];
 for (const t of tables) {
   const max = db.prepare(`SELECT COALESCE(MAX(id), 0) as m FROM ${t}`).get().m;
@@ -337,4 +376,6 @@ console.log({
   workoutSchedules: scheduleCount,
   scheduleDays: scheduleDayCount,
   bodyweightLogs: bwCount,
+  exerciseMuscleStimulus: counts.exerciseMuscleStimulus,
+  exerciseStimulusOverrides: stimulusOverrideCount,
 });

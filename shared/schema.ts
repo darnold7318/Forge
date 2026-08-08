@@ -1,4 +1,5 @@
-import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, real, uniqueIndex, check } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -105,51 +106,53 @@ export const updateUserPreferencesSchema = createInsertSchema(users)
 export type UpdateUserPreferences = z.infer<typeof updateUserPreferencesSchema>;
 
 // ---------------------------------------------------------------------------
-// Muscle Groups — 19 groups matching the reference C# MuscleGroup enum
+// Muscle Groups — 20 hypertrophy-oriented groups
 // ---------------------------------------------------------------------------
 export const muscleGroupNames = [
-  "Chest",
-  "Back",
+  "UpperChest",
+  "MidLowerChest",
   "Lats",
+  "UpperMidBack",
   "Traps",
-  "RearDelts",
-  "SideDelts",
+  "SpinalErectors",
   "FrontDelts",
+  "SideDelts",
+  "RearDelts",
   "Biceps",
   "Triceps",
   "Forearms",
-  "Abs",
-  "Obliques",
   "Quads",
   "Hamstrings",
   "Glutes",
-  "Calves",
   "Adductors",
   "Abductors",
-  "LowerBack",
+  "Calves",
+  "Abs",
+  "Obliques",
 ] as const;
 export type MuscleGroupName = (typeof muscleGroupNames)[number];
 
 export const muscleGroupDisplayNames: Record<MuscleGroupName, string> = {
-  Chest: "Chest",
-  Back: "Back",
+  UpperChest: "Upper Chest",
+  MidLowerChest: "Mid / Lower Chest",
   Lats: "Lats",
+  UpperMidBack: "Upper / Mid Back",
   Traps: "Traps",
-  RearDelts: "Rear Delts",
-  SideDelts: "Side Delts",
+  SpinalErectors: "Spinal Erectors",
   FrontDelts: "Front Delts",
+  SideDelts: "Side Delts",
+  RearDelts: "Rear Delts",
   Biceps: "Biceps",
   Triceps: "Triceps",
   Forearms: "Forearms",
-  Abs: "Abs",
-  Obliques: "Obliques",
   Quads: "Quads",
   Hamstrings: "Hamstrings",
   Glutes: "Glutes",
-  Calves: "Calves",
   Adductors: "Adductors",
   Abductors: "Abductors",
-  LowerBack: "Lower Back",
+  Calves: "Calves",
+  Abs: "Abs",
+  Obliques: "Obliques",
 };
 
 export const muscleGroups = sqliteTable("muscle_groups", {
@@ -190,6 +193,8 @@ export const exercises = sqliteTable("exercises", {
   primaryMuscleGroupId: integer("primary_muscle_group_id")
     .notNull()
     .references(() => muscleGroups.id),
+  // Deprecated compatibility fields. Startup seeding keeps these synchronized
+  // from the highest global stimulus ratio; hypertrophy logic must use stimulus.
   // JSON array of muscle group IDs (text column — SQLite has no array type)
   secondaryMuscles: text("secondary_muscles").notNull().default("[]"),
   equipment: text("equipment").notNull(), // one of equipmentTypes
@@ -201,6 +206,49 @@ export const exercises = sqliteTable("exercises", {
     .notNull()
     .default(false),
 });
+
+// Global Forge defaults. Ratios are effective-set multipliers and intentionally
+// do not need to sum to 1.0.
+export const exerciseMuscleStimulus = sqliteTable(
+  "exercise_muscle_stimulus",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    exerciseId: integer("exercise_id")
+      .notNull()
+      .references(() => exercises.id, { onDelete: "cascade" }),
+    muscleGroupId: integer("muscle_group_id")
+      .notNull()
+      .references(() => muscleGroups.id),
+    stimulusRatio: real("stimulus_ratio").notNull(),
+  },
+  (table) => [
+    uniqueIndex("idx_exercise_muscle_stimulus_unique").on(table.exerciseId, table.muscleGroupId),
+    check("exercise_muscle_stimulus_ratio_range", sql`${table.stimulusRatio} >= 0 AND ${table.stimulusRatio} <= 1`),
+  ],
+);
+
+// A user's rows replace the complete default mapping for that exercise. No
+// per-row fallback is used, so omitting a default muscle is representable.
+export const userExerciseMuscleStimulusOverrides = sqliteTable(
+  "user_exercise_muscle_stimulus_overrides",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    exerciseId: integer("exercise_id")
+      .notNull()
+      .references(() => exercises.id, { onDelete: "cascade" }),
+    muscleGroupId: integer("muscle_group_id")
+      .notNull()
+      .references(() => muscleGroups.id),
+    stimulusRatio: real("stimulus_ratio").notNull(),
+  },
+  (table) => [
+    uniqueIndex("idx_user_exercise_stimulus_unique").on(table.userId, table.exerciseId, table.muscleGroupId),
+    check("user_exercise_stimulus_ratio_range", sql`${table.stimulusRatio} >= 0 AND ${table.stimulusRatio} <= 1`),
+  ],
+);
 
 export const insertExerciseSchema = createInsertSchema(exercises)
   .omit({ id: true })
@@ -215,6 +263,56 @@ export type Exercise = typeof exercises.$inferSelect;
 export type ExerciseWithParsedMuscles = Omit<Exercise, "secondaryMuscles"> & {
   secondaryMuscles: number[];
 };
+
+export type ExerciseMuscleStimulus = typeof exerciseMuscleStimulus.$inferSelect;
+export type UserExerciseMuscleStimulusOverride = typeof userExerciseMuscleStimulusOverrides.$inferSelect;
+
+export const exerciseStimulusRowSchema = z.object({
+  muscleGroupId: z.number().int().positive(),
+  stimulusRatio: z.number().finite().min(0).max(1),
+});
+
+export const exerciseStimulusListSchema = z
+  .array(exerciseStimulusRowSchema)
+  .min(1, "At least one muscle stimulus is required")
+  .superRefine((rows, ctx) => {
+    const ids = new Set<number>();
+    for (const row of rows) {
+      if (ids.has(row.muscleGroupId)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Muscle groups cannot be duplicated" });
+      }
+      ids.add(row.muscleGroupId);
+    }
+    if (!rows.some((row) => row.stimulusRatio > 0)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "At least one stimulus ratio must be greater than zero" });
+    }
+  });
+
+export const exerciseMetadataSchema = createInsertSchema(exercises)
+  .omit({ id: true, primaryMuscleGroupId: true, secondaryMuscles: true })
+  .extend({ equipment: z.enum(equipmentTypes) });
+
+export const createExerciseWithStimulusSchema = exerciseMetadataSchema.extend({ stimulus: exerciseStimulusListSchema });
+export const updateExerciseStimulusSchema = z.object({ stimulus: exerciseStimulusListSchema });
+
+export type ExerciseStimulusInput = z.infer<typeof exerciseStimulusRowSchema>;
+export type ExerciseMetadataInput = z.infer<typeof exerciseMetadataSchema>;
+
+export interface ExerciseMuscleStimulusView {
+  muscleGroupId: number;
+  muscleGroupName: MuscleGroupName;
+  displayName: string;
+  stimulusRatio: number;
+}
+
+export type ExerciseView = ExerciseWithParsedMuscles & {
+  stimulus: ExerciseMuscleStimulusView[];
+  hasStimulusOverride: boolean;
+};
+
+export function primaryStimulusMuscle<T extends { muscleGroupId: number; stimulusRatio: number }>(rows: T[]): T | null {
+  return [...rows].sort((a, b) => b.stimulusRatio - a.stimulusRatio || a.muscleGroupId - b.muscleGroupId)[0] ?? null;
+}
 
 // ---------------------------------------------------------------------------
 // Workout Templates

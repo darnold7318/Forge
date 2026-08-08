@@ -10,6 +10,10 @@ import {
   workoutSchedules,
   scheduleDays,
   splitRotationCycles,
+  exerciseMuscleStimulus,
+  userExerciseMuscleStimulusOverrides,
+  primaryStimulusMuscle,
+  muscleGroupNames,
 } from "@shared/schema";
 import type {
   User,
@@ -18,8 +22,10 @@ import type {
   MuscleGroup,
   InsertMuscleGroup,
   Exercise,
-  InsertExercise,
   ExerciseWithParsedMuscles,
+  ExerciseMuscleStimulus,
+  ExerciseStimulusInput,
+  ExerciseMetadataInput,
   Workout,
   InsertWorkout,
   Set,
@@ -39,6 +45,7 @@ import type {
   SetCoreAddonInput,
   SetCustomWeeklyTemplateInput,
   CustomWeeklySlot,
+  MuscleGroupName,
 } from "@shared/schema";
 import {
   buildStarterTemplate,
@@ -99,6 +106,27 @@ function ensureTables() {
       is_compound INTEGER NOT NULL DEFAULT 0,
       is_unilateral INTEGER NOT NULL DEFAULT 0
     );
+
+    CREATE TABLE IF NOT EXISTS exercise_muscle_stimulus (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+      muscle_group_id INTEGER NOT NULL REFERENCES muscle_groups(id),
+      stimulus_ratio REAL NOT NULL CHECK(stimulus_ratio >= 0 AND stimulus_ratio <= 1)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_exercise_muscle_stimulus_unique
+      ON exercise_muscle_stimulus(exercise_id, muscle_group_id);
+
+    CREATE TABLE IF NOT EXISTS user_exercise_muscle_stimulus_overrides (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+      muscle_group_id INTEGER NOT NULL REFERENCES muscle_groups(id),
+      stimulus_ratio REAL NOT NULL CHECK(stimulus_ratio >= 0 AND stimulus_ratio <= 1)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_exercise_stimulus_unique
+      ON user_exercise_muscle_stimulus_overrides(user_id, exercise_id, muscle_group_id);
 
     CREATE TABLE IF NOT EXISTS workout_templates (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -324,6 +352,84 @@ function ensureTables() {
 
 ensureTables();
 
+function migrateMuscleTaxonomy() {
+  const renameMap = [
+    ["Chest", "MidLowerChest"],
+    ["Back", "UpperMidBack"],
+    ["LowerBack", "SpinalErectors"],
+  ] as const;
+
+  const migrate = sqlite.transaction(() => {
+    for (const [legacyName, nextName] of renameMap) {
+      const legacy = sqlite.prepare("SELECT id FROM muscle_groups WHERE name = ?").get(legacyName) as
+        | { id: number }
+        | undefined;
+      if (!legacy) continue;
+      const existing = sqlite.prepare("SELECT id FROM muscle_groups WHERE name = ?").get(nextName) as
+        | { id: number }
+        | undefined;
+
+      if (!existing) {
+        sqlite.prepare("UPDATE muscle_groups SET name = ? WHERE id = ?").run(nextName, legacy.id);
+        continue;
+      }
+
+      // Defensive merge for a partially migrated database where both names
+      // exist. Preserve the new row and retarget every legacy reference.
+      sqlite.prepare("UPDATE exercises SET primary_muscle_group_id = ? WHERE primary_muscle_group_id = ?").run(existing.id, legacy.id);
+      for (const table of ["exercise_muscle_stimulus", "user_exercise_muscle_stimulus_overrides"] as const) {
+        const rows = sqlite.prepare(`SELECT * FROM ${table} WHERE muscle_group_id = ?`).all(legacy.id) as any[];
+        const keyColumns = table === "exercise_muscle_stimulus" ? ["exercise_id"] : ["user_id", "exercise_id"];
+        for (const row of rows) {
+          const where = keyColumns.map((column) => `${column} = ?`).join(" AND ");
+          const values = keyColumns.map((column) => row[column]);
+          const conflict = sqlite
+            .prepare(`SELECT id, stimulus_ratio FROM ${table} WHERE ${where} AND muscle_group_id = ?`)
+            .get(...values, existing.id) as { id: number; stimulus_ratio: number } | undefined;
+          if (conflict) {
+            sqlite
+              .prepare(`UPDATE ${table} SET stimulus_ratio = ? WHERE id = ?`)
+              .run(Math.max(conflict.stimulus_ratio, row.stimulus_ratio), conflict.id);
+            sqlite.prepare(`DELETE FROM ${table} WHERE id = ?`).run(row.id);
+          } else {
+            sqlite.prepare(`UPDATE ${table} SET muscle_group_id = ? WHERE id = ?`).run(existing.id, row.id);
+          }
+        }
+      }
+
+      const exerciseRows = sqlite.prepare("SELECT id, secondary_muscles FROM exercises").all() as {
+        id: number;
+        secondary_muscles: string;
+      }[];
+      for (const exercise of exerciseRows) {
+        let secondary: number[] = [];
+        try {
+          secondary = JSON.parse(exercise.secondary_muscles ?? "[]");
+        } catch {
+          secondary = [];
+        }
+        if (!secondary.includes(legacy.id)) continue;
+        const next = Array.from(new Set(secondary.map((id) => (id === legacy.id ? existing.id : id))));
+        sqlite.prepare("UPDATE exercises SET secondary_muscles = ? WHERE id = ?").run(JSON.stringify(next), exercise.id);
+      }
+      sqlite.prepare("DELETE FROM muscle_groups WHERE id = ?").run(legacy.id);
+    }
+
+    for (const group of MUSCLE_GROUPS) {
+      sqlite
+        .prepare(
+          `INSERT INTO muscle_groups (name, mev, mav, mrv) VALUES (?, ?, ?, ?)
+           ON CONFLICT(name) DO UPDATE SET mev = excluded.mev, mav = excluded.mav, mrv = excluded.mrv`,
+        )
+        .run(group.name, group.mev, group.mav, group.mrv);
+    }
+  });
+
+  migrate();
+}
+
+migrateMuscleTaxonomy();
+
 // One-time bootstrap: if no user in this database has admin rights yet, promote
 // a user named "Derek" to admin (case-insensitive match). This self-heals fresh
 // deployments where the admin panel exists in the UI but no one can reach it
@@ -351,75 +457,160 @@ function seedIfEmpty() {
   const firstUser = existingUsers.slice().sort((a, b) => a.id - b.id)[0];
 
   // ---- Shared catalog data (muscle groups + exercises) ----
-  const existingGroups = db.select().from(muscleGroups).all();
-  if (existingGroups.length > 0) return; // catalog + templates already seeded
-
-  const nameToId = new Map<string, number>();
-  for (const mg of MUSCLE_GROUPS) {
-    const row = db.insert(muscleGroups).values(mg).returning().get();
-    nameToId.set(row.name, row.id);
+  const nameToId = new Map<MuscleGroupName, number>();
+  for (const group of db.select().from(muscleGroups).all()) {
+    nameToId.set(group.name as MuscleGroupName, group.id);
   }
 
-  const exerciseNameToId = new Map<string, number>();
-  for (const ex of EXERCISES) {
-    const primaryId = nameToId.get(ex.primaryMuscleGroup);
-    if (!primaryId) continue;
-    const secondaryIds = ex.secondaryMuscleGroups
-      .map((name) => nameToId.get(name))
-      .filter((id): id is number => id != null);
-    const row = db
-      .insert(exercises)
-      .values({
-        name: ex.name,
-        primaryMuscleGroupId: primaryId,
-        secondaryMuscles: JSON.stringify(secondaryIds),
-        equipment: ex.equipment,
-        movementPattern: ex.movementPattern,
-        isCompound: ex.isCompound,
-        isUnilateral: ex.isUnilateral,
-      })
-      .returning()
-      .get();
-    exerciseNameToId.set(ex.name, row.id);
-  }
-
-  // Example templates are attached to the first default user only.
-  for (const template of WORKOUT_TEMPLATES) {
-    const templateRow = db
-      .insert(workoutTemplates)
-      .values({ userId: firstUser.id, name: template.name, notes: template.notes })
-      .returning()
-      .get();
-
-    for (const te of template.exercises) {
-      const exerciseId = exerciseNameToId.get(te.exerciseName);
-      if (!exerciseId) continue;
-      db.insert(workoutTemplateExercises)
+  if (db.select().from(exercises).all().length === 0) {
+    const exerciseNameToId = new Map<string, number>();
+    for (const ex of EXERCISES) {
+      const stimulus = Object.entries(ex.stimulus)
+        .map(([name, stimulusRatio]) => ({ muscleGroupId: nameToId.get(name as MuscleGroupName), stimulusRatio }))
+        .filter((row): row is { muscleGroupId: number; stimulusRatio: number } => row.muscleGroupId != null && row.stimulusRatio != null);
+      const primary = primaryStimulusMuscle(stimulus);
+      if (!primary) continue;
+      const row = db
+        .insert(exercises)
         .values({
-          workoutTemplateId: templateRow.id,
-          exerciseId,
-          exerciseOrder: te.exerciseOrder,
-          exerciseRole: te.exerciseRole,
-          warmupSets: te.warmupSets,
-          topSets: te.topSets,
-          backoffSets: te.backoffSets,
-          backoffReductionPercent: te.backoffReductionPercent,
-          targetSets: te.targetSets,
-          targetRepsMin: te.targetRepsMin,
-          targetRepsMax: te.targetRepsMax,
-          tempo: te.tempo ?? null,
-          targetRir: te.targetRir,
-          failureTarget: te.failureTarget,
-          intensityTechnique: te.intensityTechnique ?? null,
-          restSeconds: te.restSeconds,
-          notes: te.notes ?? null,
+          name: ex.name,
+          primaryMuscleGroupId: primary.muscleGroupId,
+          secondaryMuscles: JSON.stringify(stimulus.filter((s) => s.muscleGroupId !== primary.muscleGroupId).map((s) => s.muscleGroupId)),
+          equipment: ex.equipment,
+          movementPattern: ex.movementPattern,
+          isCompound: ex.isCompound,
+          isUnilateral: ex.isUnilateral,
         })
-        .run();
+        .returning()
+        .get();
+      exerciseNameToId.set(ex.name, row.id);
+    }
+
+    // Example templates are attached to the first default user only.
+    for (const template of WORKOUT_TEMPLATES) {
+      const templateRow = db
+        .insert(workoutTemplates)
+        .values({ userId: firstUser.id, name: template.name, notes: template.notes })
+        .returning()
+        .get();
+
+      for (const te of template.exercises) {
+        const exerciseId = exerciseNameToId.get(te.exerciseName);
+        if (!exerciseId) continue;
+        db.insert(workoutTemplateExercises)
+          .values({
+            workoutTemplateId: templateRow.id,
+            exerciseId,
+            exerciseOrder: te.exerciseOrder,
+            exerciseRole: te.exerciseRole,
+            warmupSets: te.warmupSets,
+            topSets: te.topSets,
+            backoffSets: te.backoffSets,
+            backoffReductionPercent: te.backoffReductionPercent,
+            targetSets: te.targetSets,
+            targetRepsMin: te.targetRepsMin,
+            targetRepsMax: te.targetRepsMax,
+            tempo: te.tempo ?? null,
+            targetRir: te.targetRir,
+            failureTarget: te.failureTarget,
+            intensityTechnique: te.intensityTechnique ?? null,
+            restSeconds: te.restSeconds,
+            notes: te.notes ?? null,
+          })
+          .run();
+      }
     }
   }
 }
 
 seedIfEmpty();
+
+function seedExerciseStimulusDefaults() {
+  const groupNameToId = new Map<MuscleGroupName, number>();
+  for (const group of db.select().from(muscleGroups).all()) {
+    groupNameToId.set(group.name as MuscleGroupName, group.id);
+  }
+  const exerciseRows = db.select().from(exercises).all().sort((a, b) => a.id - b.id);
+  const firstExerciseByName = new Map<string, Exercise>();
+  for (const exercise of exerciseRows) {
+    if (!firstExerciseByName.has(exercise.name)) firstExerciseByName.set(exercise.name, exercise);
+  }
+
+  const seed = sqlite.transaction(() => {
+    const insertStimulus = sqlite.prepare(
+      `INSERT INTO exercise_muscle_stimulus (exercise_id, muscle_group_id, stimulus_ratio)
+       VALUES (?, ?, ?)
+       ON CONFLICT(exercise_id, muscle_group_id) DO UPDATE SET stimulus_ratio = excluded.stimulus_ratio`,
+    );
+
+    // Curated built-in rows are deterministic and centrally defined.
+    for (const seedExercise of EXERCISES) {
+      const exercise = firstExerciseByName.get(seedExercise.name);
+      if (!exercise) continue;
+      const expectedMuscleIds = new Set(
+        Object.keys(seedExercise.stimulus)
+          .map((muscleName) => groupNameToId.get(muscleName as MuscleGroupName))
+          .filter((id): id is number => id != null),
+      );
+      const existingRows = sqlite
+        .prepare("SELECT id, muscle_group_id AS muscleGroupId FROM exercise_muscle_stimulus WHERE exercise_id = ?")
+        .all(exercise.id) as { id: number; muscleGroupId: number }[];
+      for (const row of existingRows) {
+        if (!expectedMuscleIds.has(row.muscleGroupId)) {
+          sqlite.prepare("DELETE FROM exercise_muscle_stimulus WHERE id = ?").run(row.id);
+        }
+      }
+      for (const [muscleName, stimulusRatio] of Object.entries(seedExercise.stimulus)) {
+        const muscleGroupId = groupNameToId.get(muscleName as MuscleGroupName);
+        if (muscleGroupId == null || stimulusRatio == null || stimulusRatio <= 0) continue;
+        insertStimulus.run(exercise.id, muscleGroupId, stimulusRatio);
+      }
+    }
+
+    // Preserve user-created and otherwise non-seeded exercises by translating
+    // their legacy primary/secondary model once. Generic legacy Chest/Back/
+    // LowerBack IDs already point to their conservative renamed groups.
+    for (const exercise of exerciseRows) {
+      const count = sqlite
+        .prepare("SELECT COUNT(*) AS count FROM exercise_muscle_stimulus WHERE exercise_id = ?")
+        .get(exercise.id) as { count: number };
+      if (count.count > 0) continue;
+      insertStimulus.run(exercise.id, exercise.primaryMuscleGroupId, 1);
+      let secondary: number[] = [];
+      try {
+        secondary = JSON.parse(exercise.secondaryMuscles ?? "[]");
+      } catch {
+        secondary = [];
+      }
+      for (const muscleGroupId of Array.from(new Set(secondary))) {
+        if (muscleGroupId !== exercise.primaryMuscleGroupId) insertStimulus.run(exercise.id, muscleGroupId, 0.5);
+      }
+    }
+
+    // Keep deprecated compatibility columns synchronized from global defaults.
+    // User-specific responses derive these fields again from the effective map.
+    for (const exercise of exerciseRows) {
+      const rows = sqlite
+        .prepare(
+          "SELECT muscle_group_id AS muscleGroupId, stimulus_ratio AS stimulusRatio FROM exercise_muscle_stimulus WHERE exercise_id = ?",
+        )
+        .all(exercise.id) as ExerciseStimulusInput[];
+      const primary = primaryStimulusMuscle(rows);
+      if (!primary) continue;
+      const secondary = rows
+        .filter((row) => row.muscleGroupId !== primary.muscleGroupId)
+        .sort((a, b) => b.stimulusRatio - a.stimulusRatio || a.muscleGroupId - b.muscleGroupId)
+        .map((row) => row.muscleGroupId);
+      sqlite
+        .prepare("UPDATE exercises SET primary_muscle_group_id = ?, secondary_muscles = ? WHERE id = ?")
+        .run(primary.muscleGroupId, JSON.stringify(secondary), exercise.id);
+    }
+  });
+
+  seed();
+}
+
+seedExerciseStimulusDefaults();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -450,6 +641,11 @@ export interface WorkoutScheduleWithDays extends WorkoutSchedule {
   days: ScheduleDay[];
 }
 
+export interface ExerciseWithEffectiveStimulus extends ExerciseWithParsedMuscles {
+  stimulus: ExerciseStimulusInput[];
+  hasStimulusOverride: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Storage interface
 // ---------------------------------------------------------------------------
@@ -471,8 +667,14 @@ export interface IStorage {
   // Exercises (shared/global)
   getExercises(): Promise<Exercise[]>;
   getExercise(id: number): Promise<Exercise | undefined>;
-  createExercise(exercise: InsertExercise): Promise<Exercise>;
-  updateExercise(id: number, exercise: InsertExercise): Promise<Exercise | undefined>;
+  getExercisesWithStimulus(userId: number): Promise<ExerciseWithEffectiveStimulus[]>;
+  getExerciseWithStimulus(userId: number, exerciseId: number): Promise<ExerciseWithEffectiveStimulus | undefined>;
+  getEffectiveExerciseStimulus(userId: number, exerciseId: number): Promise<ExerciseStimulusInput[]>;
+  getEffectiveStimulusMapForUser(userId: number): Promise<Map<number, ExerciseStimulusInput[]>>;
+  createExercise(exercise: ExerciseMetadataInput, stimulus: ExerciseStimulusInput[]): Promise<Exercise>;
+  updateExercise(id: number, exercise: ExerciseMetadataInput): Promise<Exercise | undefined>;
+  replaceExerciseStimulusOverride(userId: number, exerciseId: number, stimulus: ExerciseStimulusInput[]): Promise<void>;
+  deleteExerciseStimulusOverride(userId: number, exerciseId: number): Promise<void>;
   getExerciseUsage(id: number): Promise<{ templateCount: number; loggedSetCount: number }>;
   deleteExercise(id: number): Promise<{ deleted: boolean; reason?: string }>;
 
@@ -560,7 +762,12 @@ export class DatabaseStorage implements IStorage {
 
   // ---------------- Muscle groups (shared) ----------------
   async getMuscleGroups(): Promise<MuscleGroup[]> {
-    return db.select().from(muscleGroups).all();
+    const order = new Map(muscleGroupNames.map((name, index) => [name, index] as const));
+    return db
+      .select()
+      .from(muscleGroups)
+      .all()
+      .sort((a, b) => (order.get(a.name as MuscleGroupName) ?? 999) - (order.get(b.name as MuscleGroupName) ?? 999));
   }
 
   async getMuscleGroup(id: number): Promise<MuscleGroup | undefined> {
@@ -576,12 +783,140 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(exercises).where(eq(exercises.id, id)).get();
   }
 
-  async createExercise(exercise: InsertExercise): Promise<Exercise> {
-    return db.insert(exercises).values(exercise).returning().get();
+  async getEffectiveStimulusMapForUser(userId: number): Promise<Map<number, ExerciseStimulusInput[]>> {
+    const defaults = db.select().from(exerciseMuscleStimulus).all();
+    const overrides = db
+      .select()
+      .from(userExerciseMuscleStimulusOverrides)
+      .where(eq(userExerciseMuscleStimulusOverrides.userId, userId))
+      .all();
+    const overriddenExerciseIds = new Set(overrides.map((row) => row.exerciseId));
+    const result = new Map<number, ExerciseStimulusInput[]>();
+
+    const append = (exerciseId: number, row: ExerciseStimulusInput) => {
+      const current = result.get(exerciseId) ?? [];
+      current.push(row);
+      result.set(exerciseId, current);
+    };
+    for (const row of defaults) {
+      if (!overriddenExerciseIds.has(row.exerciseId)) {
+        append(row.exerciseId, { muscleGroupId: row.muscleGroupId, stimulusRatio: row.stimulusRatio });
+      }
+    }
+    for (const row of overrides) {
+      append(row.exerciseId, { muscleGroupId: row.muscleGroupId, stimulusRatio: row.stimulusRatio });
+    }
+    for (const rows of Array.from(result.values())) {
+      rows.sort((a, b) => b.stimulusRatio - a.stimulusRatio || a.muscleGroupId - b.muscleGroupId);
+    }
+    return result;
   }
 
-  async updateExercise(id: number, exercise: InsertExercise): Promise<Exercise | undefined> {
+  async getEffectiveExerciseStimulus(userId: number, exerciseId: number): Promise<ExerciseStimulusInput[]> {
+    return (await this.getEffectiveStimulusMapForUser(userId)).get(exerciseId) ?? [];
+  }
+
+  async getExercisesWithStimulus(userId: number): Promise<ExerciseWithEffectiveStimulus[]> {
+    const exerciseRows = await this.getExercises();
+    const effective = await this.getEffectiveStimulusMapForUser(userId);
+    const overriddenExerciseIds = new Set(
+      db
+        .select({ exerciseId: userExerciseMuscleStimulusOverrides.exerciseId })
+        .from(userExerciseMuscleStimulusOverrides)
+        .where(eq(userExerciseMuscleStimulusOverrides.userId, userId))
+        .all()
+        .map((row) => row.exerciseId),
+    );
+
+    return exerciseRows.map((exercise) => {
+      const stimulus = effective.get(exercise.id) ?? [];
+      const primary = primaryStimulusMuscle(stimulus);
+      const parsed = parseExercise(exercise);
+      return {
+        ...parsed,
+        primaryMuscleGroupId: primary?.muscleGroupId ?? parsed.primaryMuscleGroupId,
+        secondaryMuscles: stimulus
+          .filter((row) => row.muscleGroupId !== primary?.muscleGroupId)
+          .map((row) => row.muscleGroupId),
+        stimulus,
+        hasStimulusOverride: overriddenExerciseIds.has(exercise.id),
+      };
+    });
+  }
+
+  async getExerciseWithStimulus(userId: number, exerciseId: number): Promise<ExerciseWithEffectiveStimulus | undefined> {
+    return (await this.getExercisesWithStimulus(userId)).find((exercise) => exercise.id === exerciseId);
+  }
+
+  async createExercise(exercise: ExerciseMetadataInput, stimulus: ExerciseStimulusInput[]): Promise<Exercise> {
+    const positive = stimulus.filter((row) => row.stimulusRatio > 0);
+    const primary = primaryStimulusMuscle(positive);
+    if (!primary) throw new Error("At least one positive stimulus ratio is required");
+    const validMuscleIds = new Set((await this.getMuscleGroups()).map((group) => group.id));
+    if (positive.some((row) => !validMuscleIds.has(row.muscleGroupId))) throw new Error("Unknown muscle group");
+
+    return sqlite.transaction(() => {
+      const created = db
+        .insert(exercises)
+        .values({
+          ...exercise,
+          primaryMuscleGroupId: primary.muscleGroupId,
+          secondaryMuscles: JSON.stringify(
+            positive.filter((row) => row.muscleGroupId !== primary.muscleGroupId).map((row) => row.muscleGroupId),
+          ),
+        })
+        .returning()
+        .get();
+      for (const row of positive) {
+        db.insert(exerciseMuscleStimulus)
+          .values({ exerciseId: created.id, muscleGroupId: row.muscleGroupId, stimulusRatio: row.stimulusRatio })
+          .run();
+      }
+      return created;
+    })();
+  }
+
+  async updateExercise(id: number, exercise: ExerciseMetadataInput): Promise<Exercise | undefined> {
     return db.update(exercises).set(exercise).where(eq(exercises.id, id)).returning().get();
+  }
+
+  async replaceExerciseStimulusOverride(
+    userId: number,
+    exerciseId: number,
+    stimulus: ExerciseStimulusInput[],
+  ): Promise<void> {
+    const positive = stimulus.filter((row) => row.stimulusRatio > 0);
+    if (!primaryStimulusMuscle(positive)) throw new Error("At least one positive stimulus ratio is required");
+    const validMuscleIds = new Set((await this.getMuscleGroups()).map((group) => group.id));
+    if (positive.some((row) => !validMuscleIds.has(row.muscleGroupId))) throw new Error("Unknown muscle group");
+    if (!(await this.getExercise(exerciseId))) throw new Error("Exercise not found");
+
+    sqlite.transaction(() => {
+      db.delete(userExerciseMuscleStimulusOverrides)
+        .where(
+          and(
+            eq(userExerciseMuscleStimulusOverrides.userId, userId),
+            eq(userExerciseMuscleStimulusOverrides.exerciseId, exerciseId),
+          ),
+        )
+        .run();
+      for (const row of positive) {
+        db.insert(userExerciseMuscleStimulusOverrides)
+          .values({ userId, exerciseId, muscleGroupId: row.muscleGroupId, stimulusRatio: row.stimulusRatio })
+          .run();
+      }
+    })();
+  }
+
+  async deleteExerciseStimulusOverride(userId: number, exerciseId: number): Promise<void> {
+    db.delete(userExerciseMuscleStimulusOverrides)
+      .where(
+        and(
+          eq(userExerciseMuscleStimulusOverrides.userId, userId),
+          eq(userExerciseMuscleStimulusOverrides.exerciseId, exerciseId),
+        ),
+      )
+      .run();
   }
 
   async getExerciseUsage(id: number): Promise<{ templateCount: number; loggedSetCount: number }> {
@@ -608,6 +943,10 @@ export class DatabaseStorage implements IStorage {
         reason: `This exercise is used in ${usage.templateCount} template exercise slot${usage.templateCount === 1 ? "" : "s"}. Remove it from those templates first.`,
       };
     }
+    db.delete(userExerciseMuscleStimulusOverrides)
+      .where(eq(userExerciseMuscleStimulusOverrides.exerciseId, id))
+      .run();
+    db.delete(exerciseMuscleStimulus).where(eq(exerciseMuscleStimulus.exerciseId, id)).run();
     db.delete(exercises).where(eq(exercises.id, id)).run();
     return { deleted: true };
   }
@@ -926,7 +1265,7 @@ export class DatabaseStorage implements IStorage {
     catalog: ScheduleCatalogExercise[];
     muscleGroupLookup: MuscleGroupLookup;
   }> {
-    const exerciseRows = await this.getExercises();
+    const exerciseRows = await this.getExercisesWithStimulus(userId);
     const catalog: ScheduleCatalogExercise[] = exerciseRows.map((e) => ({
       id: e.id,
       name: e.name,
