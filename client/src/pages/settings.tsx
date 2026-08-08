@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2, Trash2, ShieldCheck, ShieldOff, UserPlus, KeyRound, LogOut } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2, Trash2, ShieldCheck, ShieldOff, UserPlus, KeyRound, LogOut, Globe, ChevronsUpDown } from "lucide-react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -33,6 +33,15 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useActiveUser } from "@/lib/user-context";
 import { useTheme } from "@/components/theme-provider";
@@ -41,11 +50,221 @@ import {
   themeColorIds,
   workoutSplitIds,
   workoutSplitLabels,
+  timezoneModeIds,
+  timezoneModeLabels,
   type ThemeColorId,
   type WorkoutSplitId,
+  type TimezoneModeId,
   type CustomWeeklySlot,
   type User,
 } from "@shared/schema";
+
+// ---------------------------------------------------------------------------
+// Timezone
+//
+// Forge stores two things per workout: the absolute instant (drives fatigue /
+// elapsed-time math and is travel-proof) and the civil calendar date, frozen
+// in whichever zone was effective at log time. This card controls which zone
+// that is.
+// ---------------------------------------------------------------------------
+
+/** Full IANA zone list where the browser exposes it, with a sensible fallback. */
+function useTimezoneList(): string[] {
+  return useMemo(() => {
+    try {
+      const supported = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] })
+        .supportedValuesOf?.("timeZone");
+      if (supported && supported.length > 0) return supported;
+    } catch {
+      /* fall through to the curated list below */
+    }
+    return [
+      "Pacific/Honolulu", "America/Anchorage", "America/Los_Angeles", "America/Denver",
+      "America/Phoenix", "America/Chicago", "America/New_York", "America/Toronto",
+      "America/Halifax", "America/Sao_Paulo", "Europe/London", "Europe/Dublin",
+      "Europe/Lisbon", "Europe/Madrid", "Europe/Paris", "Europe/Berlin", "Europe/Rome",
+      "Europe/Amsterdam", "Europe/Stockholm", "Europe/Warsaw", "Europe/Athens",
+      "Europe/Kyiv", "Europe/Moscow", "Africa/Lagos", "Africa/Cairo",
+      "Africa/Johannesburg", "Asia/Jerusalem", "Asia/Dubai", "Asia/Karachi",
+      "Asia/Kolkata", "Asia/Kathmandu", "Asia/Dhaka", "Asia/Bangkok",
+      "Asia/Singapore", "Asia/Hong_Kong", "Asia/Shanghai", "Asia/Tokyo", "Asia/Seoul",
+      "Australia/Perth", "Australia/Adelaide", "Australia/Brisbane",
+      "Australia/Sydney", "Pacific/Auckland", "UTC",
+    ];
+  }, []);
+}
+
+/** e.g. "America/Los_Angeles" -> "America / Los Angeles (GMT-7)" */
+function describeZone(tz: string): string {
+  const pretty = tz.replace(/_/g, " ").replace("/", " / ");
+  try {
+    const offset = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "shortOffset" })
+      .formatToParts(new Date())
+      .find((p) => p.type === "timeZoneName")?.value;
+    return offset ? `${pretty} (${offset})` : pretty;
+  } catch {
+    return pretty;
+  }
+}
+
+function TimezoneCard({
+  activeUser,
+  onSave,
+  saving,
+}: {
+  activeUser: User;
+  onSave: (prefs: Record<string, string | null>) => void;
+  saving: boolean;
+}) {
+  const zones = useTimezoneList();
+  const [open, setOpen] = useState(false);
+
+  const deviceZone = useMemo(() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    } catch {
+      return "UTC";
+    }
+  }, []);
+
+  const mode = (activeUser.timezoneMode as TimezoneModeId) ?? "home";
+  const homeZone = activeUser.homeTimezone ?? null;
+  const effectiveZone = mode === "auto" ? deviceZone : (homeZone ?? deviceZone);
+
+  // Today, as Forge will record it for this user right now.
+  const previewDate = useMemo(() => {
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        timeZone: effectiveZone,
+        weekday: "long",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      }).format(new Date());
+    } catch {
+      return "—";
+    }
+  }, [effectiveZone]);
+
+  const travelling = mode === "home" && homeZone != null && homeZone !== deviceZone;
+
+  return (
+    <Card data-testid="card-timezone">
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <Globe className="h-4 w-4" />
+          Timezone
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-xs text-muted-foreground">
+          Controls which calendar day a workout is filed under. Time between workouts is always
+          measured from the exact moment you logged it, so your recovery and fatigue tracking stay
+          accurate no matter where you are.
+        </p>
+
+        <RadioGroup
+          value={mode}
+          onValueChange={(v) => onSave({ timezoneMode: v })}
+          data-testid="radio-group-timezone-mode"
+        >
+          {timezoneModeIds.map((id: TimezoneModeId) => (
+            <label
+              key={id}
+              htmlFor={`tzmode-${id}`}
+              className="flex items-start gap-3 rounded-md border p-3 cursor-pointer hover-elevate"
+              data-testid={`option-timezone-mode-${id}`}
+            >
+              <RadioGroupItem value={id} id={`tzmode-${id}`} className="mt-0.5" data-testid={`radio-timezone-mode-${id}`} />
+              <div className="space-y-0.5">
+                <Label htmlFor={`tzmode-${id}`} className="cursor-pointer">
+                  {timezoneModeLabels[id]}
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  {id === "home"
+                    ? "Recommended. Your training week stays on your home calendar even while travelling."
+                    : "Workouts are filed under the local date wherever you currently are."}
+                </p>
+              </div>
+            </label>
+          ))}
+        </RadioGroup>
+
+        {mode === "home" && (
+          <div className="space-y-2">
+            <Label className="text-xs text-muted-foreground">Home timezone</Label>
+            <Popover open={open} onOpenChange={setOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  role="combobox"
+                  aria-expanded={open}
+                  className="w-full justify-between font-normal"
+                  disabled={saving}
+                  data-testid="button-home-timezone"
+                >
+                  <span className="truncate">
+                    {homeZone ? describeZone(homeZone) : "Select your home timezone…"}
+                  </span>
+                  <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                <Command>
+                  <CommandInput placeholder="Search timezone…" data-testid="input-timezone-search" />
+                  <CommandList>
+                    <CommandEmpty>No timezone found.</CommandEmpty>
+                    <CommandGroup>
+                      {homeZone !== deviceZone && (
+                        <CommandItem
+                          value={`current device ${deviceZone}`}
+                          onSelect={() => {
+                            onSave({ homeTimezone: deviceZone });
+                            setOpen(false);
+                          }}
+                          data-testid="option-timezone-device"
+                        >
+                          <Check className="mr-2 h-4 w-4 opacity-0" />
+                          Use current location — {describeZone(deviceZone)}
+                        </CommandItem>
+                      )}
+                      {zones.map((tz) => (
+                        <CommandItem
+                          key={tz}
+                          value={tz.replace(/[_/]/g, " ")}
+                          onSelect={() => {
+                            onSave({ homeTimezone: tz });
+                            setOpen(false);
+                          }}
+                          data-testid={`option-timezone-${tz}`}
+                        >
+                          <Check className={`mr-2 h-4 w-4 ${homeZone === tz ? "opacity-100" : "opacity-0"}`} />
+                          {describeZone(tz)}
+                        </CommandItem>
+                      ))}
+                    </CommandGroup>
+                  </CommandList>
+                </Command>
+              </PopoverContent>
+            </Popover>
+          </div>
+        )}
+
+        <div className="rounded-md border bg-muted/40 p-3 space-y-1">
+          <p className="text-xs text-muted-foreground">Forge currently sees your date and time as</p>
+          <p className="text-sm font-medium" data-testid="text-timezone-preview">{previewDate}</p>
+          {travelling && (
+            <p className="text-xs text-muted-foreground pt-1" data-testid="text-timezone-travelling">
+              Your device is in {describeZone(deviceZone)}, but dates stay anchored to your home
+              timezone. Switch to “Follow device timezone” if you'd rather log against local dates.
+            </p>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 const WEEKDAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 // UI shows Mon–Sun left to right, but slots are stored keyed 0=Sun..6=Sat to match JS getDay().
@@ -602,7 +821,7 @@ export default function Settings() {
   const [pendingSplit, setPendingSplit] = useState<WorkoutSplitId | null>(null);
 
   const updatePreferences = useMutation({
-    mutationFn: async (prefs: Record<string, string>) => {
+    mutationFn: async (prefs: Record<string, string | null>) => {
       if (activeUserId == null) throw new Error("No active user");
       const res = await apiRequest("PATCH", `/api/users/${activeUserId}/preferences`, prefs);
       return res.json();
@@ -744,6 +963,12 @@ export default function Settings() {
           </div>
         </CardContent>
       </Card>
+
+      <TimezoneCard
+        activeUser={activeUser}
+        onSave={(prefs) => updatePreferences.mutate(prefs)}
+        saving={updatePreferences.isPending}
+      />
 
       {/* Training — Workout Split */}
       <Card data-testid="card-workout-split">

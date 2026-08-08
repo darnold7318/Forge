@@ -17,6 +17,14 @@ import {
   scheduleDays as scheduleDaysTable,
   bodyweightLogs as bodyweightLogsTable,
 } from "@shared/schema";
+import {
+  CLIENT_TZ_HEADER,
+  civilDateInZone,
+  civilMonthInZone,
+  isValidTimezone,
+  legacyInstantForCivilDate,
+  resolveEffectiveZone,
+} from "@shared/timezone";
 import { inArray, eq } from "drizzle-orm";
 import {
   insertExerciseSchema,
@@ -91,6 +99,52 @@ function startOfWeekWindow(referenceDate: Date, weeksAgo: number): { start: Date
 }
 
 // ---------------------------------------------------------------------------
+// Timezone resolution
+//
+// Civil dates ("what day is it?") must be computed in the user's effective
+// zone, never in the server's zone — the container runs in UTC, so using
+// toISOString() rolled every evening session onto the next day.
+//
+// The client sends its device zone on every request via X-Client-Timezone;
+// whether we honour it depends on the user's timezoneMode preference.
+// ---------------------------------------------------------------------------
+function clientZoneOf(req: Request): string | null {
+  const raw = req.header(CLIENT_TZ_HEADER);
+  return isValidTimezone(raw) ? raw : null;
+}
+
+/** The zone to use for civil-date math for the authenticated user. */
+function zoneOf(req: Request): string {
+  return resolveEffectiveZone(req.authUser ?? null, clientZoneOf(req));
+}
+
+/** Today's civil date (YYYY-MM-DD) as the user experiences it. */
+function todayFor(req: Request): string {
+  return civilDateInZone(new Date(), zoneOf(req));
+}
+
+/** This civil month (YYYY-MM) as the user experiences it. */
+function thisMonthFor(req: Request): string {
+  return civilMonthInZone(new Date(), zoneOf(req));
+}
+
+/**
+ * The true absolute instant a workout happened.
+ *
+ * Prefers the stored UTC instant. Legacy rows predating the timezone work
+ * only have a civil date, so they fall back to noon in the given zone — a
+ * neutral midpoint rather than midnight, which naive parsing would have
+ * placed on the previous evening for western zones.
+ */
+function workoutInstant(w: { date: string; startedAt?: string | null; tz?: string | null }, zone: string): Date {
+  if (w.startedAt) {
+    const parsed = new Date(w.startedAt);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return legacyInstantForCivilDate(w.date, w.tz && isValidTimezone(w.tz) ? w.tz : zone);
+}
+
+// ---------------------------------------------------------------------------
 // Build coaching-engine input shapes from raw DB rows
 // ---------------------------------------------------------------------------
 async function buildMuscleGroupLookup(): Promise<{
@@ -120,7 +174,7 @@ function toHistorySet(s: SetWithExercise): HistorySetInput {
 }
 
 /** Build full workout history (most-recent-first) as HistorySessionInput[] for a specific user. */
-async function buildHistory(userId: number): Promise<HistorySessionInput[]> {
+async function buildHistory(userId: number, zone: string = "UTC"): Promise<HistorySessionInput[]> {
   const workoutsList = await storage.getWorkouts(userId); // already ordered desc by date, id
   const allSets = await storage.getAllSets(userId);
 
@@ -157,7 +211,7 @@ async function buildHistory(userId: number): Promise<HistorySessionInput[]> {
       id: w.id,
       workoutTemplateId: w.workoutTemplateId ?? null,
       workoutName: w.name ?? "Workout",
-      startedAt: new Date(w.date),
+      startedAt: workoutInstant(w, zone),
       exercises: exercisesForSession,
     };
   });
@@ -417,7 +471,7 @@ export async function registerRoutes(
     const userId = getUserId(req, res);
     if (userId == null) return;
     const id = Number(req.params.id);
-    const history = await buildHistory(userId);
+    const history = await buildHistory(userId, zoneOf(req));
     const filtered = history
       .map((h) => ({ ...h, exercises: h.exercises.filter((e) => e.exerciseId === id) }))
       .filter((h) => h.exercises.length > 0);
@@ -600,7 +654,28 @@ export async function registerRoutes(
   app.post("/api/workouts", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
-    const parsed = insertWorkoutSchema.safeParse({ ...req.body, userId });
+
+    // Stamp timezone metadata server-side rather than trusting the client to
+    // get it right. `startedAt` is the absolute instant (drives all fatigue /
+    // elapsed-time math); `date` is the civil day in the user's effective zone
+    // and is frozen here so it never shifts if they later travel.
+    const zone = zoneOf(req);
+    const now = new Date();
+    const todayCivil = civilDateInZone(now, zone);
+    // An explicit date from the client means a backdated entry. We have no
+    // real clock time for those, so anchor them to noon local on that day.
+    const civilDate: string =
+      typeof req.body?.date === "string" && req.body.date.length > 0 ? req.body.date : todayCivil;
+    const startedAt =
+      civilDate === todayCivil ? now : legacyInstantForCivilDate(civilDate, zone);
+
+    const parsed = insertWorkoutSchema.safeParse({
+      ...req.body,
+      userId,
+      date: civilDate,
+      startedAt: startedAt.toISOString(),
+      tz: zone,
+    });
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
@@ -740,13 +815,14 @@ export async function registerRoutes(
     const allSets = await storage.getAllSets(userId);
 
     const now = new Date();
+    const zone = zoneOf(req);
     const weeksBack = req.query.weeksBack ? Number(req.query.weeksBack) : 0;
     const { start, end } = startOfWeekWindow(now, weeksBack);
 
     const inWindow = allSets.filter((s) => {
       const w = workoutMap.get(s.workoutId);
       if (!w) return false;
-      const d = new Date(w.date);
+      const d = workoutInstant(w, zone);
       return d >= start && d < end;
     });
 
@@ -785,13 +861,14 @@ export async function registerRoutes(
     const allSets = await storage.getAllSets(userId);
 
     const now = new Date();
+    const zone = zoneOf(req);
 
     function volumeForWeeksBack(weeksBack: number) {
       const { start, end } = startOfWeekWindow(now, weeksBack);
       const inWindow = allSets.filter((s) => {
         const w = workoutMap.get(s.workoutId);
         if (!w) return false;
-        const d = new Date(w.date);
+        const d = workoutInstant(w, zone);
         return d >= start && d < end;
       });
       const tagged = inWindow.map((s) => ({
@@ -835,7 +912,7 @@ export async function registerRoutes(
   app.get("/api/recovery", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
-    const history = await buildHistory(userId);
+    const history = await buildHistory(userId, zoneOf(req));
     const { lookup } = await buildMuscleGroupLookup();
     const states = evaluateRecovery(history, lookup);
     res.json(states);
@@ -845,7 +922,7 @@ export async function registerRoutes(
   app.get("/api/coach/fatigue-trend", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
-    const history = await buildHistory(userId);
+    const history = await buildHistory(userId, zoneOf(req));
     const signal = evaluateFatigueTrend(history);
     res.json(signal);
   });
@@ -855,7 +932,7 @@ export async function registerRoutes(
     const userId = getUserId(req, res);
     if (userId == null) return;
     const take = req.query.take ? Number(req.query.take) : 5;
-    const history = await buildHistory(userId);
+    const history = await buildHistory(userId, zoneOf(req));
     const records = getPersonalRecords(history, take);
     res.json(records.map((r) => ({ ...r, summary: personalRecordSummary(r) })));
   });
@@ -866,7 +943,7 @@ export async function registerRoutes(
     if (userId == null) return;
     const exercisesList = await storage.getExercises();
     const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
-    const history = await buildHistory(userId);
+    const history = await buildHistory(userId, zoneOf(req));
     const { lookup, nameById } = await buildMuscleGroupLookup();
     const recoveryStates = evaluateRecovery(history, lookup);
 
@@ -921,7 +998,7 @@ export async function registerRoutes(
   app.get("/api/schedule", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
-    const month = typeof req.query.month === "string" ? req.query.month : new Date().toISOString().slice(0, 7);
+    const month = typeof req.query.month === "string" ? req.query.month : thisMonthFor(req);
     await storage.continueGeneration(userId, month);
     const [startDate, endDate] = monthBounds(month);
     const result = await storage.getWorkoutSchedule(userId, startDate, endDate);
@@ -933,7 +1010,7 @@ export async function registerRoutes(
     if (userId == null) return;
     const parsed = generateScheduleSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
-    const month = typeof req.body.month === "string" ? req.body.month : new Date().toISOString().slice(0, 7);
+    const month = typeof req.body.month === "string" ? req.body.month : thisMonthFor(req);
     const result = await storage.generateScheduleMonth(userId, parsed.data, month);
     res.json(result);
   });
@@ -1003,9 +1080,9 @@ export async function registerRoutes(
       if (name) exercisePrimaryMuscleLookup.set(e.id, name);
     }
 
-    const history = (await buildHistory(userId)).slice(0, 50);
+    const history = (await buildHistory(userId, zoneOf(req))).slice(0, 50);
 
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = todayFor(req);
     const [monthStart, monthEnd] = monthBounds(todayIso.slice(0, 7));
     await storage.continueGeneration(userId, todayIso.slice(0, 7));
     const scheduleRow = await storage.getWorkoutSchedule(userId, monthStart, monthEnd);
@@ -1036,6 +1113,7 @@ export async function registerRoutes(
       exercisePrimaryMuscleLookup,
       muscleGroupLookup: lookup,
       schedule: scheduleForDashboard,
+      zone: zoneOf(req),
     });
 
     res.json(snapshot);
@@ -1140,13 +1218,13 @@ export async function registerRoutes(
       data: buildUserExport(user),
     };
 
-    const filename = `forge-backup-${user.name.replace(/[^a-z0-9-_]+/gi, "_")}-${new Date().toISOString().slice(0, 10)}.json`;
+    const filename = `forge-backup-${user.name.replace(/[^a-z0-9-_]+/gi, "_")}-${todayFor(req)}.json`;
     res.setHeader("Content-Type", "application/json");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(JSON.stringify(payload, null, 2));
   });
 
-  app.get("/api/export/all", requireAdmin, async (_req, res) => {
+  app.get("/api/export/all", requireAdmin, async (req, res) => {
     const allUsers = db.select().from(usersTable).orderBy(usersTable.id).all();
     const allMuscleGroups = db.select().from(muscleGroupsTable).all();
     const allExercises = db.select().from(exercisesTable).all();
@@ -1164,7 +1242,7 @@ export async function registerRoutes(
       },
     };
 
-    const filename = `forge-full-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    const filename = `forge-full-backup-${todayFor(req)}.json`;
     res.setHeader("Content-Type", "application/json");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(JSON.stringify(payload, null, 2));

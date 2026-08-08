@@ -23,6 +23,13 @@ export const users = sqliteTable("users", {
   themeMode: text("theme_mode").notNull().default("dark"),
   // Preferred workout split — stored preference only, informational.
   workoutSplit: text("workout_split").notNull().default("ppl"),
+  // Timezone handling. "home" (default) anchors all calendar dates to
+  // homeTimezone so training weeks stay stable while travelling. "auto"
+  // follows whatever timezone the device reports on each request.
+  timezoneMode: text("timezone_mode").notNull().default("home"),
+  // IANA zone name, e.g. "America/Los_Angeles". Null until the user picks one;
+  // the client seeds it from the device zone on first load.
+  homeTimezone: text("home_timezone"),
 });
 
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, passwordHash: true, isAdmin: true });
@@ -54,6 +61,14 @@ export type ThemeModeId = (typeof themeModeIds)[number];
 export const workoutSplitIds = ["ppl", "upper_lower", "full_body", "bro_split", "custom"] as const;
 export type WorkoutSplitId = (typeof workoutSplitIds)[number];
 
+export const timezoneModeIds = ["home", "auto"] as const;
+export type TimezoneModeId = (typeof timezoneModeIds)[number];
+
+export const timezoneModeLabels: Record<TimezoneModeId, string> = {
+  home: "Anchor to home timezone",
+  auto: "Follow device timezone",
+};
+
 export const workoutSplitLabels: Record<string, string> = {
   ppl: "Push / Pull / Legs",
   upper_lower: "Upper / Lower",
@@ -62,6 +77,16 @@ export const workoutSplitLabels: Record<string, string> = {
   custom: "Custom",
 };
 
+/** True for a syntactically usable IANA zone name on this runtime. */
+export function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const updateUserPreferencesSchema = createInsertSchema(users)
   .pick({ themeColor: true, themeMode: true, workoutSplit: true })
   .partial()
@@ -69,6 +94,12 @@ export const updateUserPreferencesSchema = createInsertSchema(users)
     themeColor: z.enum(themeColorIds).optional(),
     themeMode: z.enum(themeModeIds).optional(),
     workoutSplit: z.enum(workoutSplitIds).optional(),
+    timezoneMode: z.enum(timezoneModeIds).optional(),
+    homeTimezone: z
+      .string()
+      .refine(isValidTimezone, "Unknown timezone")
+      .nullable()
+      .optional(),
   });
 
 export type UpdateUserPreferences = z.infer<typeof updateUserPreferencesSchema>;
@@ -274,7 +305,17 @@ export const workouts = sqliteTable("workouts", {
   userId: integer("user_id")
     .notNull()
     .references(() => users.id),
-  date: text("date").notNull(), // ISO date string (startedAt)
+  // Local civil date (YYYY-MM-DD) in the user's effective zone, FROZEN at the
+  // moment the workout is logged. This is the source of truth for "which
+  // calendar day" — calendar rendering, history grouping, schedule matching.
+  // It deliberately never shifts if the user later travels or changes zones.
+  date: text("date").notNull(),
+  // Absolute UTC instant (full ISO 8601, e.g. "2026-07-16T02:30:00.000Z").
+  // Source of truth for ALL elapsed-time math: fatigue decay, days-since-
+  // trained, rest between sessions. Timezone-independent by construction.
+  startedAt: text("started_at"),
+  // IANA zone in effect when the workout was logged, for display/auditing.
+  tz: text("tz"),
   name: text("name"), // e.g. "Push Day"
   notes: text("notes"),
   workoutTemplateId: integer("workout_template_id").references(

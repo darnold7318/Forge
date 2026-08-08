@@ -117,8 +117,16 @@ function colorForLabel(label: string | null): string {
 }
 
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  // Device-local civil date. Must NOT be toISOString() — that is the UTC date,
+  // which rolls over mid-evening for western zones and highlighted the wrong
+  // day on the calendar.
+  return new Intl.DateTimeFormat("en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
 }
+
 
 function monthKey(year: number, month0: number): string {
   return `${year}-${String(month0 + 1).padStart(2, "0")}`;
@@ -441,14 +449,17 @@ export default function SchedulePage() {
 
   // Build the calendar grid: leading/trailing days from adjacent months to fill full weeks.
   const gridCells = useMemo(() => {
-    const firstOfMonth = new Date(viewYear, viewMonth, 1);
-    const startOffset = firstOfMonth.getDay(); // 0=Sun
-    const gridStart = new Date(viewYear, viewMonth, 1 - startOffset);
+    const firstOfMonth = new Date(Date.UTC(viewYear, viewMonth, 1));
+    const startOffset = firstOfMonth.getUTCDay(); // 0=Sun
+    // Built with UTC-based civil arithmetic. Using local Date objects and then
+    // toISOString() shifted every cell back a day for zones east of UTC.
     const cells: { date: string; isCurrentMonth: boolean }[] = [];
     for (let i = 0; i < 42; i++) {
-      const d = new Date(gridStart.getTime() + i * 86400000);
-      const iso = d.toISOString().slice(0, 10);
-      cells.push({ date: iso, isCurrentMonth: d.getMonth() === viewMonth });
+      const d = new Date(Date.UTC(viewYear, viewMonth, 1 - startOffset + i));
+      cells.push({
+        date: d.toISOString().slice(0, 10),
+        isCurrentMonth: d.getUTCMonth() === viewMonth && d.getUTCFullYear() === viewYear,
+      });
     }
     // Trim trailing all-next-month rows beyond the 5th week if the 6th week is entirely outside the month.
     const lastRowStart = 35;
@@ -657,7 +668,7 @@ export default function SchedulePage() {
               <ChevronLeft className="h-4 w-4" />
             </Button>
             <CardTitle className="text-base" data-testid="text-current-month">
-              {new Date(viewYear, viewMonth, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" })}
+              {new Date(Date.UTC(viewYear, viewMonth, 1)).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" })}
             </CardTitle>
             <Button variant="ghost" size="icon" onClick={goNextMonth} data-testid="button-next-month">
               <ChevronRight className="h-4 w-4" />

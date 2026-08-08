@@ -40,9 +40,19 @@ interface WorkoutWithSets {
 }
 
 function formatDate(dateStr: string) {
-  const d = new Date(dateStr);
+  // Civil dates (YYYY-MM-DD) are calendar days, not instants: pin the
+  // formatter to UTC so a workout logged on the 16th never renders as the
+  // 15th for viewers west of UTC.
+  const civil = /^\d{4}-\d{2}-\d{2}$/.test(dateStr);
+  const d = new Date(civil ? `${dateStr}T00:00:00Z` : dateStr);
   if (Number.isNaN(d.getTime())) return dateStr;
-  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+  return d.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    ...(civil ? { timeZone: "UTC" } : {}),
+  });
 }
 
 function WorkoutRow({ workout, onDelete }: { workout: WorkoutWithSets; onDelete: () => void }) {

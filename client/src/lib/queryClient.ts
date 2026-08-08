@@ -8,6 +8,24 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/**
+ * The device's IANA timezone, sent on every request.
+ *
+ * The server needs this to compute civil dates ("what day is it for this
+ * user?") correctly — it runs in UTC, so without this an evening workout
+ * would be filed under tomorrow's date. Whether the server actually honours
+ * the device zone or overrides it with the user's configured home zone is
+ * decided server-side by their timezoneMode preference.
+ */
+function timezoneHeaders(): Record<string, string> {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return tz ? { "X-Client-Timezone": tz } : {};
+  } catch {
+    return {};
+  }
+}
+
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
     const text = (await res.text()) || res.statusText;
@@ -25,6 +43,7 @@ export async function apiRequest(
     headers: {
       ...(data ? { "Content-Type": "application/json" } : {}),
       ...authHeaders(),
+      ...timezoneHeaders(),
     },
     body: data ? JSON.stringify(data) : undefined,
     // No cookies are used for auth (see auth-token.ts) — the Authorization
@@ -48,7 +67,7 @@ export const getQueryFn: <T>(options: {
   async ({ queryKey }) => {
     const res = await fetch(`${API_BASE}${queryKey.join("/")}`, {
       // See apiRequest() above — credentials must not be "include".
-      headers: authHeaders(),
+      headers: { ...authHeaders(), ...timezoneHeaders() },
     });
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {

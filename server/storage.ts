@@ -51,6 +51,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq, desc, and, gte } from "drizzle-orm";
 import { MUSCLE_GROUPS, EXERCISES, WORKOUT_TEMPLATES } from "./seed-data";
+import { addCivilDays } from "@shared/timezone";
 
 const DB_PATH = process.env.DATABASE_PATH || "data.db";
 console.log("[startup-diagnostic] storage.ts loading, cwd=", process.cwd(), "DB_PATH=", DB_PATH);
@@ -131,6 +132,8 @@ function ensureTables() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id),
       date TEXT NOT NULL,
+      started_at TEXT,
+      tz TEXT,
       name TEXT,
       notes TEXT,
       workout_template_id INTEGER REFERENCES workout_templates(id)
@@ -217,6 +220,8 @@ function ensureTables() {
     { column: "workout_split", ddl: "ALTER TABLE users ADD COLUMN workout_split TEXT NOT NULL DEFAULT 'ppl'" },
     { column: "password_hash", ddl: "ALTER TABLE users ADD COLUMN password_hash TEXT" },
     { column: "is_admin", ddl: "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0" },
+    { column: "timezone_mode", ddl: "ALTER TABLE users ADD COLUMN timezone_mode TEXT NOT NULL DEFAULT 'home'" },
+    { column: "home_timezone", ddl: "ALTER TABLE users ADD COLUMN home_timezone TEXT" },
   ];
   for (const { column, ddl } of migrations) {
     if (!existingColumns.has(column)) {
@@ -227,6 +232,54 @@ function ensureTables() {
         // PRAGMA check and this statement — don't crash server startup.
       }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Migration: workouts gained an absolute-instant column.
+  //
+  // Originally a workout stored only `date` (YYYY-MM-DD). That was ambiguous in
+  // two ways: it was computed from the server's UTC clock (so evening sessions
+  // were filed under the next day), and it carried no time at all (so the
+  // recovery model, which decays fatigue on an hourly half-life, treated every
+  // session on a given day as happening at the same instant).
+  //
+  // `started_at` now holds the true UTC instant and `tz` records the zone in
+  // effect when the workout was logged. `date` keeps its meaning as the frozen
+  // civil calendar day.
+  // -------------------------------------------------------------------------
+  const workoutColumns = new Set(
+    (sqlite.prepare("PRAGMA table_info(workouts)").all() as { name: string }[]).map((c) => c.name),
+  );
+  for (const [column, ddl] of [
+    ["started_at", "ALTER TABLE workouts ADD COLUMN started_at TEXT"],
+    ["tz", "ALTER TABLE workouts ADD COLUMN tz TEXT"],
+  ] as const) {
+    if (!workoutColumns.has(column)) {
+      try {
+        sqlite.exec(ddl);
+      } catch {
+        // Column already added by a concurrent boot — safe to ignore.
+      }
+    }
+  }
+
+  // Backfill legacy rows that have a civil date but no instant. We can't know
+  // the real clock time retroactively, so anchor to 12:00 UTC: a neutral
+  // midpoint that bounds the worst-case error at ~12h, rather than midnight,
+  // which is maximally wrong and (parsed naively) lands on the previous
+  // evening for western zones. Runs once — afterwards started_at is non-null.
+  try {
+    const pending = sqlite
+      .prepare("SELECT COUNT(*) AS c FROM workouts WHERE started_at IS NULL")
+      .get() as { c: number };
+    if (pending.c > 0) {
+      sqlite
+        .prepare("UPDATE workouts SET started_at = date || 'T12:00:00.000Z' WHERE started_at IS NULL")
+        .run();
+      console.log(`[migration] backfilled started_at for ${pending.c} legacy workout row(s)`);
+    }
+  } catch (err) {
+    console.error("[migration] failed to backfill workouts.started_at:", err);
   }
 
   // Migration: schedule_days may pre-date the has_core_addon / is_user_placed columns.
@@ -408,7 +461,7 @@ export interface IStorage {
   renameUser(id: number, name: string): Promise<UserRecord | undefined>;
   updateUserPreferences(
     id: number,
-    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit">>,
+    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "timezoneMode" | "homeTimezone">>,
   ): Promise<UserRecord | undefined>;
 
   // Muscle groups (shared/global)
@@ -500,7 +553,7 @@ export class DatabaseStorage implements IStorage {
 
   async updateUserPreferences(
     id: number,
-    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit">>,
+    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "timezoneMode" | "homeTimezone">>,
   ): Promise<UserRecord | undefined> {
     return db.update(users).set(prefs).where(eq(users.id, id)).returning().get();
   }
@@ -960,15 +1013,16 @@ export class DatabaseStorage implements IStorage {
     let leadInDates: string[] = [];
     if (isFirstEverGeneration && !isCustom) {
       const [monthStart] = monthBounds(yearMonth);
-      const startDow = new Date(monthStart + "T00:00:00").getDay();
+      // Pure civil-date arithmetic: parse as UTC explicitly so this stays
+      // correct regardless of the server's own timezone. (Previously this
+      // relied on the container happening to run in UTC.)
+      const startDow = new Date(monthStart + "T00:00:00Z").getUTCDay();
       const targetDow = input.startDayOfWeek;
       const daysUntilTarget = (targetDow - startDow + 7) % 7;
       if (daysUntilTarget > 0) {
         // Leading days before the first target weekday occurrence get marked Rest below.
-        const lead = new Date(monthStart + "T00:00:00");
         for (let i = 0; i < daysUntilTarget; i++) {
-          leadInDates.push(lead.toISOString().slice(0, 10));
-          lead.setDate(lead.getDate() + 1);
+          leadInDates.push(addCivilDays(monthStart, i));
         }
       }
       initialCursor = 0;
@@ -1063,7 +1117,7 @@ export class DatabaseStorage implements IStorage {
         const existing = existingByDate.get(date);
         if (existing && existing.isManualOverride) continue; // never touch manual days
 
-        const dow = new Date(date + "T00:00:00").getDay();
+        const dow = new Date(date + "T00:00:00Z").getUTCDay();
         const isRestDay = weeklyRestDays.includes(dow);
         const slot = weeklyTemplate[dow];
 
@@ -1085,7 +1139,7 @@ export class DatabaseStorage implements IStorage {
       const existing = existingByDate.get(date);
       if (existing && existing.isManualOverride) continue; // never touch manual days
 
-      const dow = new Date(date + "T00:00:00").getDay();
+      const dow = new Date(date + "T00:00:00Z").getUTCDay();
       const isRestDay = weeklyRestDays.includes(dow);
 
       if (isRestDay) {

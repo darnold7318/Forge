@@ -15,6 +15,7 @@ import {
   type ExerciseRole,
   type FailureTarget,
 } from "./schema";
+import { civilDateInZone } from "./timezone";
 
 const fmt1 = (n: number) => {
   // Mimic C#'s "0.#" format: up to 1 decimal, trimmed if whole number.
@@ -1111,6 +1112,12 @@ export interface GetDashboardSnapshotArgs {
   muscleGroupLookup: MuscleGroupLookup;
   now?: Date;
   schedule?: DashboardScheduleInput | null;
+  /**
+   * IANA zone used for anything the user reads as a wall-clock time or a
+   * day count. Defaults to UTC, which is only correct on a UTC device — the
+   * server always passes the user's effective zone.
+   */
+  zone?: string;
 }
 
 /** The calendar model already resolves "today" to a single row; this just reports whether one exists. */
@@ -1124,6 +1131,7 @@ function resolveScheduledSlot(
 export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardSnapshot {
   const { templates, history, exerciseNameLookup, exercisePrimaryMuscleLookup, muscleGroupLookup } = args;
   const now = args.now ?? new Date();
+  const zone = args.zone ?? "UTC";
 
   const fatigue = evaluateFatigueTrend(history);
   const recoveryStates = evaluateRecovery(history, muscleGroupLookup, now);
@@ -1161,11 +1169,11 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
       todaysWorkoutName: "Rest Day",
       workoutStatus: "Rest Day",
       lastWorkoutText: lastSession
-        ? `Last workout: ${lastSession.workoutName} on ${lastSession.startedAt.toLocaleString()}`
+        ? `Last workout: ${lastSession.workoutName} on ${formatInstantInZone(lastSession.startedAt, zone)}`
         : "No workouts saved yet",
       recoveryText: resolveRecoveryText(
         lastSession
-          ? Math.max(0, Math.floor((dateOnly(now).getTime() - dateOnly(lastSession.startedAt).getTime()) / (24 * 60 * 60 * 1000)))
+          ? civilDaysBetween(lastSession.startedAt, now, zone)
           : null,
         resolveOverallRecovery(recoveryStates),
       ),
@@ -1205,7 +1213,7 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
 
   const templateExercises = [...selectedTemplate.exercises].sort((a, b) => a.exerciseOrder - b.exerciseOrder);
   const daysSinceLastWorkout = lastSession
-    ? Math.max(0, Math.floor((dateOnly(now).getTime() - dateOnly(lastSession.startedAt).getTime()) / (24 * 60 * 60 * 1000)))
+    ? civilDaysBetween(lastSession.startedAt, now, zone)
     : null;
   const overallRecovery = resolveOverallRecovery(recoveryStates);
 
@@ -1213,7 +1221,7 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
     todaysWorkoutName: selectedTemplate.name,
     workoutStatus: fatigue.deloadSuggested ? "Deload Suggested" : resolveWorkoutStatus(daysSinceLastWorkout, overallRecovery),
     lastWorkoutText: lastSession
-      ? `Last workout: ${lastSession.workoutName} on ${lastSession.startedAt.toLocaleString()}`
+      ? `Last workout: ${lastSession.workoutName} on ${formatInstantInZone(lastSession.startedAt, zone)}`
       : "No workouts saved yet",
     recoveryText: resolveRecoveryText(daysSinceLastWorkout, overallRecovery),
     fatigueStatus: fatigue.status,
@@ -1260,8 +1268,33 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
   return snapshot;
 }
 
-function dateOnly(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+/**
+ * Whole calendar days between two instants, counted in `zone`.
+ *
+ * Previously this used the *server's* local date, which on a UTC host meant a
+ * Tuesday-evening Pacific workout was already "yesterday". Counting civil days
+ * in the user's own zone makes "2 days ago" mean what they'd say out loud.
+ */
+function civilDaysBetween(from: Date, to: Date, zone: string): number {
+  const a = Date.parse(`${civilDateInZone(from, zone)}T00:00:00Z`);
+  const b = Date.parse(`${civilDateInZone(to, zone)}T00:00:00Z`);
+  return Math.max(0, Math.round((b - a) / 86400000));
+}
+
+/** Wall-clock date+time of an instant, rendered in the user's zone. */
+function formatInstantInZone(d: Date, zone: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: zone,
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(d);
+  } catch {
+    return d.toISOString();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1477,8 +1510,10 @@ export function monthBounds(yearMonth: string): [string, string] {
 /** Enumerate every date (YYYY-MM-DD) from startDate to endDate, inclusive. */
 export function enumerateDates(startDate: string, endDate: string): string[] {
   const dates: string[] = [];
-  let cursor = new Date(startDate + "T00:00:00");
-  const end = new Date(endDate + "T00:00:00");
+  // Parsed as UTC explicitly: these are civil dates, and enumerating them must
+  // not depend on the host's timezone (or drift across a DST boundary).
+  let cursor = new Date(startDate + "T00:00:00Z");
+  const end = new Date(endDate + "T00:00:00Z");
   while (cursor <= end) {
     dates.push(cursor.toISOString().slice(0, 10));
     cursor = new Date(cursor.getTime() + 86400000);
