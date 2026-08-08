@@ -181,6 +181,14 @@ function ExercisePicker({
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const sortedExercises = useMemo(
+    () =>
+      [...exercises].sort(
+        (a, b) =>
+          a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) || a.id - b.id,
+      ),
+    [exercises],
+  );
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -222,7 +230,7 @@ function ExercisePicker({
               </div>
             </CommandEmpty>
             <CommandGroup>
-              {exercises.map((ex) => (
+              {sortedExercises.map((ex) => (
                 <CommandItem
                   key={ex.id}
                   value={ex.name}
