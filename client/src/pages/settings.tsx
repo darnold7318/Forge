@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2, Trash2, ShieldCheck, ShieldOff, UserPlus, KeyRound, LogOut, Globe, ChevronsUpDown } from "lucide-react";
+import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2, Trash2, ShieldCheck, ShieldOff, UserPlus, KeyRound, LogOut, Globe, ChevronsUpDown, UserCog } from "lucide-react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -477,6 +477,266 @@ async function downloadResponse(res: Response, fallbackFilename: string) {
 
 // Every logged-in user can back up their own data. Admins additionally get
 // a "download everyone" button in the Account Management card below.
+// ---------------------------------------------------------------------------
+// Account — self-service password change and profile deletion.
+//
+// Mirrors what an admin can do to any account, scoped to the signed-in user.
+// Both actions re-verify the current password: Forge keeps people signed in,
+// so an unattended session shouldn't be able to seize or erase an account.
+// ---------------------------------------------------------------------------
+/** apiRequest throws `Error("400: {\"message\":\"...\"}")` — surface just the message. */
+function errorMessage(err: Error, fallback: string): string {
+  const body = err.message.replace(/^\d+:\s*/, "");
+  try {
+    return JSON.parse(body).message || fallback;
+  } catch {
+    return body || fallback;
+  }
+}
+
+function AccountCard({ activeUser, onDeleted }: { activeUser: User; onDeleted: () => void }) {
+  const { toast } = useToast();
+  const [pwOpen, setPwOpen] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [confirmName, setConfirmName] = useState("");
+
+  const resetPwForm = () => {
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+  };
+  const resetDeleteForm = () => {
+    setDeletePassword("");
+    setConfirmName("");
+  };
+
+  const changePassword = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("PATCH", `/api/users/${activeUser.id}/password`, {
+        currentPassword,
+        password: newPassword,
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      setPwOpen(false);
+      resetPwForm();
+      toast({ title: "Password changed" });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Couldn't change password",
+        description: errorMessage(err, "Please try again."),
+        variant: "destructive",
+      });
+    },
+  });
+
+  const deleteProfile = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("DELETE", `/api/users/${activeUser.id}`, {
+        password: deletePassword,
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      setDeleteOpen(false);
+      resetDeleteForm();
+      toast({ title: "Profile deleted" });
+      onDeleted();
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Couldn't delete profile",
+        description: errorMessage(err, "Please try again."),
+        variant: "destructive",
+      });
+    },
+  });
+
+  const pwMismatch = confirmPassword.length > 0 && newPassword !== confirmPassword;
+  const pwValid = newPassword.length >= 4 && newPassword === confirmPassword && currentPassword.length > 0;
+  const deleteValid = confirmName === activeUser.name && deletePassword.length > 0;
+
+  return (
+    <Card data-testid="card-account">
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <UserCog className="h-4 w-4" />
+          Account
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex items-center justify-between gap-4 rounded-md border p-3">
+          <div className="space-y-0.5">
+            <p className="text-sm font-medium">Password</p>
+            <p className="text-xs text-muted-foreground">Change the password for {activeUser.name}.</p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5 shrink-0"
+            onClick={() => setPwOpen(true)}
+            data-testid="button-change-password"
+          >
+            <KeyRound className="h-3.5 w-3.5" />
+            Change
+          </Button>
+        </div>
+
+        <div className="flex items-center justify-between gap-4 rounded-md border border-destructive/40 p-3">
+          <div className="space-y-0.5">
+            <p className="text-sm font-medium">Delete profile</p>
+            <p className="text-xs text-muted-foreground">
+              Permanently erases your account and all of your workout history.
+            </p>
+          </div>
+          <Button
+            variant="destructive"
+            size="sm"
+            className="gap-1.5 shrink-0"
+            onClick={() => setDeleteOpen(true)}
+            data-testid="button-delete-own-profile"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Delete
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Want a copy of your data first? Use Backup &amp; Export below.
+        </p>
+      </CardContent>
+
+      {/* Change password */}
+      <Dialog
+        open={pwOpen}
+        onOpenChange={(open) => {
+          setPwOpen(open);
+          if (!open) resetPwForm();
+        }}
+      >
+        <DialogContent data-testid="dialog-change-password">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <KeyRound className="h-4 w-4" /> Change password
+            </DialogTitle>
+            <DialogDescription>Enter your current password, then choose a new one.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="current-password">Current password</Label>
+              <Input
+                id="current-password"
+                type="password"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                data-testid="input-current-password"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="new-password">New password</Label>
+              <Input
+                id="new-password"
+                type="password"
+                autoComplete="new-password"
+                placeholder="At least 4 characters"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                data-testid="input-new-password"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="confirm-password">Confirm new password</Label>
+              <Input
+                id="confirm-password"
+                type="password"
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                data-testid="input-confirm-password"
+              />
+              {pwMismatch && (
+                <p className="text-xs text-destructive" data-testid="text-password-mismatch">
+                  Passwords don't match.
+                </p>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={() => changePassword.mutate()}
+              disabled={!pwValid || changePassword.isPending}
+              data-testid="button-confirm-change-password"
+            >
+              {changePassword.isPending ? "Saving..." : "Change password"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete own profile */}
+      <Dialog
+        open={deleteOpen}
+        onOpenChange={(open) => {
+          setDeleteOpen(open);
+          if (!open) resetDeleteForm();
+        }}
+      >
+        <DialogContent data-testid="dialog-delete-own-profile">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-destructive">
+              <Trash2 className="h-4 w-4" /> Delete your profile?
+            </DialogTitle>
+            <DialogDescription>
+              This permanently deletes {activeUser.name} along with every workout, set, template and
+              schedule on the account. This can't be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="delete-confirm-name">
+                Type <span className="font-mono font-semibold">{activeUser.name}</span> to confirm
+              </Label>
+              <Input
+                id="delete-confirm-name"
+                value={confirmName}
+                onChange={(e) => setConfirmName(e.target.value)}
+                data-testid="input-delete-confirm-name"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="delete-password">Your password</Label>
+              <Input
+                id="delete-password"
+                type="password"
+                autoComplete="current-password"
+                value={deletePassword}
+                onChange={(e) => setDeletePassword(e.target.value)}
+                data-testid="input-delete-password"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="destructive"
+              onClick={() => deleteProfile.mutate()}
+              disabled={!deleteValid || deleteProfile.isPending}
+              data-testid="button-confirm-delete-own-profile"
+            >
+              {deleteProfile.isPending ? "Deleting..." : "Delete my profile"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
 function BackupExportCard() {
   const { activeUser } = useActiveUser();
   const { toast } = useToast();
@@ -1008,6 +1268,8 @@ export default function Settings() {
       </Card>
 
       {activeUser.workoutSplit === "custom" && <CustomTemplateBuilder />}
+
+      <AccountCard activeUser={activeUser} onDeleted={() => logout()} />
 
       <BackupExportCard />
 

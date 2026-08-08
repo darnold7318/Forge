@@ -4,7 +4,7 @@ import type { Server } from "node:http";
 import { z } from "zod";
 import { storage, parseExercise, db } from "./storage";
 import type { SetWithExercise } from "./storage";
-import { hashPassword, toPublicUser, requireAuth, requireAdmin, login as loginUser, issueTokenFor, logout as logoutToken } from "./auth";
+import { hashPassword, verifyPassword, toPublicUser, requireAuth, requireAdmin, login as loginUser, issueTokenFor, logout as logoutToken } from "./auth";
 import {
   users as usersTable,
   muscleGroups as muscleGroupsTable,
@@ -333,10 +333,28 @@ export async function registerRoutes(
   app.patch("/api/users/:id/password", requireAuth, async (req, res) => {
     const id = Number(req.params.id);
     if (!isSelfOrAdmin(req)) return res.status(403).json({ message: "Not allowed" });
-    const parsed = z.object({ password: z.string().min(4) }).safeParse(req.body);
+    const parsed = z
+      .object({ password: z.string().min(4), currentPassword: z.string().optional() })
+      .safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: "Password must be at least 4 characters" });
     }
+
+    // Admins keep the existing no-questions-asked reset (they can already reset
+    // anyone, so proving their own password adds nothing). Everyone else is
+    // changing their own password and must prove they know the current one,
+    // otherwise a borrowed unlocked session could silently take over the
+    // account. Accounts with no password set yet are exempt so they can adopt one.
+    if (!req.authUser!.isAdmin) {
+      const existingHash = db.select().from(usersTable).where(eq(usersTable.id, id)).get()?.passwordHash;
+      if (existingHash) {
+        const supplied = parsed.data.currentPassword ?? "";
+        if (!supplied || !verifyPassword(supplied, existingHash)) {
+          return res.status(400).json({ message: "Current password is incorrect" });
+        }
+      }
+    }
+
     const updated = db
       .update(usersTable)
       .set({ passwordHash: hashPassword(parsed.data.password) })
@@ -1125,18 +1143,42 @@ export async function registerRoutes(
   // the frontend is expected to confirm with the user and offer a backup
   // download first. Refuses to delete the last remaining profile.
   // -------------------------------------------------------------------------
-  app.delete("/api/users/:userId", requireAdmin, async (req, res) => {
+  // Admins can delete anyone; everyone else may delete only their own profile.
+  // Either way this erases the account and every workout, set, template,
+  // schedule and bodyweight log attached to it — there is no soft-delete.
+  app.delete("/api/users/:userId", requireAuth, async (req, res) => {
     const userId = Number(req.params.userId);
     if (Number.isNaN(userId)) {
       return res.status(400).json({ message: "Invalid user id" });
     }
+    if (!isSelfOrAdmin(req)) return res.status(403).json({ message: "Not allowed" });
+
     const user = db.select().from(usersTable).where(eq(usersTable.id, userId)).get();
     if (!user) {
       return res.status(404).json({ message: "Profile not found" });
     }
-    const totalUsers = db.select().from(usersTable).all().length;
-    if (totalUsers <= 1) {
+
+    // Deleting your own account is destructive and irreversible, so re-verify
+    // the password: an unattended unlocked session shouldn't be able to wipe
+    // someone's training history.
+    const isSelf = req.authUser!.id === userId;
+    if (isSelf && user.passwordHash) {
+      const parsed = z.object({ password: z.string() }).safeParse(req.body);
+      if (!parsed.success || !verifyPassword(parsed.data.password, user.passwordHash)) {
+        return res.status(400).json({ message: "Password is incorrect" });
+      }
+    }
+
+    const allUsers = db.select().from(usersTable).all();
+    if (allUsers.length <= 1) {
       return res.status(400).json({ message: "Can't delete the only remaining profile" });
+    }
+    // Never let the last admin disappear — recovering from an admin-less
+    // database means hand-editing SQLite on the server.
+    if (user.isAdmin && allUsers.filter((u) => u.isAdmin).length <= 1) {
+      return res.status(400).json({
+        message: "You're the only admin. Promote another account to admin before deleting this one.",
+      });
     }
 
     const templates = db.select().from(workoutTemplatesTable).where(eq(workoutTemplatesTable.userId, userId)).all();
@@ -1159,6 +1201,9 @@ export async function registerRoutes(
     }
     db.delete(bodyweightLogsTable).where(eq(bodyweightLogsTable.userId, userId)).run();
     db.delete(usersTable).where(eq(usersTable.id, userId)).run();
+
+    // Drop the now-orphaned session so the bearer token can't outlive the account.
+    if (isSelf) logoutToken(req);
 
     res.json({ success: true });
   });
