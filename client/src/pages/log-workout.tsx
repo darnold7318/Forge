@@ -797,7 +797,7 @@ export default function LogWorkout() {
                 <span>Weight</span>
                 <span>Reps</span>
                 <span>RIR</span>
-                <span className="text-center">Warm</span>
+                <span className="text-center">Warm-Up</span>
                 <span />
                 <span />
               </div>
