@@ -16,3 +16,7 @@ data.db.bak*
 
 *.log
 .DS_Store
+/.vs/Forge/FileContentIndex
+/.vs/Forge/v17
+/.vs
+/.gitignore
