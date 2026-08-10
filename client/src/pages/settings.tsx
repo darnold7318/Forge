@@ -50,10 +50,13 @@ import {
   themeColorIds,
   workoutSplitIds,
   workoutSplitLabels,
+  trainingLevelIds,
+  trainingLevelLabels,
   timezoneModeIds,
   timezoneModeLabels,
   type ThemeColorId,
   type WorkoutSplitId,
+  type TrainingLevelId,
   type TimezoneModeId,
   type CustomWeeklySlot,
   type User,
@@ -1221,6 +1224,35 @@ export default function Settings() {
               );
             })}
           </div>
+        </CardContent>
+      </Card>
+
+      {/* Training experience controls feature complexity only. */}
+      <Card data-testid="card-training-experience">
+        <CardHeader>
+          <CardTitle className="text-base">Training Experience</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <Label htmlFor="training-level">Experience level</Label>
+          <Select
+            value={activeUser.trainingLevel}
+            onValueChange={(value) => updatePreferences.mutate({ trainingLevel: value })}
+            disabled={updatePreferences.isPending}
+          >
+            <SelectTrigger id="training-level" data-testid="select-training-level">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {trainingLevelIds.map((level: TrainingLevelId) => (
+                <SelectItem key={level} value={level}>
+                  {trainingLevelLabels[level]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Advanced reveals additional exercise options. This does not change your training recommendations.
+          </p>
         </CardContent>
       </Card>
 

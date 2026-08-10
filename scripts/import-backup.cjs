@@ -213,7 +213,7 @@ let userCount = 0,
   stimulusOverrideCount = 0;
 
 const insertUser = db.prepare(
-  `INSERT INTO users (id, name, password_hash, is_admin, color_accent, theme_color, theme_mode, workout_split, timezone_mode, home_timezone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  `INSERT INTO users (id, name, password_hash, is_admin, color_accent, theme_color, theme_mode, workout_split, training_level, timezone_mode, home_timezone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const insertTemplate = db.prepare(
   `INSERT INTO workout_templates (id, user_id, name, notes) VALUES (?, ?, ?, ?)`
@@ -255,6 +255,7 @@ const importAll = db.transaction(() => {
       u.themeColor,
       u.themeMode,
       u.workoutSplit,
+      u.trainingLevel || "advanced",
       u.timezoneMode || "home",
       u.homeTimezone || null
     );

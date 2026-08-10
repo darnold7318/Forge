@@ -85,7 +85,8 @@ function ensureTables() {
       color_accent TEXT,
       theme_color TEXT NOT NULL DEFAULT 'green',
       theme_mode TEXT NOT NULL DEFAULT 'dark',
-      workout_split TEXT NOT NULL DEFAULT 'ppl'
+      workout_split TEXT NOT NULL DEFAULT 'ppl',
+      training_level TEXT NOT NULL DEFAULT 'beginner'
     );
 
     CREATE TABLE IF NOT EXISTS muscle_groups (
@@ -242,6 +243,7 @@ function ensureTables() {
   const existingColumns = new Set(
     (sqlite.prepare("PRAGMA table_info(users)").all() as { name: string }[]).map((c) => c.name),
   );
+  const trainingLevelWasMissing = !existingColumns.has("training_level");
   const migrations: { column: string; ddl: string }[] = [
     { column: "theme_color", ddl: "ALTER TABLE users ADD COLUMN theme_color TEXT NOT NULL DEFAULT 'green'" },
     { column: "theme_mode", ddl: "ALTER TABLE users ADD COLUMN theme_mode TEXT NOT NULL DEFAULT 'dark'" },
@@ -250,6 +252,7 @@ function ensureTables() {
     { column: "is_admin", ddl: "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0" },
     { column: "timezone_mode", ddl: "ALTER TABLE users ADD COLUMN timezone_mode TEXT NOT NULL DEFAULT 'home'" },
     { column: "home_timezone", ddl: "ALTER TABLE users ADD COLUMN home_timezone TEXT" },
+    { column: "training_level", ddl: "ALTER TABLE users ADD COLUMN training_level TEXT NOT NULL DEFAULT 'beginner'" },
   ];
   for (const { column, ddl } of migrations) {
     if (!existingColumns.has(column)) {
@@ -260,6 +263,11 @@ function ensureTables() {
         // PRAGMA check and this statement — don't crash server startup.
       }
     }
+  }
+  if (trainingLevelWasMissing) {
+    // Preserve the existing unilateral editor for accounts present when this
+    // feature ships. The column default stays Beginner for future accounts.
+    sqlite.prepare("UPDATE users SET training_level = 'advanced'").run();
   }
 
   // -------------------------------------------------------------------------
@@ -657,7 +665,7 @@ export interface IStorage {
   renameUser(id: number, name: string): Promise<UserRecord | undefined>;
   updateUserPreferences(
     id: number,
-    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "timezoneMode" | "homeTimezone">>,
+    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "trainingLevel" | "timezoneMode" | "homeTimezone">>,
   ): Promise<UserRecord | undefined>;
 
   // Muscle groups (shared/global)
@@ -755,7 +763,7 @@ export class DatabaseStorage implements IStorage {
 
   async updateUserPreferences(
     id: number,
-    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "timezoneMode" | "homeTimezone">>,
+    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "trainingLevel" | "timezoneMode" | "homeTimezone">>,
   ): Promise<UserRecord | undefined> {
     return db.update(users).set(prefs).where(eq(users.id, id)).returning().get();
   }

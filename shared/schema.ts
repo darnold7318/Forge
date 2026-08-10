@@ -24,6 +24,9 @@ export const users = sqliteTable("users", {
   themeMode: text("theme_mode").notNull().default("dark"),
   // Preferred workout split — stored preference only, informational.
   workoutSplit: text("workout_split").notNull().default("ppl"),
+  // Controls how much training complexity the UI exposes. New accounts start
+  // simple; the startup migration promotes accounts that predate this field.
+  trainingLevel: text("training_level").notNull().default("beginner"),
   // Timezone handling. "home" (default) anchors all calendar dates to
   // homeTimezone so training weeks stay stable while travelling. "auto"
   // follows whatever timezone the device reports on each request.
@@ -62,6 +65,15 @@ export type ThemeModeId = (typeof themeModeIds)[number];
 export const workoutSplitIds = ["ppl", "upper_lower", "full_body", "bro_split", "custom"] as const;
 export type WorkoutSplitId = (typeof workoutSplitIds)[number];
 
+export const trainingLevelIds = ["beginner", "intermediate", "advanced"] as const;
+export type TrainingLevelId = (typeof trainingLevelIds)[number];
+
+export const trainingLevelLabels: Record<TrainingLevelId, string> = {
+  beginner: "Beginner",
+  intermediate: "Intermediate",
+  advanced: "Advanced",
+};
+
 export const timezoneModeIds = ["home", "auto"] as const;
 export type TimezoneModeId = (typeof timezoneModeIds)[number];
 
@@ -89,12 +101,13 @@ export function isValidTimezone(tz: string): boolean {
 }
 
 export const updateUserPreferencesSchema = createInsertSchema(users)
-  .pick({ themeColor: true, themeMode: true, workoutSplit: true })
+  .pick({ themeColor: true, themeMode: true, workoutSplit: true, trainingLevel: true })
   .partial()
   .extend({
     themeColor: z.enum(themeColorIds).optional(),
     themeMode: z.enum(themeModeIds).optional(),
     workoutSplit: z.enum(workoutSplitIds).optional(),
+    trainingLevel: z.enum(trainingLevelIds).optional(),
     timezoneMode: z.enum(timezoneModeIds).optional(),
     homeTimezone: z
       .string()

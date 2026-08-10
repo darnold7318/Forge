@@ -2,12 +2,30 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import Database from "better-sqlite3";
 
 test("default stimulus, complete user overrides, and reset are isolated per user", async () => {
   process.env.DATABASE_PATH = join(tmpdir(), `forge-stimulus-${process.pid}-${Date.now()}.db`);
+  const legacy = new Database(process.env.DATABASE_PATH);
+  legacy.exec(`
+    CREATE TABLE users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      color_accent TEXT
+    );
+    INSERT INTO users (name, color_accent) VALUES ('Existing 1', 'chart-1');
+    INSERT INTO users (name, color_accent) VALUES ('Existing 2', 'chart-2');
+  `);
+  legacy.close();
   const { storage } = await import("./storage");
 
   const users = await storage.getUsers();
+  assert.equal(users[0].trainingLevel, "advanced");
+  assert.equal(users[1].trainingLevel, "advanced");
+  const newUser = await storage.createUser({ name: "New user", passwordHash: "test:test" });
+  assert.equal(newUser.trainingLevel, "beginner");
+  const updatedUser = await storage.updateUserPreferences(newUser.id, { trainingLevel: "intermediate" });
+  assert.equal(updatedUser?.trainingLevel, "intermediate");
   const bench = (await storage.getExercises()).find((exercise) => exercise.name === "Barbell Bench Press");
   assert.ok(bench);
 

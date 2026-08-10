@@ -33,6 +33,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useActiveUser } from "@/lib/user-context";
 import { useToast } from "@/hooks/use-toast";
 import { equipmentTypes, type Equipment, type MuscleGroup, type ExerciseView } from "@shared/schema";
 
@@ -80,6 +81,7 @@ function ExerciseFormDialog({
   initial,
   muscleGroups,
   onSaved,
+  showUnilateral,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -87,6 +89,7 @@ function ExerciseFormDialog({
   initial: Exercise | null;
   muscleGroups: MuscleGroupWithDisplay[];
   onSaved: (ex: Exercise) => void;
+  showUnilateral: boolean;
 }) {
   const { toast } = useToast();
   const [form, setForm] = useState<ExerciseFormState>(initial ? toFormState(initial) : emptyForm);
@@ -315,15 +318,17 @@ function ExerciseFormDialog({
               />
               <Label htmlFor="ex-is-compound" className="cursor-pointer">Compound</Label>
             </div>
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="ex-is-unilateral"
-                checked={form.isUnilateral}
-                onCheckedChange={(v) => setForm((p) => ({ ...p, isUnilateral: Boolean(v) }))}
-                data-testid="checkbox-exercise-is-unilateral"
-              />
-              <Label htmlFor="ex-is-unilateral" className="cursor-pointer">Unilateral</Label>
-            </div>
+            {showUnilateral && (
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="ex-is-unilateral"
+                  checked={form.isUnilateral}
+                  onCheckedChange={(v) => setForm((p) => ({ ...p, isUnilateral: Boolean(v) }))}
+                  data-testid="checkbox-exercise-is-unilateral"
+                />
+                <Label htmlFor="ex-is-unilateral" className="cursor-pointer">Unilateral</Label>
+              </div>
+            )}
           </div>
         </div>
         <DialogFooter>
@@ -430,6 +435,7 @@ function DeleteExerciseDialog({
 }
 
 export default function Exercises() {
+  const { activeUser } = useActiveUser();
   const [search, setSearch] = useState("");
   const [formOpen, setFormOpen] = useState(false);
   const [formMode, setFormMode] = useState<"create" | "edit">("create");
@@ -558,6 +564,7 @@ export default function Exercises() {
         initial={formMode === "edit" ? editingExercise : null}
         muscleGroups={muscleGroups ?? []}
         onSaved={setEditingExercise}
+        showUnilateral={activeUser?.trainingLevel === "advanced"}
       />
 
       <DeleteExerciseDialog exercise={deletingExercise} onOpenChange={(open) => { if (!open) setDeletingExercise(null); }} />
