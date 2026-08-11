@@ -231,27 +231,6 @@ function RestPaletteBubble() {
   );
 }
 
-function CorePaletteBubble() {
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
-    id: "palette:core",
-    data: { type: "palette-core" },
-  });
-  return (
-    <div
-      ref={setNodeRef}
-      {...listeners}
-      {...attributes}
-      className={`cursor-grab touch-none ${isDragging ? "opacity-30" : ""}`}
-      data-testid="draggable-palette-core"
-    >
-      <div className="flex items-center gap-1.5 rounded-full border border-chart-5/40 bg-chart-5/10 px-3 py-1.5 text-xs font-medium text-chart-5">
-        <Dumbbell className="h-3.5 w-3.5" />
-        Drag Core onto any day (add-on, doesn't replace it)
-      </div>
-    </div>
-  );
-}
-
 /** Palette bubble for one of the active split's own day-types (e.g. Push/Pull/Legs, or a Custom
  *  split's label) so the user can drag it directly onto any day without hunting for an existing
  *  occurrence of that label elsewhere on the calendar. */
@@ -280,7 +259,6 @@ function CalendarCell({
   day,
   isToday,
   isCurrentMonth,
-  onRemoveCoreAddon,
   onClearDay,
   onStartWorkout,
 }: {
@@ -288,7 +266,6 @@ function CalendarCell({
   day: ScheduleDay | undefined;
   isToday: boolean;
   isCurrentMonth: boolean;
-  onRemoveCoreAddon: (date: string) => void;
   onClearDay: (date: string) => void;
   onStartWorkout: (workoutTemplateId: number | null) => void;
 }) {
@@ -313,19 +290,6 @@ function CalendarCell({
         <DraggableBubble day={day} onClear={onClearDay} onStartWorkout={onStartWorkout} />
       ) : (
         <div className="h-[26px]" />
-      )}
-      {day?.hasCoreAddon && (
-        <button
-          type="button"
-          onClick={() => onRemoveCoreAddon(date)}
-          className="flex items-center justify-center gap-1 rounded-full border border-chart-5/40 bg-chart-5/10 px-1.5 py-0.5 text-[10px] font-medium text-chart-5 group"
-          title="Remove Core add-on"
-          data-testid={`badge-core-${date}`}
-        >
-          <Dumbbell className="h-2.5 w-2.5" />
-          Core
-          <X className="h-2.5 w-2.5 opacity-0 group-hover:opacity-100" />
-        </button>
       )}
     </div>
   );
@@ -417,15 +381,6 @@ export default function SchedulePage() {
     onError: () => toast({ title: "Couldn't update day", variant: "destructive" }),
   });
 
-  const coreAddonMutation = useMutation({
-    mutationFn: async (input: { date: string; hasCoreAddon: boolean }) => {
-      const res = await apiRequest("POST", "/api/schedule/core-addon", input);
-      return res.json();
-    },
-    onSuccess: () => invalidate(),
-    onError: () => toast({ title: "Couldn't update Core add-on", variant: "destructive" }),
-  });
-
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
   const days = data?.days ?? [];
@@ -494,8 +449,6 @@ export default function SchedulePage() {
     if (data?.type === "day") setDragDay(data.day as ScheduleDay);
     else if (data?.type === "palette-rest")
       setDragDay({ id: -1, scheduleId: -1, date: "", workoutTemplateId: null, label: "Rest", isManualOverride: false, isWeeklyBlocked: false, hasCoreAddon: false });
-    else if (data?.type === "palette-core")
-      setDragDay({ id: -1, scheduleId: -1, date: "", workoutTemplateId: null, label: "Core", isManualOverride: false, isWeeklyBlocked: false, hasCoreAddon: true });
     else if (data?.type === "palette-label")
       setDragDay({
         id: -1,
@@ -529,12 +482,6 @@ export default function SchedulePage() {
       return;
     }
 
-    if (activeData?.type === "palette-core") {
-      // Purely additive — never touches whatever else is already on that day.
-      coreAddonMutation.mutate({ date: toDate, hasCoreAddon: true });
-      return;
-    }
-
     if (activeData?.type === "palette-label") {
       setDayMutation.mutate({
         date: toDate,
@@ -549,10 +496,6 @@ export default function SchedulePage() {
       if (fromDate === toDate) return;
       moveMutation.mutate({ fromDate, toDate, mode: "swap" });
     }
-  };
-
-  const removeCoreAddon = (date: string) => {
-    coreAddonMutation.mutate({ date, hasCoreAddon: false });
   };
 
   // Manually clear a day back to Rest — marks it a manual override so auto-generation for any
@@ -677,7 +620,6 @@ export default function SchedulePage() {
           <CardContent className="space-y-3">
             <div className="flex flex-wrap gap-2">
               <RestPaletteBubble />
-              <CorePaletteBubble />
               {paletteTemplates.map(({ label, workoutTemplateId }) => (
                 <LabelPaletteBubble key={workoutTemplateId} label={label} workoutTemplateId={workoutTemplateId} />
               ))}
@@ -695,7 +637,6 @@ export default function SchedulePage() {
                   day={daysByDate.get(cell.date)}
                   isToday={cell.date === todayIso()}
                   isCurrentMonth={cell.isCurrentMonth}
-                  onRemoveCoreAddon={removeCoreAddon}
                   onClearDay={clearDay}
                   onStartWorkout={startWorkout}
                 />

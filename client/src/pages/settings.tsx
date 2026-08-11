@@ -306,7 +306,9 @@ type SlotDraft = { mode: "rest" | "template" | "label"; workoutTemplateId: numbe
 function slotToDraft(slot: CustomWeeklySlot): SlotDraft {
   if (!slot) return { mode: "rest", workoutTemplateId: null, label: "" };
   if (slot.workoutTemplateId != null) return { mode: "template", workoutTemplateId: slot.workoutTemplateId, label: slot.label ?? "" };
-  return { mode: "label", workoutTemplateId: null, label: slot.label ?? "" };
+  // Older databases may retain a label after its saved template was deleted. Load that stale
+  // reference as Rest so saving Settings cannot silently recreate the deleted template.
+  return { mode: "rest", workoutTemplateId: null, label: "" };
 }
 
 function CustomTemplateBuilder() {

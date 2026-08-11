@@ -1038,8 +1038,14 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteWorkoutTemplate(id: number): Promise<void> {
-    // Detach this template from any schedule references first, so the delete never fails
-    // with a foreign-key error just because the template is currently assigned to a day.
+    // Detach this template from logged workouts and schedule references first, so the delete
+    // never fails with a foreign-key error. Logged workouts keep their frozen name, exercises,
+    // and sets; only the optional link back to the now-deleted template is removed.
+    db.update(workouts)
+      .set({ workoutTemplateId: null })
+      .where(eq(workouts.workoutTemplateId, id))
+      .run();
+
     // scheduleDays rows keep their `label` even after the template link is cleared (by design
     // — see the schema comment), so past/future calendar days still show a name, just
     // pointing at nothing now.
@@ -1049,8 +1055,8 @@ export class DatabaseStorage implements IStorage {
       .run();
 
     // customWeeklyTemplate is a JSON blob (7 slots keyed by day-of-week) stored per-user, so it
-    // can't be targeted with a SQL WHERE — scan every user's schedule row and null out any slot
-    // that references this template, keeping the slot's label intact.
+    // can't be targeted with a SQL WHERE. Remove any slot that references this template; retaining
+    // only its label would leave a ghost schedule choice that could later recreate the template.
     const schedules = db.select().from(workoutSchedules).all();
     for (const schedule of schedules) {
       const slots: (CustomWeeklySlot | null)[] = JSON.parse(schedule.customWeeklyTemplate);
@@ -1058,7 +1064,7 @@ export class DatabaseStorage implements IStorage {
       const nextSlots = slots.map((slot) => {
         if (slot && slot.workoutTemplateId === id) {
           changed = true;
-          return { ...slot, workoutTemplateId: null };
+          return null;
         }
         return slot;
       });
@@ -1509,7 +1515,9 @@ export class DatabaseStorage implements IStorage {
         const isRestDay = weeklyRestDays.includes(dow);
         const slot = weeklyTemplate[dow];
 
-        if (isRestDay || !slot) {
+        // A slot without a saved template can be left behind by an older database or a deleted
+        // template. Treat it as Rest instead of painting a label-only ghost onto the calendar.
+        if (isRestDay || !slot || slot.workoutTemplateId == null) {
           upsertDay(date, { workoutTemplateId: null, label: "Rest", isWeeklyBlocked: isRestDay });
         } else {
           upsertDay(date, { workoutTemplateId: slot.workoutTemplateId, label: slot.label, isWeeklyBlocked: false });

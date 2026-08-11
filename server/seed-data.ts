@@ -51,7 +51,7 @@ export const EXERCISES: SeedExercise[] = [
   { name: "Lat Pulldown", stimulus: { Lats: 1, UpperMidBack: 0.3, Biceps: 0.4, Forearms: 0.15 }, equipment: "Cable", movementPattern: "Vertical Pull", isCompound: true, isUnilateral: false },
   { name: "Pull-Up", stimulus: { Lats: 1, UpperMidBack: 0.35, Biceps: 0.4, Forearms: 0.2 }, equipment: "Bodyweight", movementPattern: "Vertical Pull", isCompound: true, isUnilateral: false },
   { name: "Barbell Row", stimulus: { UpperMidBack: 1, Lats: 0.65, RearDelts: 0.35, Biceps: 0.4, Forearms: 0.2, SpinalErectors: 0.35 }, equipment: "Barbell", movementPattern: "Horizontal Pull", isCompound: true, isUnilateral: false },
-  { name: "Seated Cable Row", stimulus: { UpperMidBack: 1, Lats: 0.7, RearDelts: 0.3, Biceps: 0.4, Forearms: 0.15 }, equipment: "Cable", movementPattern: "Horizontal Pull", isCompound: true, isUnilateral: false },
+  { name: "Seated Cable Row", stimulus: { UpperMidBack: 1, Lats: 0.7, RearDelts: 0.3, Biceps: 0.4, Forearms: 0.15, SpinalErectors: 0.15 }, equipment: "Cable", movementPattern: "Horizontal Pull", isCompound: true, isUnilateral: false },
   { name: "Deadlift", stimulus: { SpinalErectors: 1, Glutes: 0.7, Hamstrings: 0.55, Traps: 0.5, UpperMidBack: 0.25, Forearms: 0.3, Quads: 0.2 }, equipment: "Barbell", movementPattern: "Hinge", isCompound: true, isUnilateral: false },
   { name: "Straight-Arm Pulldown", stimulus: { Lats: 1, Triceps: 0.1 }, equipment: "Cable", movementPattern: "Vertical Pull", isCompound: false, isUnilateral: false },
   // Traps
