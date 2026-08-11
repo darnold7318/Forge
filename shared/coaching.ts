@@ -14,6 +14,7 @@ import {
   type WorkoutSplitId,
   type ExerciseRole,
   type FailureTarget,
+  type TrackingMode,
 } from "./schema";
 import { civilDateInZone } from "./timezone";
 
@@ -32,6 +33,7 @@ export interface HistorySetInput {
   setType: "Warmup" | "Working";
   weight: number;
   reps: number;
+  durationSeconds?: number | null;
   rir: number | null;
   completed: boolean;
 }
@@ -40,6 +42,7 @@ export interface HistoryExerciseInput {
   exerciseId: number;
   exerciseOrder: number;
   exerciseName: string;
+  trackingMode?: TrackingMode;
   primaryMuscleGroupId: number;
   stimulus?: { muscleGroupId: number; stimulusRatio: number }[];
   intensityTechnique: string; // default "Normal"
@@ -58,10 +61,11 @@ export interface HistorySessionInput {
 // derived helpers on a session/exercise -------------------------------------
 
 export function completedSetsOf(sets: HistorySetInput[]): HistorySetInput[] {
-  return sets.filter((s) => s.completed && s.reps > 0);
+  return sets.filter((s) => s.completed && (s.reps > 0 || (s.durationSeconds ?? 0) > 0));
 }
 
 export function exerciseVolume(ex: HistoryExerciseInput): number {
+  if (ex.trackingMode === "duration") return 0;
   return completedSetsOf(ex.sets).reduce((sum, s) => sum + s.weight * s.reps, 0);
 }
 
@@ -75,6 +79,7 @@ export function estimateOneRepMax(weight: number, reps: number): number {
 }
 
 export function exerciseEstimatedOneRepMax(ex: HistoryExerciseInput): number {
+  if (ex.trackingMode === "duration") return 0;
   const completed = completedSetsOf(ex.sets);
   if (completed.length === 0) return 0;
   return Math.max(...completed.map((s) => estimateOneRepMax(s.weight, s.reps)));
@@ -83,6 +88,9 @@ export function exerciseEstimatedOneRepMax(ex: HistoryExerciseInput): number {
 export function exerciseBestSet(ex: HistoryExerciseInput): HistorySetInput | null {
   const completed = completedSetsOf(ex.sets);
   if (completed.length === 0) return null;
+  if (ex.trackingMode === "duration") {
+    return [...completed].sort((a, b) => (b.durationSeconds ?? 0) - (a.durationSeconds ?? 0))[0];
+  }
   return [...completed].sort((a, b) => {
     if (b.weight !== a.weight) return b.weight - a.weight;
     return b.reps - a.reps;
@@ -91,6 +99,9 @@ export function exerciseBestSet(ex: HistoryExerciseInput): HistorySetInput | nul
 
 export function exerciseBestSetText(ex: HistoryExerciseInput): string {
   const best = exerciseBestSet(ex);
+  if (ex.trackingMode === "duration") {
+    return best ? `${best.durationSeconds ?? 0} sec` : "No completed holds";
+  }
   return best ? `${fmt1(best.weight)} x ${best.reps}` : "No completed sets";
 }
 
@@ -475,11 +486,17 @@ export function evaluateFatigueTrend(history: HistorySessionInput[]): FatigueSig
     .slice(0, 3);
   const lastThreeAsc = [...lastThreeDesc].sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
 
-  const volumes = lastThreeAsc.map(sessionTotalVolume);
-  const reps = lastThreeAsc.map((s) =>
-    s.exercises.reduce((sum, e) => sum + completedSetsOf(e.sets).reduce((rs, st) => rs + st.reps, 0), 0),
+  const dynamicExercises = (session: HistorySessionInput) =>
+    session.exercises.filter((exercise) => exercise.trackingMode !== "duration");
+  const volumes = lastThreeAsc.map((session) =>
+    dynamicExercises(session).reduce((sum, exercise) => sum + exerciseVolume(exercise), 0),
   );
-  const setsCount = lastThreeAsc.map(sessionCompletedSetCount);
+  const reps = lastThreeAsc.map((s) =>
+    dynamicExercises(s).reduce((sum, e) => sum + completedSetsOf(e.sets).reduce((rs, st) => rs + st.reps, 0), 0),
+  );
+  const setsCount = lastThreeAsc.map((session) =>
+    dynamicExercises(session).reduce((sum, exercise) => sum + exerciseCompletedSetCount(exercise), 0),
+  );
 
   const volumeDeclining = volumes[2] < volumes[1] && volumes[1] < volumes[0];
   const repsDeclining = reps[2] < reps[1] && reps[1] < reps[0];
@@ -589,7 +606,7 @@ export function evaluateReadiness(
 
 export interface PersonalRecord {
   exerciseName: string;
-  recordType: "Heaviest Set" | "Estimated 1RM" | "Best Set Volume" | "Exercise Volume";
+  recordType: "Heaviest Set" | "Estimated 1RM" | "Best Set Volume" | "Exercise Volume" | "Longest Hold";
   displayValue: string;
   achievedAt: Date;
 }
@@ -611,6 +628,7 @@ export function getPersonalRecords(
   const bestE1RM = new Map<number, number>();
   const bestSetVolume = new Map<number, number>();
   const bestExerciseVolume = new Map<number, number>();
+  const bestHoldDuration = new Map<number, number>();
   const records: PersonalRecord[] = [];
 
   const addIfNew = (
@@ -637,6 +655,22 @@ export function getPersonalRecords(
     for (const ex of session.exercises) {
       const completed = completedSetsOf(ex.sets);
       if (completed.length === 0) continue;
+
+      if (ex.trackingMode === "duration") {
+        const workingHolds = completed.filter((set) => set.setType !== "Warmup");
+        if (workingHolds.length === 0) continue;
+        const longestHold = Math.max(...workingHolds.map((set) => set.durationSeconds ?? 0));
+        addIfNew(
+          bestHoldDuration,
+          ex.exerciseId,
+          longestHold,
+          ex.exerciseName,
+          "Longest Hold",
+          `${longestHold} sec`,
+          session.startedAt,
+        );
+        continue;
+      }
 
       const heaviestSet = [...completed].sort((a, b) => {
         if (b.weight !== a.weight) return b.weight - a.weight;
@@ -700,12 +734,14 @@ export function getPersonalRecords(
 export interface LivePrCheckInput {
   weight: number;
   reps: number;
+  durationSeconds?: number | null;
+  trackingMode?: TrackingMode;
   isWarmup: boolean;
 }
 
 export interface LivePrResult {
   isPr: boolean;
-  recordType?: "Heaviest Set" | "Estimated 1RM";
+  recordType?: "Heaviest Set" | "Estimated 1RM" | "Longest Hold";
   displayValue?: string;
   previousBest?: string;
 }
@@ -720,6 +756,18 @@ export function checkLivePersonalRecord(
   newSet: LivePrCheckInput,
   priorSets: LivePrCheckInput[],
 ): LivePrResult {
+  if (newSet.trackingMode === "duration") {
+    const duration = newSet.durationSeconds ?? 0;
+    if (newSet.isWarmup || duration <= 0) return { isPr: false };
+    const priorWorking = priorSets.filter(
+      (set) => !set.isWarmup && set.trackingMode === "duration" && (set.durationSeconds ?? 0) > 0,
+    );
+    if (priorWorking.length === 0) return { isPr: false };
+    const previous = Math.max(...priorWorking.map((set) => set.durationSeconds ?? 0));
+    return duration > previous
+      ? { isPr: true, recordType: "Longest Hold", displayValue: `${duration} sec`, previousBest: `${previous} sec` }
+      : { isPr: false };
+  }
   if (newSet.isWarmup || newSet.weight <= 0 || newSet.reps <= 0) {
     return { isPr: false };
   }
@@ -766,9 +814,22 @@ export function markHistoricalPrs<T extends LivePrCheckInput & { id: number }>(
   const prIds = new Set<number>();
   let bestWeight = -Infinity;
   let bestE1rm = -Infinity;
+  let bestDuration = -Infinity;
   let seenAny = false;
 
   for (const s of setsChronological) {
+    if (s.trackingMode === "duration") {
+      const duration = s.durationSeconds ?? 0;
+      if (s.isWarmup || duration <= 0) continue;
+      if (!seenAny) {
+        seenAny = true;
+        bestDuration = duration;
+        continue;
+      }
+      if (duration > bestDuration) prIds.add(s.id);
+      bestDuration = Math.max(bestDuration, duration);
+      continue;
+    }
     if (s.isWarmup || s.weight <= 0 || s.reps <= 0) continue;
     if (!seenAny) {
       seenAny = true;

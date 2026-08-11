@@ -35,7 +35,7 @@ import {
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useActiveUser } from "@/lib/user-context";
 import { useToast } from "@/hooks/use-toast";
-import { equipmentTypes, type Equipment, type MuscleGroup, type ExerciseView } from "@shared/schema";
+import { equipmentTypes, type Equipment, type MuscleGroup, type ExerciseView, type TrackingMode } from "@shared/schema";
 
 type Exercise = ExerciseView;
 type MuscleGroupWithDisplay = MuscleGroup & { displayName: string };
@@ -51,6 +51,7 @@ interface ExerciseFormState {
   equipment: Equipment;
   isCompound: boolean;
   isUnilateral: boolean;
+  trackingMode: TrackingMode;
 }
 
 const emptyForm: ExerciseFormState = {
@@ -59,6 +60,7 @@ const emptyForm: ExerciseFormState = {
   equipment: "Barbell",
   isCompound: false,
   isUnilateral: false,
+  trackingMode: "reps",
 };
 
 function toFormState(ex: Exercise): ExerciseFormState {
@@ -71,6 +73,7 @@ function toFormState(ex: Exercise): ExerciseFormState {
     equipment: ex.equipment as Equipment,
     isCompound: ex.isCompound,
     isUnilateral: ex.isUnilateral,
+    trackingMode: ex.trackingMode as TrackingMode,
   };
 }
 
@@ -133,6 +136,7 @@ function ExerciseFormDialog({
         movementPattern: initial?.movementPattern ?? null,
         isCompound: form.isCompound,
         isUnilateral: form.isUnilateral,
+        trackingMode: form.trackingMode,
       };
       if (mode === "create") {
         const res = await apiRequest("POST", "/api/exercises", { ...payload, stimulus: normalizedStimulus });
@@ -329,6 +333,18 @@ function ExerciseFormDialog({
                 <Label htmlFor="ex-is-unilateral" className="cursor-pointer">Unilateral</Label>
               </div>
             )}
+          </div>
+          <div className="flex items-start gap-2 rounded-md border p-3">
+            <Checkbox
+              id="ex-static-hold"
+              checked={form.trackingMode === "duration"}
+              onCheckedChange={(v) => setForm((p) => ({ ...p, trackingMode: v ? "duration" : "reps" }))}
+              data-testid="checkbox-exercise-static-hold"
+            />
+            <div className="space-y-0.5">
+              <Label htmlFor="ex-static-hold" className="cursor-pointer">Static hold</Label>
+              <p className="text-xs text-muted-foreground">Track time in seconds instead of repetitions.</p>
+            </div>
           </div>
         </div>
         <DialogFooter>
@@ -531,6 +547,7 @@ export default function Exercises() {
                   <Badge variant="outline" className="text-xs">{ex.equipment}</Badge>
                   {ex.isCompound && <Badge variant="outline" className="text-xs">Compound</Badge>}
                   {ex.isUnilateral && <Badge variant="outline" className="text-xs">Unilateral</Badge>}
+                  {ex.trackingMode === "duration" && <Badge variant="outline" className="text-xs">Static hold</Badge>}
                 </div>
               </div>
               <div className="flex items-center gap-1.5 shrink-0">

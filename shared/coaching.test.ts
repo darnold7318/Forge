@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import {
   categorizeVolume,
   computeWeeklyVolumeByMuscleGroup,
+  checkLivePersonalRecord,
+  evaluateFatigueTrend,
   evaluateRecovery,
+  getPersonalRecords,
   type HistorySessionInput,
   type MuscleGroupLookup,
 } from "./coaching";
@@ -88,4 +91,62 @@ test("recovery distributes fatigue by stimulus without related-muscle propagatio
   assert.ok(lats.fatiguePercent > biceps.fatiguePercent);
   assert.ok(biceps.fatiguePercent > 0);
   assert.equal(upperBack.fatiguePercent, 0);
+});
+
+test("static holds count as completed working sets for recovery", () => {
+  const now = new Date("2026-08-08T12:00:00.000Z");
+  const history: HistorySessionInput[] = [{
+    id: 1,
+    workoutTemplateId: null,
+    workoutName: "Holds",
+    startedAt: now,
+    exercises: [{
+      exerciseId: 99,
+      exerciseOrder: 1,
+      exerciseName: "Wall Sit",
+      trackingMode: "duration",
+      primaryMuscleGroupId: 1,
+      intensityTechnique: "Normal",
+      failureTarget: "Never",
+      sets: [{ setNumber: 1, setType: "Working", weight: 0, reps: 0, durationSeconds: 45, rir: 2, completed: true }],
+    }],
+  }];
+  const states = evaluateRecovery(history, { idToName: new Map([[1, "Quads"]]) }, now);
+  assert.ok(states.find((state) => state.muscle === "Quads")!.fatiguePercent > 0);
+});
+
+test("static holds use longest-duration PRs and do not trigger rep fatigue decline", () => {
+  assert.deepEqual(
+    checkLivePersonalRecord(
+      { weight: 0, reps: 0, durationSeconds: 45, trackingMode: "duration", isWarmup: false },
+      [{ weight: 0, reps: 0, durationSeconds: 30, trackingMode: "duration", isWarmup: false }],
+    ),
+    { isPr: true, recordType: "Longest Hold", displayValue: "45 sec", previousBest: "30 sec" },
+  );
+
+  const history: HistorySessionInput[] = [60, 45, 30].map((duration, index) => ({
+    id: index + 1,
+    workoutTemplateId: null,
+    workoutName: "Holds",
+    startedAt: new Date(`2026-08-0${index + 1}T12:00:00.000Z`),
+    exercises: [{
+      exerciseId: 99,
+      exerciseOrder: 1,
+      exerciseName: "Wall Sit",
+      trackingMode: "duration",
+      primaryMuscleGroupId: 1,
+      intensityTechnique: "Normal",
+      failureTarget: "Never",
+      sets: [{ setNumber: 1, setType: "Working" as const, weight: 0, reps: 0, durationSeconds: duration, rir: 2, completed: true }],
+    }],
+  }));
+  assert.equal(evaluateFatigueTrend(history).status, "Stable");
+  const prHistory = history.map((session, index) => ({
+    ...session,
+    exercises: session.exercises.map((exercise) => ({
+      ...exercise,
+      sets: exercise.sets.map((set) => ({ ...set, durationSeconds: [30, 45, 60][index] })),
+    })),
+  }));
+  assert.equal(getPersonalRecords(prHistory, 10)[0]?.recordType, "Longest Hold");
 });

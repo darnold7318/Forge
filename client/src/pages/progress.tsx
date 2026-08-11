@@ -40,6 +40,7 @@ interface HistorySet {
   workoutId: number;
   weight: number;
   reps: number;
+  durationSeconds: number | null;
   rir: number | null;
   isWarmup: boolean;
   workoutDate: string;
@@ -48,7 +49,7 @@ interface HistorySet {
 interface PersonalRecord {
   exerciseId: number;
   exerciseName: string;
-  recordType: "Heaviest Set" | "Estimated 1RM" | "Best Set Volume" | "Exercise Volume";
+  recordType: "Heaviest Set" | "Estimated 1RM" | "Best Set Volume" | "Exercise Volume" | "Longest Hold";
   value: number;
   achievedAt: string;
   summary: string;
@@ -93,6 +94,7 @@ export default function ProgressPage() {
   });
 
   const selectedExercise = exercises?.find((e) => String(e.id) === activeId);
+  const isDuration = selectedExercise?.trackingMode === "duration";
 
   const chartData = useMemo(() => {
     if (!history) return [];
@@ -107,11 +109,13 @@ export default function ProgressPage() {
         const date = sets[0].workoutDate;
         const topSet = sets.reduce((best, s) => (s.weight > best.weight ? s : best), sets[0]);
         const e1rm = Math.max(...sets.map((s) => estimate1RM(s.weight, s.reps)));
+        const longestHold = Math.max(...sets.map((s) => s.durationSeconds ?? 0));
         return {
           date,
           label: formatShortDate(date),
           topWeight: topSet.weight,
           e1RM: Math.round(e1rm * 10) / 10,
+          longestHold,
         };
       })
       .sort((a, b) => a.date.localeCompare(b.date));
@@ -140,7 +144,7 @@ export default function ProgressPage() {
         <h1 className="text-xl font-display font-bold" data-testid="text-page-title">
           Exercise Progress
         </h1>
-        <p className="text-sm text-muted-foreground">Track top set weight, estimated 1RM, and personal records</p>
+        <p className="text-sm text-muted-foreground">Track strength, hold duration, and personal records</p>
       </div>
 
       <Card>
@@ -215,7 +219,7 @@ export default function ProgressPage() {
           <Card>
             <CardHeader>
               <CardTitle className="text-base" data-testid="text-chart-title">
-                {selectedExercise?.name} — Top Set Weight &amp; Est. 1RM
+                {selectedExercise?.name} — {isDuration ? "Longest Hold" : "Top Set Weight & Est. 1RM"}
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -234,23 +238,36 @@ export default function ProgressPage() {
                       }}
                     />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
-                    <Line
-                      type="monotone"
-                      dataKey="topWeight"
-                      name="Top set weight"
-                      stroke="hsl(var(--chart-1))"
-                      strokeWidth={2}
-                      dot={{ r: 3 }}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="e1RM"
-                      name="Est. 1RM"
-                      stroke="hsl(var(--chart-2))"
-                      strokeWidth={2}
-                      strokeDasharray="4 3"
-                      dot={{ r: 3 }}
-                    />
+                    {isDuration ? (
+                      <Line
+                        type="monotone"
+                        dataKey="longestHold"
+                        name="Longest hold (sec)"
+                        stroke="hsl(var(--chart-1))"
+                        strokeWidth={2}
+                        dot={{ r: 3 }}
+                      />
+                    ) : (
+                      <>
+                        <Line
+                          type="monotone"
+                          dataKey="topWeight"
+                          name="Top set weight"
+                          stroke="hsl(var(--chart-1))"
+                          strokeWidth={2}
+                          dot={{ r: 3 }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="e1RM"
+                          name="Est. 1RM"
+                          stroke="hsl(var(--chart-2))"
+                          strokeWidth={2}
+                          strokeDasharray="4 3"
+                          dot={{ r: 3 }}
+                        />
+                      </>
+                    )}
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -268,7 +285,7 @@ export default function ProgressPage() {
                     <TableRow>
                       <TableHead>Date</TableHead>
                       <TableHead>Sets</TableHead>
-                      <TableHead className="text-right">Top e1RM</TableHead>
+                      <TableHead className="text-right">{isDuration ? "Longest hold" : "Top e1RM"}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -288,14 +305,24 @@ export default function ProgressPage() {
                                   key={s.id}
                                   className="text-xs font-mono tabular-nums bg-muted rounded px-1.5 py-0.5"
                                 >
-                                  {s.weight}×{s.reps}
+                                  {isDuration
+                                    ? `${s.durationSeconds ?? 0} sec${
+                                        s.weight > 0
+                                          ? selectedExercise?.equipment === "Bodyweight" ? ` @ +${s.weight} lb` : ` @ ${s.weight} lb`
+                                          : ""
+                                      }`
+                                    : `${s.weight}×${s.reps}`}
                                   {s.rir != null ? ` @${s.rir}RIR` : ""}
                                 </span>
                               ))}
                             </div>
                           </TableCell>
                           <TableCell className="text-right tabular-nums">
-                            {topE1RM > 0 ? topE1RM.toFixed(1) : "—"}
+                            {isDuration
+                              ? workingSets.length > 0
+                                ? `${Math.max(...workingSets.map((s) => s.durationSeconds ?? 0))} sec`
+                                : "—"
+                              : topE1RM > 0 ? topE1RM.toFixed(1) : "—"}
                           </TableCell>
                         </TableRow>
                       );

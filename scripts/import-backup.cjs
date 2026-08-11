@@ -42,6 +42,7 @@ CREATE TABLE users (
   theme_color TEXT NOT NULL DEFAULT 'green',
   theme_mode TEXT NOT NULL DEFAULT 'dark',
   workout_split TEXT NOT NULL DEFAULT 'ppl',
+  training_level TEXT NOT NULL DEFAULT 'beginner',
   timezone_mode TEXT NOT NULL DEFAULT 'home',
   home_timezone TEXT
 );
@@ -62,7 +63,8 @@ CREATE TABLE exercises (
   equipment TEXT NOT NULL,
   movement_pattern TEXT,
   is_compound INTEGER NOT NULL DEFAULT 0,
-  is_unilateral INTEGER NOT NULL DEFAULT 0
+  is_unilateral INTEGER NOT NULL DEFAULT 0,
+  tracking_mode TEXT NOT NULL DEFAULT 'reps'
 );
 
 CREATE TABLE exercise_muscle_stimulus (
@@ -102,6 +104,8 @@ CREATE TABLE workout_template_exercises (
   target_sets INTEGER NOT NULL DEFAULT 3,
   target_reps_min INTEGER NOT NULL DEFAULT 8,
   target_reps_max INTEGER NOT NULL DEFAULT 12,
+  target_duration_min_seconds INTEGER,
+  target_duration_max_seconds INTEGER,
   tempo TEXT,
   target_rir INTEGER NOT NULL DEFAULT 2,
   failure_target TEXT NOT NULL DEFAULT 'Never',
@@ -128,6 +132,7 @@ CREATE TABLE sets (
   set_number INTEGER NOT NULL,
   weight REAL NOT NULL,
   reps INTEGER NOT NULL,
+  duration_seconds INTEGER,
   rir REAL,
   is_warmup INTEGER NOT NULL DEFAULT 0
 );
@@ -182,7 +187,7 @@ counts.muscleGroups = insertMany(
 );
 
 counts.exercises = insertMany(
-  `INSERT INTO exercises (id, name, primary_muscle_group_id, secondary_muscles, equipment, movement_pattern, is_compound, is_unilateral) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  `INSERT INTO exercises (id, name, primary_muscle_group_id, secondary_muscles, equipment, movement_pattern, is_compound, is_unilateral, tracking_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   d.exercises,
   (ex) => [
     ex.id,
@@ -193,6 +198,7 @@ counts.exercises = insertMany(
     ex.movementPattern,
     ex.isCompound ? 1 : 0,
     ex.isUnilateral ? 1 : 0,
+    ex.trackingMode || "reps",
   ]
 );
 
@@ -219,13 +225,13 @@ const insertTemplate = db.prepare(
   `INSERT INTO workout_templates (id, user_id, name, notes) VALUES (?, ?, ?, ?)`
 );
 const insertWte = db.prepare(
-  `INSERT INTO workout_template_exercises (id, workout_template_id, exercise_id, exercise_order, exercise_role, warmup_sets, top_sets, backoff_sets, backoff_reduction_percent, target_sets, target_reps_min, target_reps_max, tempo, target_rir, failure_target, intensity_technique, rest_seconds, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  `INSERT INTO workout_template_exercises (id, workout_template_id, exercise_id, exercise_order, exercise_role, warmup_sets, top_sets, backoff_sets, backoff_reduction_percent, target_sets, target_reps_min, target_reps_max, target_duration_min_seconds, target_duration_max_seconds, tempo, target_rir, failure_target, intensity_technique, rest_seconds, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const insertWorkout = db.prepare(
   `INSERT INTO workouts (id, user_id, date, started_at, tz, name, notes, workout_template_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const insertSet = db.prepare(
-  `INSERT INTO sets (id, workout_id, exercise_id, set_number, weight, reps, rir, is_warmup) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  `INSERT INTO sets (id, workout_id, exercise_id, set_number, weight, reps, duration_seconds, rir, is_warmup) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const insertSchedule = db.prepare(
   `INSERT INTO workout_schedules (id, user_id, active_split, rotation_cycle, rotation_cursor, weekly_rest_days, last_generated_month, custom_weekly_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -279,6 +285,8 @@ const importAll = db.transaction(() => {
         wte.targetSets,
         wte.targetRepsMin,
         wte.targetRepsMax,
+        wte.targetDurationMinSeconds ?? null,
+        wte.targetDurationMaxSeconds ?? null,
         wte.tempo,
         wte.targetRir,
         wte.failureTarget,
@@ -293,7 +301,7 @@ const importAll = db.transaction(() => {
       workoutCount++;
     }
     for (const s of profile.sets || []) {
-      insertSet.run(s.id, s.workoutId, s.exerciseId, s.setNumber, s.weight, s.reps, s.rir, s.isWarmup ? 1 : 0);
+      insertSet.run(s.id, s.workoutId, s.exerciseId, s.setNumber, s.weight, s.reps, s.durationSeconds ?? null, s.rir, s.isWarmup ? 1 : 0);
       setCount++;
     }
     const sched = profile.workoutSchedule;

@@ -60,6 +60,8 @@ interface WorkoutTemplateExerciseLite {
   targetSets: number;
   targetRepsMin: number;
   targetRepsMax: number;
+  targetDurationMinSeconds: number | null;
+  targetDurationMaxSeconds: number | null;
   targetRir: number;
   warmupSets: number;
   topSets: number;
@@ -79,6 +81,7 @@ interface DraftSet {
   key: string;
   weight: string;
   reps: string;
+  durationSeconds: string;
   rir: string;
   isWarmup: boolean;
   /** Set once this set has been individually logged via the "Log set" button. */
@@ -92,11 +95,12 @@ interface DraftExercise {
   prescription?: WorkoutTemplateExerciseLite;
 }
 
-function newSet(): DraftSet {
+function newSet(exercise?: Exercise): DraftSet {
   return {
     key: Math.random().toString(36).slice(2),
-    weight: "",
+    weight: exercise?.equipment === "Bodyweight" ? "0" : "",
     reps: "",
+    durationSeconds: "",
     rir: "",
     isWarmup: false,
   };
@@ -107,13 +111,15 @@ interface HistorySet {
   workoutId: number;
   weight: number;
   reps: number;
+  durationSeconds: number | null;
   rir: number | null;
   isWarmup: boolean;
   workoutDate: string;
   isPr?: boolean;
 }
 
-function ExerciseHistory({ exerciseId }: { exerciseId: number }) {
+function ExerciseHistory({ exercise }: { exercise: Exercise }) {
+  const exerciseId = exercise.id;
   const { activeUserId } = useActiveUser();
   const { data, isLoading } = useQuery<HistorySet[]>({
     queryKey: ["/api/exercises", String(exerciseId), "sets", activeUserId],
@@ -162,7 +168,13 @@ function ExerciseHistory({ exerciseId }: { exerciseId: number }) {
                   data-testid={`text-history-set-${s.id}`}
                 >
                   {s.isPr && <Trophy className="h-3 w-3" data-testid={`icon-pr-badge-${s.id}`} />}
-                  {s.weight}×{s.reps}
+                  {exercise.trackingMode === "duration"
+                    ? `${s.durationSeconds ?? 0} sec${
+                        s.weight > 0
+                          ? exercise.equipment === "Bodyweight" ? ` @ +${s.weight} lb` : ` @ ${s.weight} lb`
+                          : ""
+                      }`
+                    : `${s.weight}×${s.reps}`}
                   {s.rir != null ? ` @${s.rir}RIR` : ""}
                 </span>
               ))}
@@ -281,6 +293,7 @@ function CreateExerciseDialog({
   const [equipment, setEquipment] = useState<Equipment>("Barbell");
   const [isCompound, setIsCompound] = useState(false);
   const [isUnilateral, setIsUnilateral] = useState(false);
+  const [isStaticHold, setIsStaticHold] = useState(false);
 
   const addStimulus = () => {
     const used = new Set(stimulus.map((row) => row.muscleGroupId));
@@ -306,6 +319,7 @@ function CreateExerciseDialog({
         movementPattern: null,
         isCompound,
         isUnilateral,
+        trackingMode: isStaticHold ? "duration" : "reps",
       });
       return res.json();
     },
@@ -318,6 +332,7 @@ function CreateExerciseDialog({
       setEquipment("Barbell");
       setIsCompound(false);
       setIsUnilateral(false);
+      setIsStaticHold(false);
       onOpenChange(false);
     },
     onError: () => {
@@ -421,6 +436,18 @@ function CreateExerciseDialog({
                 data-testid="checkbox-is-unilateral"
               />
               <Label htmlFor="is-unilateral" className="cursor-pointer">Unilateral</Label>
+            </div>
+          </div>
+          <div className="flex items-start gap-2 rounded-md border p-3">
+            <Checkbox
+              id="is-static-hold"
+              checked={isStaticHold}
+              onCheckedChange={(v) => setIsStaticHold(Boolean(v))}
+              data-testid="checkbox-is-static-hold"
+            />
+            <div className="space-y-0.5">
+              <Label htmlFor="is-static-hold" className="cursor-pointer">Static hold</Label>
+              <p className="text-xs text-muted-foreground">Track time in seconds instead of repetitions.</p>
             </div>
           </div>
         </div>
@@ -563,7 +590,7 @@ export default function LogWorkout() {
       const sets: DraftSet[] = [];
       for (let i = 0; i < totalSets; i++) {
         const isWarmup = i < te.warmupSets;
-        sets.push({ ...newSet(), isWarmup });
+        sets.push({ ...newSet(ex), isWarmup });
       }
       newDrafts.push({ key: Math.random().toString(36).slice(2), exercise: ex, sets, prescription: te });
     }
@@ -577,7 +604,7 @@ export default function LogWorkout() {
   const addExercise = (ex: Exercise) => {
     setDraftExercises((prev) => [
       ...prev,
-      { key: Math.random().toString(36).slice(2), exercise: ex, sets: [newSet()] },
+      { key: Math.random().toString(36).slice(2), exercise: ex, sets: [newSet(ex)] },
     ]);
   };
 
@@ -587,7 +614,7 @@ export default function LogWorkout() {
 
   const addSet = (exKey: string) => {
     setDraftExercises((prev) =>
-      prev.map((d) => (d.key === exKey ? { ...d, sets: [...d.sets, newSet()] } : d)),
+      prev.map((d) => (d.key === exKey ? { ...d, sets: [...d.sets, newSet(d.exercise)] } : d)),
     );
   };
 
@@ -615,7 +642,9 @@ export default function LogWorkout() {
   const totalValidSets = useMemo(
     () =>
       draftExercises.reduce(
-        (sum, d) => sum + d.sets.filter((s) => s.weight !== "" && s.reps !== "").length,
+        (sum, d) => sum + d.sets.filter((s) =>
+          s.weight !== "" && (d.exercise.trackingMode === "duration" ? s.durationSeconds !== "" : s.reps !== "")
+        ).length,
         0,
       ),
     [draftExercises],
@@ -659,7 +688,8 @@ export default function LogWorkout() {
         exerciseId: draftExercise.exercise.id,
         setNumber,
         weight: Number(draftSet.weight),
-        reps: Number(draftSet.reps),
+        reps: draftExercise.exercise.trackingMode === "duration" ? 0 : Number(draftSet.reps),
+        durationSeconds: draftExercise.exercise.trackingMode === "duration" ? Number(draftSet.durationSeconds) : null,
         rir: draftSet.rir === "" ? null : Number(draftSet.rir),
         isWarmup: draftSet.isWarmup,
       });
@@ -697,13 +727,14 @@ export default function LogWorkout() {
         let setNumber = d.sets.filter((s) => !!s.loggedSetId).length + 1;
         for (const s of d.sets) {
           if (s.loggedSetId) continue; // already saved via "Log set"
-          if (s.weight === "" || s.reps === "") continue;
+          if (s.weight === "" || (d.exercise.trackingMode === "duration" ? s.durationSeconds === "" : s.reps === "")) continue;
           await apiRequest("POST", "/api/sets", {
             workoutId,
             exerciseId: d.exercise.id,
             setNumber: setNumber++,
             weight: Number(s.weight),
-            reps: Number(s.reps),
+            reps: d.exercise.trackingMode === "duration" ? 0 : Number(s.reps),
+            durationSeconds: d.exercise.trackingMode === "duration" ? Number(s.durationSeconds) : null,
             rir: s.rir === "" ? null : Number(s.rir),
             isWarmup: s.isWarmup,
           });
@@ -784,7 +815,9 @@ export default function LogWorkout() {
                 {d.prescription && (
                   <>
                     <Badge variant="secondary" className="text-xs" data-testid={`badge-prescription-reps-${d.exercise.id}`}>
-                      {d.prescription.targetRepsMin}-{d.prescription.targetRepsMax} reps
+                      {d.exercise.trackingMode === "duration"
+                        ? `${d.prescription.targetDurationMinSeconds ?? 20}-${d.prescription.targetDurationMaxSeconds ?? 30} sec hold`
+                        : `${d.prescription.targetRepsMin}-${d.prescription.targetRepsMax} reps`}
                     </Badge>
                     <Badge variant="secondary" className="text-xs" data-testid={`badge-prescription-rir-${d.exercise.id}`}>
                       {d.prescription.targetRir} RIR target
@@ -827,13 +860,13 @@ export default function LogWorkout() {
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <ExerciseHistory exerciseId={d.exercise.id} />
+            <ExerciseHistory exercise={d.exercise} />
 
             <div className="space-y-2">
               <div className="grid grid-cols-[1.5rem_1fr_1fr_1fr_2.5rem_2.25rem_2rem] gap-2 text-xs text-muted-foreground px-1">
                 <span>#</span>
-                <span>Weight</span>
-                <span>Reps</span>
+                <span>{d.exercise.equipment === "Bodyweight" ? "Additional weight" : "Weight"}</span>
+                <span>{d.exercise.trackingMode === "duration" ? "Time (sec)" : "Reps"}</span>
                 <span>RIR</span>
                 <span className="text-center">Warm-Up</span>
                 <span />
@@ -849,21 +882,34 @@ export default function LogWorkout() {
                   <Input
                     type="number"
                     inputMode="decimal"
-                    placeholder="lb"
+                    placeholder={d.exercise.equipment === "Bodyweight" ? "+ lb" : "lb"}
                     value={s.weight}
                     disabled={!!s.loggedSetId}
                     onChange={(e) => updateSet(d.key, s.key, { weight: e.target.value })}
                     data-testid={`input-weight-${d.exercise.id}-${idx}`}
                   />
-                  <Input
-                    type="number"
-                    inputMode="numeric"
-                    placeholder="reps"
-                    value={s.reps}
-                    disabled={!!s.loggedSetId}
-                    onChange={(e) => updateSet(d.key, s.key, { reps: e.target.value })}
-                    data-testid={`input-reps-${d.exercise.id}-${idx}`}
-                  />
+                  {d.exercise.trackingMode === "duration" ? (
+                    <Input
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      placeholder="sec"
+                      value={s.durationSeconds}
+                      disabled={!!s.loggedSetId}
+                      onChange={(e) => updateSet(d.key, s.key, { durationSeconds: e.target.value })}
+                      data-testid={`input-duration-${d.exercise.id}-${idx}`}
+                    />
+                  ) : (
+                    <Input
+                      type="number"
+                      inputMode="numeric"
+                      placeholder="reps"
+                      value={s.reps}
+                      disabled={!!s.loggedSetId}
+                      onChange={(e) => updateSet(d.key, s.key, { reps: e.target.value })}
+                      data-testid={`input-reps-${d.exercise.id}-${idx}`}
+                    />
+                  )}
                   <Input
                     type="number"
                     inputMode="decimal"
@@ -887,7 +933,12 @@ export default function LogWorkout() {
                     variant={s.loggedSetId ? "ghost" : "outline"}
                     size="icon"
                     className="h-8 w-8"
-                    disabled={!!s.loggedSetId || s.weight === "" || s.reps === "" || logSetMutation.isPending}
+                    disabled={
+                      !!s.loggedSetId ||
+                      s.weight === "" ||
+                      (d.exercise.trackingMode === "duration" ? s.durationSeconds === "" : s.reps === "") ||
+                      logSetMutation.isPending
+                    }
                     onClick={() => logSetMutation.mutate({ exKey: d.key, setKey: s.key })}
                     data-testid={`button-log-set-${d.exercise.id}-${idx}`}
                     aria-label={s.loggedSetId ? "Set logged" : "Log this set"}

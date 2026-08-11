@@ -192,6 +192,7 @@ function toHistorySet(s: SetWithExercise): HistorySetInput {
     setType: s.isWarmup ? "Warmup" : "Working",
     weight: s.weight,
     reps: s.reps,
+    durationSeconds: s.durationSeconds ?? null,
     rir: s.rir ?? null,
     completed: true, // all logged sets are considered completed (no partial-set concept in this app)
   };
@@ -225,6 +226,7 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
           exerciseId,
           exerciseOrder: idx,
           exerciseName: exercise.name,
+          trackingMode: exercise.trackingMode === "duration" ? "duration" : "reps",
           primaryMuscleGroupId: primaryStimulusMuscle(stimulus)?.muscleGroupId ?? exercise.primaryMuscleGroupId,
           stimulus,
           intensityTechnique: "Normal",
@@ -471,6 +473,21 @@ export async function registerRoutes(
     }
     const updated = await storage.updateExercise(id, parsed.data);
     if (!updated) return res.status(404).json({ message: "Exercise not found" });
+    if (updated.trackingMode === "duration") {
+      const templateRows = db
+        .select()
+        .from(workoutTemplateExercisesTable)
+        .where(eq(workoutTemplateExercisesTable.exerciseId, id))
+        .all();
+      for (const row of templateRows) {
+        if (row.targetDurationMinSeconds == null || row.targetDurationMaxSeconds == null) {
+          await storage.updateWorkoutTemplateExercise(row.id, {
+            targetDurationMinSeconds: row.targetDurationMinSeconds ?? 20,
+            targetDurationMaxSeconds: row.targetDurationMaxSeconds ?? 30,
+          });
+        }
+      }
+    }
     res.json((await buildExerciseViews(userId)).find((exercise) => exercise.id === updated.id));
   });
 
@@ -539,7 +556,13 @@ export async function registerRoutes(
         (workoutDateMap.get(a.workoutId) ?? "").localeCompare(workoutDateMap.get(b.workoutId) ?? "") ||
         a.id - b.id,
     );
-    const prIds = markHistoricalPrs(chronological);
+    const exercise = await storage.getExercise(id);
+    const prIds = markHistoricalPrs(
+      chronological.map((set) => ({
+        ...set,
+        trackingMode: exercise?.trackingMode === "duration" ? "duration" as const : "reps" as const,
+      })),
+    );
     const enriched = chronological
       .map((s) => ({
         ...s,
@@ -604,6 +627,15 @@ export async function registerRoutes(
     });
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
+    }
+    const exercise = await storage.getExercise(parsed.data.exerciseId);
+    if (!exercise) return res.status(404).json({ message: "Exercise not found" });
+    if (exercise.trackingMode === "duration") {
+      const min = parsed.data.targetDurationMinSeconds;
+      const max = parsed.data.targetDurationMaxSeconds;
+      if (!min || !max || min < 1 || max < min) {
+        return res.status(400).json({ message: "Hold duration must have a valid minimum and maximum" });
+      }
     }
     const created = await storage.createWorkoutTemplateExercise(parsed.data);
     res.status(201).json(created);
@@ -680,6 +712,22 @@ export async function registerRoutes(
     const patchSchema = insertWorkoutTemplateExerciseSchema.partial();
     const parsed = patchSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+
+    const existingExerciseRow = db
+      .select()
+      .from(workoutTemplateExercisesTable)
+      .where(eq(workoutTemplateExercisesTable.id, teId))
+      .get();
+    if (!existingExerciseRow) return res.status(404).json({ message: "Template exercise not found" });
+    const exercise = await storage.getExercise(existingExerciseRow.exerciseId);
+    if (exercise?.trackingMode === "duration") {
+      if (
+        (parsed.data.targetDurationMinSeconds != null && parsed.data.targetDurationMinSeconds < 1) ||
+        (parsed.data.targetDurationMaxSeconds != null && parsed.data.targetDurationMaxSeconds < 1)
+      ) {
+        return res.status(400).json({ message: "Hold duration must be at least one second" });
+      }
+    }
 
     const updated = await storage.updateWorkoutTemplateExercise(teId, parsed.data);
     if (!updated) return res.status(404).json({ message: "Template exercise not found" });
@@ -811,13 +859,28 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
+    const exercise = await storage.getExercise(parsed.data.exerciseId);
+    if (!exercise) return res.status(404).json({ message: "Exercise not found" });
+    const isDuration = exercise.trackingMode === "duration";
+    if (parsed.data.weight < 0) {
+      return res.status(400).json({ message: "Weight cannot be negative" });
+    }
+    if (isDuration && (!parsed.data.durationSeconds || parsed.data.durationSeconds < 1)) {
+      return res.status(400).json({ message: "Static holds require a duration of at least one second" });
+    }
+    if (!isDuration && parsed.data.reps < 1) {
+      return res.status(400).json({ message: "Rep-based sets require at least one repetition" });
+    }
     // Verify the parent workout belongs to the requesting user before allowing insert.
     const parentWorkout = await storage.getWorkout(parsed.data.workoutId);
     if (!parentWorkout) return res.status(404).json({ message: "Workout not found" });
     if (parentWorkout.userId !== userId) {
       return res.status(403).json({ message: "Workout does not belong to the active user" });
     }
-    const created = await storage.createSet(parsed.data);
+    const setData = isDuration
+      ? { ...parsed.data, reps: 0, durationSeconds: parsed.data.durationSeconds }
+      : { ...parsed.data, durationSeconds: null };
+    const created = await storage.createSet(setData);
 
     // Live PR check: compare this set against the user's prior working sets
     // for the same exercise (excluding the one just created) so the client
@@ -829,8 +892,20 @@ export async function registerRoutes(
         (s) => s.id !== created.id,
       );
       pr = checkLivePersonalRecord(
-        { weight: created.weight, reps: created.reps, isWarmup: created.isWarmup },
-        priorSets.map((s) => ({ weight: s.weight, reps: s.reps, isWarmup: s.isWarmup })),
+        {
+          weight: created.weight,
+          reps: created.reps,
+          durationSeconds: created.durationSeconds,
+          trackingMode: isDuration ? "duration" : "reps",
+          isWarmup: created.isWarmup,
+        },
+        priorSets.map((s) => ({
+          weight: s.weight,
+          reps: s.reps,
+          durationSeconds: s.durationSeconds,
+          trackingMode: isDuration ? "duration" as const : "reps" as const,
+          isWarmup: s.isWarmup,
+        })),
       );
     } catch (err) {
       console.error("PR check failed for set", created.id, err);
@@ -853,7 +928,23 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
-    const updated = await storage.updateSet(id, parsed.data);
+    const exercise = await storage.getExercise(existingSet.exerciseId);
+    if (!exercise) return res.status(404).json({ message: "Exercise not found" });
+    const weight = parsed.data.weight ?? existingSet.weight;
+    if (weight < 0) return res.status(400).json({ message: "Weight cannot be negative" });
+    const isDuration = exercise.trackingMode === "duration";
+    const durationSeconds = parsed.data.durationSeconds ?? existingSet.durationSeconds;
+    const reps = parsed.data.reps ?? existingSet.reps;
+    if (isDuration && (!durationSeconds || durationSeconds < 1)) {
+      return res.status(400).json({ message: "Static holds require a duration of at least one second" });
+    }
+    if (!isDuration && reps < 1) {
+      return res.status(400).json({ message: "Rep-based sets require at least one repetition" });
+    }
+    const updated = await storage.updateSet(
+      id,
+      isDuration ? { ...parsed.data, reps: 0, durationSeconds } : { ...parsed.data, durationSeconds: null },
+    );
     if (!updated) return res.status(404).json({ message: "Set not found" });
     res.json(updated);
   });
@@ -1058,6 +1149,7 @@ export async function registerRoutes(
 
     const suggestions = [];
     for (const exercise of targetExercises) {
+      if (exercise.trackingMode === "duration") continue;
       const prescription = prescriptionByExercise.get(exercise.id) ?? {
         targetRepsMin: 8,
         targetRepsMax: 12,
@@ -1338,7 +1430,7 @@ export async function registerRoutes(
     const payload = {
       exportType: "forge-profile-backup" as const,
       exportedAt: new Date().toISOString(),
-      version: 2,
+      version: 3,
       data: buildUserExport(user),
     };
 
@@ -1359,7 +1451,7 @@ export async function registerRoutes(
     const payload = {
       exportType: "forge-full-backup" as const,
       exportedAt: new Date().toISOString(),
-      version: 2,
+      version: 3,
       data: {
         muscleGroups: allMuscleGroups,
         exercises: allExercises,

@@ -200,6 +200,9 @@ export const equipmentTypes = [
 ] as const;
 export type Equipment = (typeof equipmentTypes)[number];
 
+export const trackingModes = ["reps", "duration"] as const;
+export type TrackingMode = (typeof trackingModes)[number];
+
 export const exercises = sqliteTable("exercises", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
@@ -218,6 +221,7 @@ export const exercises = sqliteTable("exercises", {
   isUnilateral: integer("is_unilateral", { mode: "boolean" })
     .notNull()
     .default(false),
+  trackingMode: text("tracking_mode").notNull().default("reps"),
 });
 
 // Global Forge defaults. Ratios are effective-set multipliers and intentionally
@@ -267,6 +271,7 @@ export const insertExerciseSchema = createInsertSchema(exercises)
   .omit({ id: true })
   .extend({
     equipment: z.enum(equipmentTypes),
+    trackingMode: z.enum(trackingModes).default("reps"),
     secondaryMuscles: z.array(z.number()).default([]).transform((v) => JSON.stringify(v)),
   });
 
@@ -303,7 +308,10 @@ export const exerciseStimulusListSchema = z
 
 export const exerciseMetadataSchema = createInsertSchema(exercises)
   .omit({ id: true, primaryMuscleGroupId: true, secondaryMuscles: true })
-  .extend({ equipment: z.enum(equipmentTypes) });
+  .extend({
+    equipment: z.enum(equipmentTypes),
+    trackingMode: z.enum(trackingModes).default("reps"),
+  });
 
 export const createExerciseWithStimulusSchema = exerciseMetadataSchema.extend({ stimulus: exerciseStimulusListSchema });
 export const updateExerciseStimulusSchema = z.object({ stimulus: exerciseStimulusListSchema });
@@ -384,6 +392,8 @@ export const workoutTemplateExercises = sqliteTable(
     targetSets: integer("target_sets").notNull().default(3),
     targetRepsMin: integer("target_reps_min").notNull().default(8),
     targetRepsMax: integer("target_reps_max").notNull().default(12),
+    targetDurationMinSeconds: integer("target_duration_min_seconds"),
+    targetDurationMaxSeconds: integer("target_duration_max_seconds"),
     tempo: text("tempo"),
     targetRir: integer("target_rir").notNull().default(2),
     failureTarget: text("failure_target").notNull().default("Never"),
@@ -455,6 +465,7 @@ export const sets = sqliteTable("sets", {
   setNumber: integer("set_number").notNull(),
   weight: real("weight").notNull(),
   reps: integer("reps").notNull(),
+  durationSeconds: integer("duration_seconds"),
   rir: real("rir"), // nullable, Reps In Reserve (0-4+)
   isWarmup: integer("is_warmup", { mode: "boolean" }).notNull().default(false),
 });

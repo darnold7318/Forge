@@ -24,6 +24,8 @@ import { useToast } from "@/hooks/use-toast";
 interface Exercise {
   id: number;
   name: string;
+  equipment: string;
+  trackingMode: "reps" | "duration";
 }
 
 interface SetRow {
@@ -32,6 +34,7 @@ interface SetRow {
   setNumber: number;
   weight: number;
   reps: number;
+  durationSeconds: number | null;
   rir: number | null;
   isWarmup: boolean;
   exercise: Exercise;
@@ -82,7 +85,7 @@ export default function WorkoutEdit() {
 
   // Local draft copy of set field values, keyed by set id, so typing doesn't
   // fight with refetches. Reset whenever the workout id changes / initial load lands.
-  const [drafts, setDrafts] = useState<Record<number, { weight: string; reps: string; rir: string }>>({});
+  const [drafts, setDrafts] = useState<Record<number, { weight: string; reps: string; durationSeconds: string; rir: string }>>({});
   useEffect(() => {
     if (!workout) return;
     setDrafts((prev) => {
@@ -92,6 +95,7 @@ export default function WorkoutEdit() {
           next[s.id] = {
             weight: String(s.weight),
             reps: String(s.reps),
+            durationSeconds: s.durationSeconds == null ? "" : String(s.durationSeconds),
             rir: s.rir == null ? "" : String(s.rir),
           };
         }
@@ -127,7 +131,7 @@ export default function WorkoutEdit() {
       patch,
     }: {
       setId: number;
-      patch: Partial<{ weight: number; reps: number; rir: number | null; isWarmup: boolean }>;
+      patch: Partial<{ weight: number; reps: number; durationSeconds: number; rir: number | null; isWarmup: boolean }>;
     }) => {
       const res = await apiRequest("PATCH", `/api/sets/${setId}`, patch);
       return res.json();
@@ -136,7 +140,7 @@ export default function WorkoutEdit() {
     onError: () => toast({ title: "Couldn't save set", variant: "destructive" }),
   });
   const debouncedPatchSet = useKeyedDebouncedCallback(
-    (setId: number, patch: Partial<{ weight: number; reps: number; rir: number | null }>) =>
+    (setId: number, patch: Partial<{ weight: number; reps: number; durationSeconds: number; rir: number | null }>) =>
       patchSetMutation.mutate({ setId, patch }),
   );
 
@@ -243,7 +247,9 @@ export default function WorkoutEdit() {
       ) : (
         exerciseOrder.map((exId) => {
           const exSets = setsByExercise.get(exId)!;
-          const exName = exSets[0].exercise.name;
+          const exercise = exSets[0].exercise;
+          const exName = exercise.name;
+          const isDuration = exercise.trackingMode === "duration";
           return (
             <Card key={exId} data-testid={`card-edit-exercise-${exId}`}>
               <CardHeader>
@@ -254,14 +260,19 @@ export default function WorkoutEdit() {
               <CardContent className="space-y-2">
                 <div className="grid grid-cols-[1.5rem_1fr_1fr_1fr_2.5rem_2rem] gap-2 text-xs text-muted-foreground px-1">
                   <span>#</span>
-                  <span>Weight</span>
-                  <span>Reps</span>
+                  <span>{exercise.equipment === "Bodyweight" ? "Additional weight" : "Weight"}</span>
+                  <span>{isDuration ? "Time (sec)" : "Reps"}</span>
                   <span>RIR</span>
                   <span className="text-center">Warm</span>
                   <span />
                 </div>
                 {exSets.map((s, idx) => {
-                  const draft = drafts[s.id] ?? { weight: String(s.weight), reps: String(s.reps), rir: s.rir == null ? "" : String(s.rir) };
+                  const draft = drafts[s.id] ?? {
+                    weight: String(s.weight),
+                    reps: String(s.reps),
+                    durationSeconds: s.durationSeconds == null ? "" : String(s.durationSeconds),
+                    rir: s.rir == null ? "" : String(s.rir),
+                  };
                   return (
                     <div
                       key={s.id}
@@ -272,7 +283,7 @@ export default function WorkoutEdit() {
                       <Input
                         type="number"
                         inputMode="decimal"
-                        placeholder="lb"
+                        placeholder={exercise.equipment === "Bodyweight" ? "+ lb" : "lb"}
                         value={draft.weight}
                         onChange={(e) => {
                           const v = e.target.value;
@@ -285,15 +296,19 @@ export default function WorkoutEdit() {
                       <Input
                         type="number"
                         inputMode="numeric"
-                        placeholder="reps"
-                        value={draft.reps}
+                        min={1}
+                        placeholder={isDuration ? "sec" : "reps"}
+                        value={isDuration ? draft.durationSeconds : draft.reps}
                         onChange={(e) => {
                           const v = e.target.value;
-                          setDrafts((prev) => ({ ...prev, [s.id]: { ...prev[s.id], reps: v } }));
+                          const field = isDuration ? "durationSeconds" : "reps";
+                          setDrafts((prev) => ({ ...prev, [s.id]: { ...prev[s.id], [field]: v } }));
                           const num = Number(v);
-                          if (v !== "" && !Number.isNaN(num)) debouncedPatchSet(`${s.id}-reps`, s.id, { reps: num });
+                          if (v !== "" && !Number.isNaN(num)) {
+                            debouncedPatchSet(`${s.id}-${field}`, s.id, { [field]: num });
+                          }
                         }}
-                        data-testid={`input-edit-reps-${s.id}`}
+                        data-testid={isDuration ? `input-edit-duration-${s.id}` : `input-edit-reps-${s.id}`}
                       />
                       <Input
                         type="number"

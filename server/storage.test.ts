@@ -19,6 +19,16 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   legacy.close();
   const { storage } = await import("./storage");
 
+  const migrated = new Database(process.env.DATABASE_PATH);
+  const columns = (table: string) => new Set(
+    (migrated.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((column) => column.name),
+  );
+  assert.ok(columns("exercises").has("tracking_mode"));
+  assert.ok(columns("workout_template_exercises").has("target_duration_min_seconds"));
+  assert.ok(columns("workout_template_exercises").has("target_duration_max_seconds"));
+  assert.ok(columns("sets").has("duration_seconds"));
+  migrated.close();
+
   const users = await storage.getUsers();
   assert.equal(users[0].trainingLevel, "advanced");
   assert.equal(users[1].trainingLevel, "advanced");

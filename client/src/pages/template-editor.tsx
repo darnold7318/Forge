@@ -51,7 +51,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { exerciseRoles, failureTargets, type ExerciseRole, type FailureTarget } from "@shared/schema";
+import { exerciseRoles, failureTargets, type ExerciseRole, type FailureTarget, type TrackingMode } from "@shared/schema";
 
 interface WorkoutTemplateExercise {
   id: number;
@@ -64,6 +64,8 @@ interface WorkoutTemplateExercise {
   targetSets: number;
   targetRepsMin: number;
   targetRepsMax: number;
+  targetDurationMinSeconds: number | null;
+  targetDurationMaxSeconds: number | null;
   targetRir: number;
   failureTarget: FailureTarget;
   restSeconds: number;
@@ -80,6 +82,7 @@ interface Exercise {
   id: number;
   name: string;
   primaryMuscleGroupId: number;
+  trackingMode: TrackingMode;
 }
 
 interface MuscleGroup {
@@ -99,12 +102,12 @@ function useDebouncedCallback<T extends (...args: any[]) => void>(fn: T, delay =
 
 function ExerciseRow({
   te,
-  exerciseName,
+  exercise,
   onUpdate,
   onRemove,
 }: {
   te: WorkoutTemplateExercise;
-  exerciseName: string;
+  exercise: Exercise | undefined;
   onUpdate: (patch: Partial<WorkoutTemplateExercise>) => void;
   onRemove: () => void;
 }) {
@@ -113,6 +116,7 @@ function ExerciseRow({
   });
   const [expanded, setExpanded] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const isDuration = exercise?.trackingMode === "duration";
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -141,7 +145,7 @@ function ExerciseRow({
         <div className="flex-1 min-w-0 space-y-2">
           <div className="flex items-center justify-between gap-2">
             <p className="font-medium truncate" data-testid={`text-exercise-name-${te.id}`}>
-              {exerciseName}
+              {exercise?.name ?? `Exercise #${te.exerciseId}`}
             </p>
             <div className="flex items-center gap-1 shrink-0">
               <Button
@@ -196,25 +200,33 @@ function ExerciseRow({
               />
             </div>
             <div className="space-y-1">
-              <Label className="text-[11px] text-muted-foreground">Reps min</Label>
+              <Label className="text-[11px] text-muted-foreground">{isDuration ? "Hold min (sec)" : "Reps min"}</Label>
               <Input
                 type="number"
                 min={1}
                 className="h-8 text-xs"
-                defaultValue={te.targetRepsMin}
-                onChange={(e) => onUpdate({ targetRepsMin: Number(e.target.value) || 1 })}
-                data-testid={`input-reps-min-${te.id}`}
+                defaultValue={isDuration ? te.targetDurationMinSeconds ?? 20 : te.targetRepsMin}
+                onChange={(e) =>
+                  onUpdate(isDuration
+                    ? { targetDurationMinSeconds: Number(e.target.value) || 1 }
+                    : { targetRepsMin: Number(e.target.value) || 1 })
+                }
+                data-testid={isDuration ? `input-duration-min-${te.id}` : `input-reps-min-${te.id}`}
               />
             </div>
             <div className="space-y-1">
-              <Label className="text-[11px] text-muted-foreground">Reps max</Label>
+              <Label className="text-[11px] text-muted-foreground">{isDuration ? "Hold max (sec)" : "Reps max"}</Label>
               <Input
                 type="number"
                 min={1}
                 className="h-8 text-xs"
-                defaultValue={te.targetRepsMax}
-                onChange={(e) => onUpdate({ targetRepsMax: Number(e.target.value) || 1 })}
-                data-testid={`input-reps-max-${te.id}`}
+                defaultValue={isDuration ? te.targetDurationMaxSeconds ?? 30 : te.targetRepsMax}
+                onChange={(e) =>
+                  onUpdate(isDuration
+                    ? { targetDurationMaxSeconds: Number(e.target.value) || 1 }
+                    : { targetRepsMax: Number(e.target.value) || 1 })
+                }
+                data-testid={isDuration ? `input-duration-max-${te.id}` : `input-reps-max-${te.id}`}
               />
             </div>
             <div className="space-y-1">
@@ -304,7 +316,7 @@ function ExerciseRow({
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove {exerciseName}?</AlertDialogTitle>
+            <AlertDialogTitle>Remove {exercise?.name ?? "this exercise"}?</AlertDialogTitle>
             <AlertDialogDescription>
               This removes the exercise from this template. This can't be undone.
             </AlertDialogDescription>
@@ -352,8 +364,8 @@ export default function TemplateEditor() {
     queryKey: ["/api/muscle-groups"],
   });
 
-  const exerciseNameLookup = new Map<number, string>();
-  for (const e of exercises ?? []) exerciseNameLookup.set(e.id, e.name);
+  const exerciseLookup = new Map<number, Exercise>();
+  for (const e of exercises ?? []) exerciseLookup.set(e.id, e);
   const muscleGroupNameLookup = new Map<number, string>();
   for (const mg of muscleGroups ?? []) muscleGroupNameLookup.set(mg.id, mg.displayName);
 
@@ -399,11 +411,14 @@ export default function TemplateEditor() {
 
   const addExerciseMutation = useMutation({
     mutationFn: async (exerciseId: number) => {
+      const exercise = exerciseLookup.get(exerciseId);
       const res = await apiRequest("POST", `/api/workout-templates/${templateId}/exercises`, {
         exerciseId,
         targetSets: 3,
         targetRepsMin: 8,
         targetRepsMax: 12,
+        targetDurationMinSeconds: exercise?.trackingMode === "duration" ? 20 : null,
+        targetDurationMaxSeconds: exercise?.trackingMode === "duration" ? 30 : null,
         targetRir: 2,
         restSeconds: 90,
         exerciseRole: "Isolation",
@@ -572,7 +587,7 @@ export default function TemplateEditor() {
                     <ExerciseRow
                       key={te.id}
                       te={te}
-                      exerciseName={exerciseNameLookup.get(te.exerciseId) ?? `Exercise #${te.exerciseId}`}
+                      exercise={exerciseLookup.get(te.exerciseId)}
                       onUpdate={(patch) => debouncedUpdateExercise(te.id, patch)}
                       onRemove={() => removeExerciseMutation.mutate(te.id)}
                     />

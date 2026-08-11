@@ -105,7 +105,8 @@ function ensureTables() {
       equipment TEXT NOT NULL,
       movement_pattern TEXT,
       is_compound INTEGER NOT NULL DEFAULT 0,
-      is_unilateral INTEGER NOT NULL DEFAULT 0
+      is_unilateral INTEGER NOT NULL DEFAULT 0,
+      tracking_mode TEXT NOT NULL DEFAULT 'reps'
     );
 
     CREATE TABLE IF NOT EXISTS exercise_muscle_stimulus (
@@ -149,6 +150,8 @@ function ensureTables() {
       target_sets INTEGER NOT NULL DEFAULT 3,
       target_reps_min INTEGER NOT NULL DEFAULT 8,
       target_reps_max INTEGER NOT NULL DEFAULT 12,
+      target_duration_min_seconds INTEGER,
+      target_duration_max_seconds INTEGER,
       tempo TEXT,
       target_rir INTEGER NOT NULL DEFAULT 2,
       failure_target TEXT NOT NULL DEFAULT 'Never',
@@ -175,6 +178,7 @@ function ensureTables() {
       set_number INTEGER NOT NULL,
       weight REAL NOT NULL,
       reps INTEGER NOT NULL,
+      duration_seconds INTEGER,
       rir REAL,
       is_warmup INTEGER NOT NULL DEFAULT 0
     );
@@ -268,6 +272,41 @@ function ensureTables() {
     // Preserve the existing unilateral editor for accounts present when this
     // feature ships. The column default stays Beginner for future accounts.
     sqlite.prepare("UPDATE users SET training_level = 'advanced'").run();
+  }
+
+  // Add duration tracking without rewriting existing rep-based records.
+  for (const { table, column, ddl } of [
+    {
+      table: "exercises",
+      column: "tracking_mode",
+      ddl: "ALTER TABLE exercises ADD COLUMN tracking_mode TEXT NOT NULL DEFAULT 'reps'",
+    },
+    {
+      table: "workout_template_exercises",
+      column: "target_duration_min_seconds",
+      ddl: "ALTER TABLE workout_template_exercises ADD COLUMN target_duration_min_seconds INTEGER",
+    },
+    {
+      table: "workout_template_exercises",
+      column: "target_duration_max_seconds",
+      ddl: "ALTER TABLE workout_template_exercises ADD COLUMN target_duration_max_seconds INTEGER",
+    },
+    {
+      table: "sets",
+      column: "duration_seconds",
+      ddl: "ALTER TABLE sets ADD COLUMN duration_seconds INTEGER",
+    },
+  ] as const) {
+    const columns = new Set(
+      (sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name),
+    );
+    if (!columns.has(column)) {
+      try {
+        sqlite.exec(ddl);
+      } catch {
+        // Column already added by a concurrent boot — safe to ignore.
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1059,6 +1098,8 @@ export class DatabaseStorage implements IStorage {
           targetSets: te.targetSets,
           targetRepsMin: te.targetRepsMin,
           targetRepsMax: te.targetRepsMax,
+          targetDurationMinSeconds: te.targetDurationMinSeconds,
+          targetDurationMaxSeconds: te.targetDurationMaxSeconds,
           tempo: te.tempo,
           targetRir: te.targetRir,
           failureTarget: te.failureTarget,
