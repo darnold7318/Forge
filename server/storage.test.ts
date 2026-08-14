@@ -11,10 +11,11 @@ test("default stimulus, complete user overrides, and reset are isolated per user
     CREATE TABLE users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
-      color_accent TEXT
+      color_accent TEXT,
+      training_level TEXT NOT NULL DEFAULT 'beginner'
     );
-    INSERT INTO users (name, color_accent) VALUES ('Existing 1', 'chart-1');
-    INSERT INTO users (name, color_accent) VALUES ('Existing 2', 'chart-2');
+    INSERT INTO users (name, color_accent, training_level) VALUES ('Existing 1', 'chart-1', 'beginner');
+    INSERT INTO users (name, color_accent, training_level) VALUES ('Existing 2', 'chart-2', 'advanced');
   `);
   legacy.close();
   const { storage } = await import("./storage");
@@ -27,13 +28,20 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   assert.ok(columns("workout_template_exercises").has("target_duration_min_seconds"));
   assert.ok(columns("workout_template_exercises").has("target_duration_max_seconds"));
   assert.ok(columns("sets").has("duration_seconds"));
+  assert.ok(columns("users").has("training_goal"));
+  assert.ok(columns("user_coach_settings").has("progression_style"));
+  assert.ok(columns("user_muscle_coach_overrides").has("recovery_half_life_hours"));
+  assert.ok(columns("user_exercise_coach_overrides").has("fatigue_cost"));
+  assert.ok(columns("workout_exercise_snapshots").has("target_rir"));
   migrated.close();
 
   const users = await storage.getUsers();
-  assert.equal(users[0].trainingLevel, "advanced");
+  assert.equal(users[0].trainingLevel, "beginner");
   assert.equal(users[1].trainingLevel, "advanced");
+  assert.equal(users[0].trainingGoal, "hypertrophy");
   const newUser = await storage.createUser({ name: "New user", passwordHash: "test:test" });
-  assert.equal(newUser.trainingLevel, "beginner");
+  assert.equal(newUser.trainingLevel, "intermediate");
+  assert.equal(newUser.trainingGoal, "hypertrophy");
   const updatedUser = await storage.updateUserPreferences(newUser.id, { trainingLevel: "intermediate" });
   assert.equal(updatedUser?.trainingLevel, "intermediate");
   assert.deepEqual(await storage.getRecoverySettings(newUser.id), {
@@ -48,8 +56,38 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   };
   await storage.setRecoverySettings(newUser.id, customizedRecovery);
   assert.deepEqual(await storage.getRecoverySettings(newUser.id), customizedRecovery);
+  const coachSettings = await storage.getCoachSettings(newUser.id);
+  assert.equal(coachSettings.progressionStyle, "automatic");
+  await storage.setCoachSettings(newUser.id, { ...coachSettings, progressionStyle: "rep_first", trendHistoryLimit: 6 });
+  assert.equal((await storage.getCoachSettings(newUser.id)).progressionStyle, "rep_first");
   const bench = (await storage.getExercises()).find((exercise) => exercise.name === "Barbell Bench Press");
   assert.ok(bench);
+  const template = await storage.createWorkoutTemplate({ userId: newUser.id, name: "Snapshot Test", notes: null });
+  await storage.createWorkoutTemplateExercise({
+    workoutTemplateId: template.id,
+    exerciseId: bench.id,
+    exerciseOrder: 1,
+    exerciseRole: "Primary Compound",
+    warmupSets: 1,
+    topSets: 0,
+    backoffSets: 0,
+    backoffReductionPercent: 0,
+    targetSets: 3,
+    targetRepsMin: 8,
+    targetRepsMax: 12,
+    targetDurationMinSeconds: null,
+    targetDurationMaxSeconds: null,
+    tempo: null,
+    targetRir: 2,
+    failureTarget: "Last Set",
+    intensityTechnique: "Rest Pause",
+    restSeconds: 120,
+    notes: null,
+  });
+  const workout = await storage.createWorkout({ userId: newUser.id, date: "2026-08-14", name: "Snapshot Test", workoutTemplateId: template.id });
+  const snapshot = (await storage.getWorkoutExerciseSnapshots(newUser.id)).find((row) => row.workoutId === workout.id && row.exerciseId === bench.id);
+  assert.equal(snapshot?.failureTarget, "Last Set");
+  assert.equal(snapshot?.intensityTechnique, "Rest Pause");
 
   const defaults = await storage.getEffectiveExerciseStimulus(users[0].id, bench.id);
   assert.equal(defaults.length, 4);

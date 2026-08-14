@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Dumbbell, Plus, Pencil, Trash2, Search, RotateCcw, X } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -85,6 +85,7 @@ function ExerciseFormDialog({
   muscleGroups,
   onSaved,
   showUnilateral,
+  showAdvanced,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -93,9 +94,20 @@ function ExerciseFormDialog({
   muscleGroups: MuscleGroupWithDisplay[];
   onSaved: (ex: Exercise) => void;
   showUnilateral: boolean;
+  showAdvanced: boolean;
 }) {
   const { toast } = useToast();
   const [form, setForm] = useState<ExerciseFormState>(initial ? toFormState(initial) : emptyForm);
+  const { data: coachConfig } = useQuery<{ exerciseOverrides: { exerciseId: number; fatigueCost: number }[] }>({
+    queryKey: ["/api/coach/settings"],
+    queryFn: async () => (await apiRequest("GET", "/api/coach/settings")).json(),
+    enabled: open && showAdvanced,
+  });
+  const currentFatigueOverride = coachConfig?.exerciseOverrides.find((item) => item.exerciseId === initial?.id);
+  const [fatigueCost, setFatigueCost] = useState("1.00");
+  useEffect(() => {
+    if (open) setFatigueCost(currentFatigueOverride?.fatigueCost.toFixed(2) ?? "1.00");
+  }, [open, initial?.id, currentFatigueOverride?.fatigueCost]);
 
   // Reset form whenever the dialog is opened for a (possibly different) exercise.
   const [lastInitialId, setLastInitialId] = useState<number | null | undefined>(undefined);
@@ -140,7 +152,11 @@ function ExerciseFormDialog({
       };
       if (mode === "create") {
         const res = await apiRequest("POST", "/api/exercises", { ...payload, stimulus: normalizedStimulus });
-        return res.json();
+        const exercise = await res.json();
+        if (showAdvanced && Number(fatigueCost) !== 1) {
+          await apiRequest("PUT", `/api/coach/settings/exercises/${exercise.id}`, { fatigueCost: Number(fatigueCost) });
+        }
+        return exercise;
       }
       const metadataResponse = await apiRequest("PATCH", `/api/exercises/${initial!.id}`, payload);
       let exercise = await metadataResponse.json();
@@ -150,10 +166,18 @@ function ExerciseFormDialog({
         });
         exercise = await stimulusResponse.json();
       }
+      if (showAdvanced) {
+        if (Number(fatigueCost) === 1) {
+          await apiRequest("DELETE", `/api/coach/settings/exercises/${initial!.id}`);
+        } else {
+          await apiRequest("PUT", `/api/coach/settings/exercises/${initial!.id}`, { fatigueCost: Number(fatigueCost) });
+        }
+      }
       return exercise;
     },
     onSuccess: (ex: Exercise) => {
       queryClient.invalidateQueries({ queryKey: ["/api/exercises"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/coach/settings"] });
       toast({
         title: mode === "create" ? "Exercise created" : "Exercise updated",
         description: `${ex.name} ${mode === "create" ? "added to" : "updated in"} your library.`,
@@ -186,6 +210,7 @@ function ExerciseFormDialog({
     normalizedStimulus.some((row) => row.stimulusRatio > 0) &&
     normalizedStimulus.every((row) => row.stimulusRatio >= 0 && row.stimulusRatio <= 1) &&
     new Set(normalizedStimulus.map((row) => row.muscleGroupId)).size === normalizedStimulus.length &&
+    (!showAdvanced || (Number.isFinite(Number(fatigueCost)) && Number(fatigueCost) >= 0.5 && Number(fatigueCost) <= 2)) &&
     !saveMutation.isPending;
 
   return (
@@ -297,6 +322,18 @@ function ExerciseFormDialog({
               )}
             </div>
           </div>
+          {showAdvanced && (
+            <div className="space-y-1.5 rounded-md border p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div><Label htmlFor="exercise-fatigue-cost">Exercise fatigue cost</Label><p className="text-xs text-muted-foreground">0.50-2.00 model coefficient. 1.00 uses the normal Forge cost.</p></div>
+                <Badge variant={Number(fatigueCost) === 1 ? "outline" : "default"}>{Number(fatigueCost) === 1 ? "Using Forge default" : "Customized"}</Badge>
+              </div>
+              <div className="flex gap-2">
+                <Input id="exercise-fatigue-cost" type="number" min="0.5" max="2" step="0.05" value={fatigueCost} onChange={(event) => setFatigueCost(event.target.value)} />
+                <Button type="button" variant="outline" onClick={() => setFatigueCost("1.00")}>Reset</Button>
+              </div>
+            </div>
+          )}
           <div className="space-y-1.5">
             <Label>Equipment</Label>
             <Select value={form.equipment} onValueChange={(v) => setForm((p) => ({ ...p, equipment: v as Equipment }))}>
@@ -582,6 +619,7 @@ export default function Exercises() {
         muscleGroups={muscleGroups ?? []}
         onSaved={setEditingExercise}
         showUnilateral={activeUser?.trainingLevel === "advanced"}
+        showAdvanced={activeUser?.trainingLevel === "advanced"}
       />
 
       <DeleteExerciseDialog exercise={deletingExercise} onOpenChange={(open) => { if (!open) setDeletingExercise(null); }} />

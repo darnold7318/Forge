@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import type { Server } from "node:http";
 import { z } from "zod";
 import { storage, db } from "./storage";
+import { getEffectiveCoachContext } from "./coach-settings";
 import type { SetWithExercise } from "./storage";
 import { hashPassword, verifyPassword, toPublicUser, requireAuth, requireAdmin, login as loginUser, issueTokenFor, logout as logoutToken } from "./auth";
 import {
@@ -19,6 +20,11 @@ import {
   bodyweightLogs as bodyweightLogsTable,
   exerciseMuscleStimulus as exerciseMuscleStimulusTable,
   userExerciseMuscleStimulusOverrides as userExerciseMuscleStimulusOverridesTable,
+  userCoachSettings as userCoachSettingsTable,
+  userMuscleCoachOverrides as userMuscleCoachOverridesTable,
+  userExerciseCoachOverrides as userExerciseCoachOverridesTable,
+  workoutExerciseSnapshots as workoutExerciseSnapshotsTable,
+  userMuscleLearnedRanges as userMuscleLearnedRangesTable,
 } from "@shared/schema";
 import {
   CLIENT_TZ_HEADER,
@@ -43,6 +49,9 @@ import {
   loginSchema,
   updateUserPreferencesSchema,
   recoverySettingsSchema,
+  coachSettingsSchema,
+  muscleCoachOverrideSchema,
+  exerciseCoachOverrideSchema,
   generateScheduleSchema,
   setWeeklyRestDaysSchema,
   setCustomWeeklyTemplateSchema,
@@ -56,6 +65,7 @@ import {
   type Workout,
   type User,
   type InsertUser,
+  type TrainingGoalId,
 } from "@shared/schema";
 import {
   categorizeVolume,
@@ -79,6 +89,11 @@ import {
   type DashboardTemplateInput,
   type LivePrResult,
   monthBounds,
+  evaluateExerciseTrend,
+  evaluateGoalAwareProgression,
+  buildGoalAwareWorkoutSuggestion,
+  RECOVERY_HALF_LIFE_HOURS,
+  type MuscleVolumeContext,
 } from "@shared/coaching";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -96,6 +111,16 @@ function getUserId(req: Request, res: Response): number | null {
     return null;
   }
   return req.authUser.id;
+}
+
+function requireAdvancedUser(req: Request, res: Response): number | null {
+  const userId = getUserId(req, res);
+  if (userId == null) return null;
+  if (req.authUser?.trainingLevel !== "advanced") {
+    res.status(403).json({ message: "Advanced Coach Settings require Advanced training experience" });
+    return null;
+  }
+  return userId;
 }
 
 function startOfWeekWindow(referenceDate: Date, weeksAgo: number): { start: Date; end: Date } {
@@ -205,6 +230,8 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
   const workoutsList = await storage.getWorkouts(userId); // already ordered desc by date, id
   const allSets = await storage.getAllSets(userId);
   const stimulusMap = await storage.getEffectiveStimulusMapForUser(userId);
+  const snapshots = await storage.getWorkoutExerciseSnapshots(userId);
+  const snapshotMap = new Map(snapshots.map((snapshot) => [`${snapshot.workoutId}:${snapshot.exerciseId}`, snapshot]));
 
   const setsByWorkout = new Map<number, SetWithExercise[]>();
   for (const s of allSets) {
@@ -224,6 +251,7 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
       ([exerciseId, exSets], idx) => {
         const exercise = exSets[0].exercise;
         const stimulus = stimulusMap.get(exerciseId) ?? [];
+        const snapshot = snapshotMap.get(`${w.id}:${exerciseId}`);
         return {
           exerciseId,
           exerciseOrder: idx,
@@ -231,8 +259,17 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
           trackingMode: exercise.trackingMode === "duration" ? "duration" : "reps",
           primaryMuscleGroupId: primaryStimulusMuscle(stimulus)?.muscleGroupId ?? exercise.primaryMuscleGroupId,
           stimulus,
-          intensityTechnique: "Normal",
-          failureTarget: "Never",
+          intensityTechnique: snapshot?.intensityTechnique ?? "Normal",
+          failureTarget: snapshot?.failureTarget ?? "Never",
+          prescriptionSnapshotAvailable: snapshot != null,
+          prescription: snapshot ? {
+            targetSets: snapshot.targetSets,
+            targetRepsMin: snapshot.targetRepsMin,
+            targetRepsMax: snapshot.targetRepsMax,
+            targetDurationMinSeconds: snapshot.targetDurationMinSeconds,
+            targetDurationMaxSeconds: snapshot.targetDurationMaxSeconds,
+            targetRir: snapshot.targetRir,
+          } : null,
           sets: exSets.sort((a, b) => a.setNumber - b.setNumber).map(toHistorySet),
         };
       },
@@ -664,6 +701,7 @@ export async function registerRoutes(
     const exercisesList = await storage.getExercisesWithStimulus(userId);
     const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
     const { nameById } = await buildMuscleGroupLookup();
+    const coachContext = await getEffectiveCoachContext(userId);
 
     const rows = template.exercises.map((te) => {
       const exercise = exerciseMap.get(te.exerciseId);
@@ -677,10 +715,19 @@ export async function registerRoutes(
         exerciseRole: te.exerciseRole,
         failureTarget: te.failureTarget,
         primaryMuscleName,
+        intensityTechnique: te.intensityTechnique,
+        effectiveMuscleSets: (exercise?.stimulus ?? []).map((stimulus) => {
+          const muscle = coachContext.muscleById.get(stimulus.muscleGroupId);
+          return {
+            muscleName: muscle?.displayName ?? String(stimulus.muscleGroupId),
+            effectiveSets: te.targetSets * stimulus.stimulusRatio,
+            mrv: muscle?.mrv,
+          };
+        }),
       };
     });
 
-    res.json(analyzeWorkoutComposition(rows));
+    res.json(analyzeWorkoutComposition(rows, coachContext.goal));
   });
 
   // ---------------- Template editor (owner-only mutations) ----------------
@@ -988,7 +1035,7 @@ export async function registerRoutes(
   app.get("/api/dashboard/volume", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
-    const muscleGroupsList = await storage.getMuscleGroups();
+    const coachContext = await getEffectiveCoachContext(userId);
     const workoutsList = await storage.getWorkouts(userId);
     const workoutMap = new Map(workoutsList.map((w) => [w.id, w]));
     const allSets = await storage.getAllSets(userId);
@@ -1014,12 +1061,12 @@ export async function registerRoutes(
 
     const volumeMap = computeWeeklyVolumeByMuscleGroup(tagged);
 
-    const result = muscleGroupsList.map((mg) => {
-      const setCount = volumeMap.get(mg.id) ?? 0;
+    const result = coachContext.muscles.map((mg) => {
+      const setCount = volumeMap.get(mg.muscleGroupId) ?? 0;
       return {
-        muscleGroupId: mg.id,
-        muscleGroupName: mg.name,
-        displayName: muscleGroupDisplayNames[mg.name as MuscleGroupName] ?? mg.name,
+        muscleGroupId: mg.muscleGroupId,
+        muscleGroupName: mg.muscle,
+        displayName: muscleGroupDisplayNames[mg.muscle] ?? mg.displayName,
         sets: setCount,
         mev: mg.mev,
         mav: mg.mav,
@@ -1035,7 +1082,7 @@ export async function registerRoutes(
   app.get("/api/volume-tracker", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
-    const muscleGroupsList = await storage.getMuscleGroups();
+    const coachContext = await getEffectiveCoachContext(userId);
     const workoutsList = await storage.getWorkouts(userId);
     const workoutMap = new Map(workoutsList.map((w) => [w.id, w]));
     const allSets = await storage.getAllSets(userId);
@@ -1067,14 +1114,14 @@ export async function registerRoutes(
       trendWeeks.push(volumeForWeeksBack(i));
     }
 
-    const result = muscleGroupsList.map((mg) => {
-      const current = thisWeek.get(mg.id) ?? 0;
-      const previous = lastWeek.get(mg.id) ?? 0;
-      const trend = trendWeeks.map((w) => w.get(mg.id) ?? 0);
+    const result = coachContext.muscles.map((mg) => {
+      const current = thisWeek.get(mg.muscleGroupId) ?? 0;
+      const previous = lastWeek.get(mg.muscleGroupId) ?? 0;
+      const trend = trendWeeks.map((w) => w.get(mg.muscleGroupId) ?? 0);
       return {
-        muscleGroupId: mg.id,
-        muscleGroupName: mg.name,
-        displayName: muscleGroupDisplayNames[mg.name as MuscleGroupName] ?? mg.name,
+        muscleGroupId: mg.muscleGroupId,
+        muscleGroupName: mg.muscle,
+        displayName: muscleGroupDisplayNames[mg.muscle] ?? mg.displayName,
         currentWeekSets: current,
         lastWeekSets: previous,
         delta: current - previous,
@@ -1095,8 +1142,8 @@ export async function registerRoutes(
     if (userId == null) return;
     const history = await buildHistory(userId, zoneOf(req));
     const { lookup } = await buildMuscleGroupLookup();
-    const recoverySettings = await storage.getRecoverySettings(userId);
-    const states = evaluateRecovery(history, lookup, new Date(), recoverySettings);
+    const coachContext = await getEffectiveCoachContext(userId);
+    const states = evaluateRecovery(history, lookup, new Date(), coachContext.recoverySettings, coachContext.recoveryOverrides);
     res.json(states);
   });
 
@@ -1114,12 +1161,99 @@ export async function registerRoutes(
     res.json(await storage.setRecoverySettings(userId, parsed.data));
   });
 
+  // ---------------- Goal-aware Coach settings ----------------
+  app.get("/api/coach/settings", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const [context, muscleOverrides, exerciseOverrides] = await Promise.all([
+      getEffectiveCoachContext(userId),
+      storage.getMuscleCoachOverrides(userId),
+      storage.getExerciseCoachOverrides(userId),
+    ]);
+    res.json({
+      goal: context.goal,
+      profile: context.profile,
+      settings: context.settings,
+      muscles: context.muscles,
+      muscleOverrides,
+      exerciseOverrides,
+    });
+  });
+
+  app.put("/api/coach/settings", async (req, res) => {
+    const userId = requireAdvancedUser(req, res);
+    if (userId == null) return;
+    const parsed = coachSettingsSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+    res.json(await storage.setCoachSettings(userId, parsed.data));
+  });
+
+  app.delete("/api/coach/settings", async (req, res) => {
+    const userId = requireAdvancedUser(req, res);
+    if (userId == null) return;
+    for (const item of await storage.getMuscleCoachOverrides(userId)) {
+      await storage.deleteMuscleCoachOverride(userId, item.muscleGroupId);
+    }
+    for (const item of await storage.getExerciseCoachOverrides(userId)) {
+      await storage.deleteExerciseCoachOverride(userId, item.exerciseId);
+    }
+    res.json(await storage.resetCoachSettings(userId));
+  });
+
+  app.put("/api/coach/settings/muscles/:muscleGroupId", async (req, res) => {
+    const userId = requireAdvancedUser(req, res);
+    if (userId == null) return;
+    const muscleGroupId = Number(req.params.muscleGroupId);
+    const parsed = muscleCoachOverrideSchema.safeParse({ ...req.body, muscleGroupId });
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+    if (parsed.data.recoveryHalfLifeHours == null && parsed.data.mev == null && parsed.data.mav == null && parsed.data.mrv == null) {
+      await storage.deleteMuscleCoachOverride(userId, muscleGroupId);
+      return res.json(parsed.data);
+    }
+    const defaults = await storage.getMuscleGroup(muscleGroupId);
+    if (!defaults) return res.status(404).json({ message: "Muscle group not found" });
+    const resolved = {
+      mev: parsed.data.mev ?? defaults.mev,
+      mav: parsed.data.mav ?? defaults.mav,
+      mrv: parsed.data.mrv ?? defaults.mrv,
+    };
+    if (!(resolved.mev < resolved.mav && resolved.mav < resolved.mrv)) {
+      return res.status(400).json({ message: "Effective landmarks must satisfy MEV < MAV < MRV" });
+    }
+    res.json(await storage.setMuscleCoachOverride(userId, parsed.data));
+  });
+
+  app.delete("/api/coach/settings/muscles/:muscleGroupId", async (req, res) => {
+    const userId = requireAdvancedUser(req, res);
+    if (userId == null) return;
+    await storage.deleteMuscleCoachOverride(userId, Number(req.params.muscleGroupId));
+    res.status(204).end();
+  });
+
+  app.put("/api/coach/settings/exercises/:exerciseId", async (req, res) => {
+    const userId = requireAdvancedUser(req, res);
+    if (userId == null) return;
+    const exerciseId = Number(req.params.exerciseId);
+    const parsed = exerciseCoachOverrideSchema.safeParse({ ...req.body, exerciseId });
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+    if (!(await storage.getExercise(exerciseId))) return res.status(404).json({ message: "Exercise not found" });
+    res.json(await storage.setExerciseCoachOverride(userId, parsed.data));
+  });
+
+  app.delete("/api/coach/settings/exercises/:exerciseId", async (req, res) => {
+    const userId = requireAdvancedUser(req, res);
+    if (userId == null) return;
+    await storage.deleteExerciseCoachOverride(userId, Number(req.params.exerciseId));
+    res.status(204).end();
+  });
+
   // ---------------- Fatigue trend ----------------
   app.get("/api/coach/fatigue-trend", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
     const history = await buildHistory(userId, zoneOf(req));
-    const signal = evaluateFatigueTrend(history);
+    const coachContext = await getEffectiveCoachContext(userId);
+    const signal = evaluateFatigueTrend(history, coachContext.settings.fatigueSensitivity);
     res.json(signal);
   });
 
@@ -1141,24 +1275,59 @@ export async function registerRoutes(
     const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
     const history = await buildHistory(userId, zoneOf(req));
     const { lookup, nameById } = await buildMuscleGroupLookup();
-    const recoverySettings = await storage.getRecoverySettings(userId);
-    const recoveryStates = evaluateRecovery(history, lookup, new Date(), recoverySettings);
+    const coachContext = await getEffectiveCoachContext(userId);
+    const recoveryStates = evaluateRecovery(
+      history,
+      lookup,
+      new Date(),
+      coachContext.recoverySettings,
+      coachContext.recoveryOverrides,
+    );
+    const fatigue = evaluateFatigueTrend(history, coachContext.settings.fatigueSensitivity);
+
+    const workoutsList = await storage.getWorkouts(userId);
+    const workoutMap = new Map(workoutsList.map((workout) => [workout.id, workout]));
+    const allSets = await storage.getAllSets(userId);
+    const { start: weekStart, end: weekEnd } = startOfWeekWindow(new Date(), 0);
+    const weeklyVolume = computeWeeklyVolumeByMuscleGroup(allSets
+      .filter((set) => {
+        const workout = workoutMap.get(set.workoutId);
+        if (!workout) return false;
+        const instant = workoutInstant(workout, zoneOf(req));
+        return instant >= weekStart && instant < weekEnd;
+      })
+      .map((set) => ({
+        exerciseId: set.exerciseId,
+        stimulus: exerciseMap.get(set.exerciseId)?.stimulus ?? [],
+        isWarmup: set.isWarmup,
+      })));
 
     // Optional filter by template
     const templateId = req.query.templateId ? Number(req.query.templateId) : undefined;
     let targetExercises = exercisesList;
-    let prescriptionByExercise = new Map<number, { targetRepsMin: number; targetRepsMax: number; targetRir: number }>();
+    let prescriptionByExercise = new Map<number, {
+      targetSets: number;
+      targetRepsMin: number;
+      targetRepsMax: number;
+      targetDurationMinSeconds: number | null;
+      targetDurationMaxSeconds: number | null;
+      targetRir: number;
+    }>();
 
     if (templateId) {
       const template = await storage.getWorkoutTemplateWithExercises(templateId);
+      if (template && template.userId !== userId) return res.status(403).json({ message: "You do not own this template" });
       if (template) {
         targetExercises = template.exercises
           .map((te) => exerciseMap.get(te.exerciseId))
           .filter((e): e is (typeof exercisesList)[number] => !!e);
         for (const te of template.exercises) {
           prescriptionByExercise.set(te.exerciseId, {
+            targetSets: te.targetSets,
             targetRepsMin: te.targetRepsMin,
             targetRepsMax: te.targetRepsMax,
+            targetDurationMinSeconds: te.targetDurationMinSeconds,
+            targetDurationMaxSeconds: te.targetDurationMaxSeconds,
             targetRir: te.targetRir,
           });
         }
@@ -1167,19 +1336,51 @@ export async function registerRoutes(
 
     const suggestions = [];
     for (const exercise of targetExercises) {
-      if (exercise.trackingMode === "duration") continue;
       const prescription = prescriptionByExercise.get(exercise.id) ?? {
+        targetSets: 3,
         targetRepsMin: 8,
         targetRepsMax: 12,
+        targetDurationMinSeconds: 20,
+        targetDurationMaxSeconds: 60,
         targetRir: 2,
       };
       const previous = getPreviousExercisePerformance(history, exercise.id, exercise.name);
       if (previous.lastSets.length === 0 && !templateId) continue; // skip untrained exercises in the "all" view
 
-      const evaluation = evaluateProgression(prescription, previous);
-      const primaryMuscle = nameById.get(exercise.primaryMuscleGroupId);
+      const primaryStimulus = primaryStimulusMuscle(exercise.stimulus);
+      const primaryMuscleId = primaryStimulus?.muscleGroupId ?? exercise.primaryMuscleGroupId;
+      const primaryMuscle = nameById.get(primaryMuscleId);
       const recovery = primaryMuscle ? getPrimaryRecovery(recoveryStates, primaryMuscle) : recoveryStates[0];
-      const suggestion = buildWorkoutSuggestion(prescription, previous, evaluation, recovery);
+      const trend = evaluateExerciseTrend(
+        history,
+        exercise.id,
+        coachContext.goal,
+        exercise.trackingMode === "duration" ? "duration" : "reps",
+        coachContext.settings,
+      );
+      const muscleSettings = coachContext.muscleById.get(primaryMuscleId);
+      const volumeContext: MuscleVolumeContext | null = muscleSettings ? {
+        muscleGroupId: primaryMuscleId,
+        muscleName: muscleSettings.displayName,
+        currentEffectiveSets: weeklyVolume.get(primaryMuscleId) ?? 0,
+        mev: muscleSettings.mev,
+        mav: muscleSettings.mav,
+        mrv: muscleSettings.mrv,
+        status: categorizeVolume(weeklyVolume.get(primaryMuscleId) ?? 0, muscleSettings),
+      } : null;
+      const progressionInput = {
+        goal: coachContext.goal,
+        trackingMode: exercise.trackingMode === "duration" ? "duration" as const : "reps" as const,
+        prescription,
+        previous,
+        trend,
+        settings: coachContext.settings,
+        recovery,
+        fatigue,
+        volumeContext,
+      };
+      const evaluation = evaluateGoalAwareProgression(progressionInput);
+      const suggestion = buildGoalAwareWorkoutSuggestion(progressionInput, evaluation);
 
       suggestions.push({
         exerciseId: exercise.id,
@@ -1271,6 +1472,7 @@ export async function registerRoutes(
     const templates = await storage.getAllWorkoutTemplatesWithExercises(userId);
     const exercisesList = await storage.getExercisesWithStimulus(userId);
     const exerciseNameLookup = new Map(exercisesList.map((e) => [e.id, e.name]));
+    const dashboardExerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
     const { lookup, nameById } = await buildMuscleGroupLookup();
     const exercisePrimaryMuscleLookup = new Map<number, MuscleGroupName>();
     for (const e of exercisesList) {
@@ -1279,7 +1481,7 @@ export async function registerRoutes(
     }
 
     const history = (await buildHistory(userId, zoneOf(req))).slice(0, 50);
-    const recoverySettings = await storage.getRecoverySettings(userId);
+    const coachContext = await getEffectiveCoachContext(userId);
 
     const todayIso = todayFor(req);
     const [monthStart, monthEnd] = monthBounds(todayIso.slice(0, 7));
@@ -1297,6 +1499,9 @@ export async function registerRoutes(
         targetSets: te.targetSets,
         targetRepsMin: te.targetRepsMin,
         targetRepsMax: te.targetRepsMax,
+        targetDurationMinSeconds: te.targetDurationMinSeconds,
+        targetDurationMaxSeconds: te.targetDurationMaxSeconds,
+        trackingMode: dashboardExerciseMap.get(te.exerciseId)?.trackingMode === "duration" ? "duration" : "reps",
         targetRir: te.targetRir,
         warmupSets: te.warmupSets,
         topSets: te.topSets,
@@ -1311,7 +1516,10 @@ export async function registerRoutes(
       exerciseNameLookup,
       exercisePrimaryMuscleLookup,
       muscleGroupLookup: lookup,
-      recoverySettings,
+      recoverySettings: coachContext.recoverySettings,
+      recoveryOverrides: coachContext.recoveryOverrides,
+      coachSettings: coachContext.settings,
+      trainingGoal: coachContext.goal,
       schedule: scheduleForDashboard,
       zone: zoneOf(req),
     });
@@ -1370,6 +1578,7 @@ export async function registerRoutes(
     const schedule = db.select().from(workoutSchedulesTable).where(eq(workoutSchedulesTable.userId, userId)).get();
 
     if (workoutIds.length) {
+      db.delete(workoutExerciseSnapshotsTable).where(inArray(workoutExerciseSnapshotsTable.workoutId, workoutIds)).run();
       db.delete(setsTable).where(inArray(setsTable.workoutId, workoutIds)).run();
     }
     db.delete(workoutsTable).where(eq(workoutsTable.userId, userId)).run();
@@ -1386,6 +1595,10 @@ export async function registerRoutes(
       .where(eq(userExerciseMuscleStimulusOverridesTable.userId, userId))
       .run();
     db.delete(userRecoverySettingsTable).where(eq(userRecoverySettingsTable.userId, userId)).run();
+    db.delete(userCoachSettingsTable).where(eq(userCoachSettingsTable.userId, userId)).run();
+    db.delete(userMuscleCoachOverridesTable).where(eq(userMuscleCoachOverridesTable.userId, userId)).run();
+    db.delete(userExerciseCoachOverridesTable).where(eq(userExerciseCoachOverridesTable.userId, userId)).run();
+    db.delete(userMuscleLearnedRangesTable).where(eq(userMuscleLearnedRangesTable.userId, userId)).run();
     db.delete(usersTable).where(eq(usersTable.id, userId)).run();
 
     // Drop the now-orphaned session so the bearer token can't outlive the account.
@@ -1410,6 +1623,9 @@ export async function registerRoutes(
     const setsRows = workoutIds.length
       ? db.select().from(setsTable).where(inArray(setsTable.workoutId, workoutIds)).all()
       : [];
+    const workoutExerciseSnapshots = workoutIds.length
+      ? db.select().from(workoutExerciseSnapshotsTable).where(inArray(workoutExerciseSnapshotsTable.workoutId, workoutIds)).all()
+      : [];
     const schedule = db.select().from(workoutSchedulesTable).where(eq(workoutSchedulesTable.userId, userId)).get();
     const days = schedule
       ? db.select().from(scheduleDaysTable).where(eq(scheduleDaysTable.scheduleId, schedule.id)).all()
@@ -1425,6 +1641,10 @@ export async function registerRoutes(
       .from(userRecoverySettingsTable)
       .where(eq(userRecoverySettingsTable.userId, userId))
       .get() ?? null;
+    const coachSettings = db.select().from(userCoachSettingsTable).where(eq(userCoachSettingsTable.userId, userId)).get() ?? null;
+    const muscleCoachOverrides = db.select().from(userMuscleCoachOverridesTable).where(eq(userMuscleCoachOverridesTable.userId, userId)).all();
+    const exerciseCoachOverrides = db.select().from(userExerciseCoachOverridesTable).where(eq(userExerciseCoachOverridesTable.userId, userId)).all();
+    const learnedVolumeRanges = db.select().from(userMuscleLearnedRangesTable).where(eq(userMuscleLearnedRangesTable.userId, userId)).all();
 
     return {
       user,
@@ -1432,11 +1652,16 @@ export async function registerRoutes(
       workoutTemplateExercises: templateExercises,
       workouts: workoutsRows,
       sets: setsRows,
+      workoutExerciseSnapshots,
       workoutSchedule: schedule ?? null,
       scheduleDays: days,
       bodyweightLogs: bodyweightRows,
       exerciseStimulusOverrides,
       recoverySettings,
+      coachSettings,
+      muscleCoachOverrides,
+      exerciseCoachOverrides,
+      learnedVolumeRanges,
     };
   }
 
@@ -1457,7 +1682,7 @@ export async function registerRoutes(
     const payload = {
       exportType: "forge-profile-backup" as const,
       exportedAt: new Date().toISOString(),
-      version: 4,
+      version: 5,
       data: buildUserExport(user),
     };
 
@@ -1478,7 +1703,7 @@ export async function registerRoutes(
     const payload = {
       exportType: "forge-full-backup" as const,
       exportedAt: new Date().toISOString(),
-      version: 4,
+      version: 5,
       data: {
         muscleGroups: allMuscleGroups,
         exercises: allExercises,

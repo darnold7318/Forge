@@ -47,17 +47,21 @@ import { useActiveUser } from "@/lib/user-context";
 import { useTheme } from "@/components/theme-provider";
 import { useToast } from "@/hooks/use-toast";
 import { RecoverySettingsEditor } from "@/components/recovery-settings-editor";
+import { AdvancedCoachSettings } from "@/components/advanced-coach-settings";
 import {
   themeColorIds,
   workoutSplitIds,
   workoutSplitLabels,
   trainingLevelIds,
   trainingLevelLabels,
+  trainingGoalIds,
+  trainingGoalLabels,
   timezoneModeIds,
   timezoneModeLabels,
   type ThemeColorId,
   type WorkoutSplitId,
   type TrainingLevelId,
+  type TrainingGoalId,
   type TimezoneModeId,
   type CustomWeeklySlot,
   type User,
@@ -1259,6 +1263,26 @@ export default function Settings() {
         </CardContent>
       </Card>
 
+      <Card data-testid="card-training-goal">
+        <CardHeader>
+          <CardTitle className="text-base">Training Goal</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <Label htmlFor="training-goal">Primary coaching goal</Label>
+          <Select
+            value={activeUser.trainingGoal}
+            onValueChange={(value) => updatePreferences.mutate({ trainingGoal: value })}
+            disabled={updatePreferences.isPending}
+          >
+            <SelectTrigger id="training-goal" data-testid="select-training-goal"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {trainingGoalIds.map((goal: TrainingGoalId) => <SelectItem key={goal} value={goal}>{trainingGoalLabels[goal]}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">Your goal changes what Coach prioritizes. Training Experience controls how much detail and customization you see.</p>
+        </CardContent>
+      </Card>
+
       <Card id="recovery-settings" data-testid="card-recovery-settings">
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
@@ -1273,6 +1297,8 @@ export default function Settings() {
           <RecoverySettingsEditor />
         </CardContent>
       </Card>
+
+      {activeUser.trainingLevel === "advanced" && <AdvancedCoachSettings />}
 
       <TimezoneCard
         activeUser={activeUser}

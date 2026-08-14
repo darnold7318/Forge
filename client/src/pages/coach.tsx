@@ -46,6 +46,11 @@ const RECOMMENDATION_META: Record<
   "Hold Progression": { icon: Minus, className: "border-volume-high text-volume-high" },
   "Reduce Or Delay": { icon: AlertTriangle, className: "border-destructive text-destructive" },
   "Start Conservative": { icon: ArrowRight, className: "border-muted-foreground/40 text-muted-foreground" },
+  "Add Reps": { icon: ArrowUp, className: "border-volume-optimal text-volume-optimal" },
+  "Increase Hold Duration": { icon: ArrowUp, className: "border-volume-optimal text-volume-optimal" },
+  "Add Hold Time": { icon: ArrowUp, className: "border-volume-optimal text-volume-optimal" },
+  "Increase Control": { icon: ArrowUp, className: "border-volume-optimal text-volume-optimal" },
+  Maintain: { icon: Minus, className: "border-muted-foreground/40 text-muted-foreground" },
 };
 
 function recommendationMeta(rec: string) {
@@ -67,7 +72,9 @@ const RECOVERY_STATUS_STYLE: Record<string, string> = {
 
 export default function Coach() {
   const [templateId, setTemplateId] = useState<string>("all");
-  const { activeUserId } = useActiveUser();
+  const { activeUserId, activeUser } = useActiveUser();
+  const showIntermediate = activeUser?.trainingLevel !== "beginner";
+  const showAdvanced = activeUser?.trainingLevel === "advanced";
 
   const { data: templates } = useQuery<WorkoutTemplateLite[]>({
     queryKey: ["/api/workout-templates", activeUserId],
@@ -106,7 +113,7 @@ export default function Coach() {
         <h1 className="text-xl font-display font-bold" data-testid="text-page-title">
           Coach
         </h1>
-        <p className="text-sm text-muted-foreground">Next-session targets, readiness, and recovery guidance</p>
+        <p className="text-sm text-muted-foreground">Next-session targets for {suggestions?.[0]?.goalLabel ?? "your training goal"}</p>
       </div>
 
       {!fatigueLoading && fatigue && (
@@ -217,14 +224,14 @@ export default function Coach() {
                   <p className="text-sm" data-testid={`text-suggestion-reason-${s.exerciseId}`}>
                     {s.reason}
                   </p>
-                  {s.evidenceText && (
+                  {showIntermediate && s.evidenceText && (
                     <p className="text-xs text-muted-foreground">{s.evidenceText}</p>
                   )}
                   {s.nextGoalText && (
                     <p className="text-xs text-muted-foreground italic">{s.nextGoalText}</p>
                   )}
 
-                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs border-t pt-2">
+                  {showIntermediate && <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs border-t pt-2">
                     <span className="flex items-center gap-1">
                       <ShieldAlert className="h-3.5 w-3.5" />
                       <span className={RECOVERY_STATUS_STYLE[s.recoveryStatus] ?? "text-muted-foreground"}>
@@ -236,7 +243,20 @@ export default function Coach() {
                       Readiness {s.readinessScore}/100 — {s.readinessStatus}
                     </span>
                     <span className="text-muted-foreground">Confidence {s.confidenceScore}%</span>
-                  </div>
+                    {s.trend && <span>Trend {s.trend}</span>}
+                    {s.setRecommendation && <span>{s.setRecommendation}</span>}
+                  </div>}
+                  {showIntermediate && s.volumeContext && (
+                    <p className="text-xs text-muted-foreground">
+                      {s.volumeContext.muscleName}: {s.volumeContext.currentEffectiveSets.toFixed(1)} effective sets · MEV {s.volumeContext.mev} / MAV {s.volumeContext.mav} / MRV {s.volumeContext.mrv}
+                    </p>
+                  )}
+                  {showAdvanced && s.confidenceFactors && (
+                    <div className="rounded bg-muted/40 p-2 text-[11px] text-muted-foreground">
+                      {s.confidenceFactors.map((factor) => <span key={factor.label} className="mr-3">{factor.label}: {factor.score}% ({factor.detail})</span>)}
+                      {s.stimulusQuality && <span>Stimulus: {s.stimulusQuality}</span>}
+                    </div>
+                  )}
                   {s.readinessGuidance && (
                     <p className="text-xs text-muted-foreground" data-testid={`text-readiness-guidance-${s.exerciseId}`}>
                       {s.readinessGuidance}

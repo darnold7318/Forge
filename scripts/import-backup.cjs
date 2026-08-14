@@ -42,7 +42,8 @@ CREATE TABLE users (
   theme_color TEXT NOT NULL DEFAULT 'green',
   theme_mode TEXT NOT NULL DEFAULT 'dark',
   workout_split TEXT NOT NULL DEFAULT 'ppl',
-  training_level TEXT NOT NULL DEFAULT 'beginner',
+  training_level TEXT NOT NULL DEFAULT 'intermediate',
+  training_goal TEXT NOT NULL DEFAULT 'hypertrophy',
   timezone_mode TEXT NOT NULL DEFAULT 'home',
   home_timezone TEXT
 );
@@ -54,12 +55,45 @@ CREATE TABLE user_recovery_settings (
   muscle_recovery_speeds TEXT NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE user_coach_settings (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  progression_style TEXT NOT NULL DEFAULT 'automatic',
+  min_comparable_exposures INTEGER NOT NULL DEFAULT 3,
+  trend_history_limit INTEGER NOT NULL DEFAULT 5,
+  preferred_rir_min INTEGER NOT NULL DEFAULT 1,
+  preferred_rir_max INTEGER NOT NULL DEFAULT 2,
+  failure_fatigue_sensitivity TEXT NOT NULL DEFAULT 'normal',
+  fatigue_sensitivity TEXT NOT NULL DEFAULT 'normal',
+  volume_progression_sensitivity TEXT NOT NULL DEFAULT 'normal'
+);
+
 CREATE TABLE muscle_groups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
   mev REAL NOT NULL,
   mav REAL NOT NULL,
   mrv REAL NOT NULL
+);
+
+CREATE TABLE user_muscle_coach_overrides (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  muscle_group_id INTEGER NOT NULL REFERENCES muscle_groups(id) ON DELETE CASCADE,
+  recovery_half_life_hours REAL,
+  mev REAL,
+  mav REAL,
+  mrv REAL,
+  UNIQUE(user_id, muscle_group_id)
+);
+
+CREATE TABLE user_muscle_learned_ranges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  muscle_group_id INTEGER NOT NULL REFERENCES muscle_groups(id) ON DELETE CASCADE,
+  productive_low REAL,
+  productive_high REAL,
+  confidence INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(user_id, muscle_group_id)
 );
 
 CREATE TABLE exercises (
@@ -89,6 +123,14 @@ CREATE TABLE user_exercise_muscle_stimulus_overrides (
   muscle_group_id INTEGER NOT NULL REFERENCES muscle_groups(id),
   stimulus_ratio REAL NOT NULL CHECK(stimulus_ratio >= 0 AND stimulus_ratio <= 1),
   UNIQUE(user_id, exercise_id, muscle_group_id)
+);
+
+CREATE TABLE user_exercise_coach_overrides (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+  fatigue_cost REAL NOT NULL,
+  UNIQUE(user_id, exercise_id)
 );
 
 CREATE TABLE workout_templates (
@@ -130,6 +172,24 @@ CREATE TABLE workouts (
   name TEXT,
   notes TEXT,
   workout_template_id INTEGER REFERENCES workout_templates(id)
+);
+
+CREATE TABLE workout_exercise_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workout_id INTEGER NOT NULL REFERENCES workouts(id) ON DELETE CASCADE,
+  exercise_id INTEGER NOT NULL REFERENCES exercises(id),
+  exercise_role TEXT NOT NULL DEFAULT 'Isolation',
+  target_sets INTEGER NOT NULL DEFAULT 3,
+  target_reps_min INTEGER NOT NULL DEFAULT 8,
+  target_reps_max INTEGER NOT NULL DEFAULT 12,
+  target_duration_min_seconds INTEGER,
+  target_duration_max_seconds INTEGER,
+  target_rir INTEGER NOT NULL DEFAULT 2,
+  failure_target TEXT NOT NULL DEFAULT 'Never',
+  intensity_technique TEXT,
+  rest_seconds INTEGER NOT NULL DEFAULT 90,
+  tracking_mode TEXT NOT NULL DEFAULT 'reps',
+  UNIQUE(workout_id, exercise_id)
 );
 
 CREATE TABLE sets (
@@ -224,10 +284,15 @@ let userCount = 0,
   scheduleDayCount = 0,
   bwCount = 0,
   stimulusOverrideCount = 0,
-  recoverySettingsCount = 0;
+  recoverySettingsCount = 0,
+  coachSettingsCount = 0,
+  muscleCoachOverrideCount = 0,
+  exerciseCoachOverrideCount = 0,
+  workoutSnapshotCount = 0,
+  learnedRangeCount = 0;
 
 const insertUser = db.prepare(
-  `INSERT INTO users (id, name, password_hash, is_admin, color_accent, theme_color, theme_mode, workout_split, training_level, timezone_mode, home_timezone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  `INSERT INTO users (id, name, password_hash, is_admin, color_accent, theme_color, theme_mode, workout_split, training_level, training_goal, timezone_mode, home_timezone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const insertTemplate = db.prepare(
   `INSERT INTO workout_templates (id, user_id, name, notes) VALUES (?, ?, ?, ?)`
@@ -256,6 +321,21 @@ const insertStimulusOverride = db.prepare(
 const insertRecoverySettings = db.prepare(
   `INSERT INTO user_recovery_settings (user_id, fatigue_sensitivity, overall_recovery_speed, muscle_recovery_speeds) VALUES (?, ?, ?, ?)`
 );
+const insertCoachSettings = db.prepare(
+  `INSERT INTO user_coach_settings (user_id, progression_style, min_comparable_exposures, trend_history_limit, preferred_rir_min, preferred_rir_max, failure_fatigue_sensitivity, fatigue_sensitivity, volume_progression_sensitivity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+);
+const insertMuscleCoachOverride = db.prepare(
+  `INSERT INTO user_muscle_coach_overrides (id, user_id, muscle_group_id, recovery_half_life_hours, mev, mav, mrv) VALUES (?, ?, ?, ?, ?, ?, ?)`
+);
+const insertExerciseCoachOverride = db.prepare(
+  `INSERT INTO user_exercise_coach_overrides (id, user_id, exercise_id, fatigue_cost) VALUES (?, ?, ?, ?)`
+);
+const insertWorkoutSnapshot = db.prepare(
+  `INSERT INTO workout_exercise_snapshots (id, workout_id, exercise_id, exercise_role, target_sets, target_reps_min, target_reps_max, target_duration_min_seconds, target_duration_max_seconds, target_rir, failure_target, intensity_technique, rest_seconds, tracking_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+);
+const insertLearnedRange = db.prepare(
+  `INSERT INTO user_muscle_learned_ranges (id, user_id, muscle_group_id, productive_low, productive_high, confidence) VALUES (?, ?, ?, ?, ?, ?)`
+);
 
 const importAll = db.transaction(() => {
   for (const profile of d.profiles) {
@@ -273,6 +353,7 @@ const importAll = db.transaction(() => {
       u.themeMode,
       u.workoutSplit,
       u.trainingLevel || "advanced",
+      u.trainingGoal || "hypertrophy",
       u.timezoneMode || "home",
       u.homeTimezone || null
     );
@@ -287,6 +368,22 @@ const importAll = db.transaction(() => {
         settings.muscleRecoverySpeeds ?? "{}"
       );
       recoverySettingsCount++;
+    }
+
+    if (profile.coachSettings) {
+      const settings = profile.coachSettings;
+      insertCoachSettings.run(
+        u.id,
+        settings.progressionStyle,
+        settings.minComparableExposures,
+        settings.trendHistoryLimit,
+        settings.preferredRirMin,
+        settings.preferredRirMax,
+        settings.failureFatigueSensitivity,
+        settings.fatigueSensitivity,
+        settings.volumeProgressionSensitivity
+      );
+      coachSettingsCount++;
     }
 
     for (const t of profile.workoutTemplates || []) {
@@ -321,6 +418,25 @@ const importAll = db.transaction(() => {
     for (const w of profile.workouts || []) {
       insertWorkout.run(w.id, w.userId, w.date, w.startedAt || null, w.tz || null, w.name, w.notes, w.workoutTemplateId);
       workoutCount++;
+    }
+    for (const snapshot of profile.workoutExerciseSnapshots || []) {
+      insertWorkoutSnapshot.run(
+        snapshot.id,
+        snapshot.workoutId,
+        snapshot.exerciseId,
+        snapshot.exerciseRole,
+        snapshot.targetSets,
+        snapshot.targetRepsMin,
+        snapshot.targetRepsMax,
+        snapshot.targetDurationMinSeconds ?? null,
+        snapshot.targetDurationMaxSeconds ?? null,
+        snapshot.targetRir,
+        snapshot.failureTarget,
+        snapshot.intensityTechnique ?? null,
+        snapshot.restSeconds,
+        snapshot.trackingMode || "reps"
+      );
+      workoutSnapshotCount++;
     }
     for (const s of profile.sets || []) {
       insertSet.run(s.id, s.workoutId, s.exerciseId, s.setNumber, s.weight, s.reps, s.durationSeconds ?? null, s.rir, s.isWarmup ? 1 : 0);
@@ -362,6 +478,18 @@ const importAll = db.transaction(() => {
       insertStimulusOverride.run(row.id, row.userId, row.exerciseId, row.muscleGroupId, row.stimulusRatio);
       stimulusOverrideCount++;
     }
+    for (const row of profile.muscleCoachOverrides || []) {
+      insertMuscleCoachOverride.run(row.id, row.userId, row.muscleGroupId, row.recoveryHalfLifeHours ?? null, row.mev ?? null, row.mav ?? null, row.mrv ?? null);
+      muscleCoachOverrideCount++;
+    }
+    for (const row of profile.exerciseCoachOverrides || []) {
+      insertExerciseCoachOverride.run(row.id, row.userId, row.exerciseId, row.fatigueCost);
+      exerciseCoachOverrideCount++;
+    }
+    for (const row of profile.learnedVolumeRanges || []) {
+      insertLearnedRange.run(row.id, row.userId, row.muscleGroupId, row.productiveLow ?? null, row.productiveHigh ?? null, row.confidence ?? 0);
+      learnedRangeCount++;
+    }
   }
 });
 importAll();
@@ -381,6 +509,10 @@ const tables = [
   "exercises",
   "exercise_muscle_stimulus",
   "user_exercise_muscle_stimulus_overrides",
+  "user_muscle_coach_overrides",
+  "user_exercise_coach_overrides",
+  "workout_exercise_snapshots",
+  "user_muscle_learned_ranges",
 ];
 for (const t of tables) {
   const max = db.prepare(`SELECT COALESCE(MAX(id), 0) as m FROM ${t}`).get().m;
@@ -410,4 +542,9 @@ console.log({
   exerciseMuscleStimulus: counts.exerciseMuscleStimulus,
   exerciseStimulusOverrides: stimulusOverrideCount,
   recoverySettings: recoverySettingsCount,
+  coachSettings: coachSettingsCount,
+  muscleCoachOverrides: muscleCoachOverrideCount,
+  exerciseCoachOverrides: exerciseCoachOverrideCount,
+  workoutExerciseSnapshots: workoutSnapshotCount,
+  learnedVolumeRanges: learnedRangeCount,
 });

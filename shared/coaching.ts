@@ -9,6 +9,7 @@
 
 import {
   DEFAULT_RECOVERY_SETTINGS,
+  DEFAULT_COACH_SETTINGS,
   muscleGroupNames,
   muscleGroupDisplayNames,
   type MuscleGroupName,
@@ -17,6 +18,8 @@ import {
   type ExerciseRole,
   type FailureTarget,
   type TrackingMode,
+  type TrainingGoalId,
+  type CoachSettings,
 } from "./schema";
 import { civilDateInZone } from "./timezone";
 
@@ -49,6 +52,15 @@ export interface HistoryExerciseInput {
   stimulus?: { muscleGroupId: number; stimulusRatio: number }[];
   intensityTechnique: string; // default "Normal"
   failureTarget: string; // default "Never"
+  prescription?: {
+    targetSets: number;
+    targetRepsMin: number;
+    targetRepsMax: number;
+    targetDurationMinSeconds?: number | null;
+    targetDurationMaxSeconds?: number | null;
+    targetRir: number;
+  } | null;
+  prescriptionSnapshotAvailable?: boolean;
   sets: HistorySetInput[];
 }
 
@@ -317,6 +329,349 @@ export function progressionDisplayText(p: ProgressionEvaluation): string {
 }
 
 // ---------------------------------------------------------------------------
+// Goal-aware Coach V2
+// ---------------------------------------------------------------------------
+
+export interface GoalCoachingProfile {
+  id: TrainingGoalId;
+  label: string;
+  progressionPriority: "reps" | "load" | "balanced" | "duration";
+  readinessWeights: {
+    recovery: number;
+    trend: number;
+    fatigue: number;
+    volume: number;
+    adherence: number;
+    confidence: number;
+  };
+  usesHypertrophyVolume: boolean;
+  requiresPrimaryCompound: boolean;
+}
+
+export const GOAL_COACHING_PROFILES: Record<TrainingGoalId, GoalCoachingProfile> = {
+  hypertrophy: {
+    id: "hypertrophy",
+    label: "Hypertrophy",
+    progressionPriority: "reps",
+    readinessWeights: { recovery: 0.25, trend: 0.2, fatigue: 0.15, volume: 0.2, adherence: 0.1, confidence: 0.1 },
+    usesHypertrophyVolume: true,
+    requiresPrimaryCompound: false,
+  },
+  strength: {
+    id: "strength",
+    label: "Strength",
+    progressionPriority: "load",
+    readinessWeights: { recovery: 0.3, trend: 0.25, fatigue: 0.2, volume: 0.05, adherence: 0.1, confidence: 0.1 },
+    usesHypertrophyVolume: false,
+    requiresPrimaryCompound: true,
+  },
+  general_fitness: {
+    id: "general_fitness",
+    label: "General Fitness",
+    progressionPriority: "balanced",
+    readinessWeights: { recovery: 0.25, trend: 0.2, fatigue: 0.2, volume: 0.1, adherence: 0.15, confidence: 0.1 },
+    usesHypertrophyVolume: false,
+    requiresPrimaryCompound: false,
+  },
+  mobility: {
+    id: "mobility",
+    label: "Mobility",
+    progressionPriority: "duration",
+    readinessWeights: { recovery: 0.2, trend: 0.25, fatigue: 0.15, volume: 0.05, adherence: 0.25, confidence: 0.1 },
+    usesHypertrophyVolume: false,
+    requiresPrimaryCompound: false,
+  },
+  muscular_endurance: {
+    id: "muscular_endurance",
+    label: "Muscular Endurance",
+    progressionPriority: "reps",
+    readinessWeights: { recovery: 0.2, trend: 0.25, fatigue: 0.15, volume: 0.15, adherence: 0.15, confidence: 0.1 },
+    usesHypertrophyVolume: false,
+    requiresPrimaryCompound: false,
+  },
+};
+
+export function resolveGoalCoachingProfile(goal: TrainingGoalId): GoalCoachingProfile {
+  return GOAL_COACHING_PROFILES[goal] ?? GOAL_COACHING_PROFILES.hypertrophy;
+}
+
+export interface ExerciseExposureSummary {
+  workoutId: number;
+  performedAt: Date;
+  totalReps: number;
+  totalDurationSeconds: number;
+  totalLoadVolume: number;
+  topWeight: number;
+  estimatedOneRepMax: number;
+  workingSetCount: number;
+  averageRir: number | null;
+  rirCompleteness: number;
+}
+
+export interface ExerciseTrendEvaluation {
+  status: "Learning" | "Improving" | "Stable" | "Regressing";
+  exposureCount: number;
+  exposures: ExerciseExposureSummary[];
+  scoreChangePercent: number;
+  averageRir: number | null;
+  rirCompleteness: number;
+  evidence: string;
+}
+
+function summarizeExposure(session: HistorySessionInput, exercise: HistoryExerciseInput): ExerciseExposureSummary | null {
+  const working = completedSetsOf(exercise.sets).filter((set) => set.setType !== "Warmup");
+  if (working.length === 0) return null;
+  const rirValues = working.flatMap((set) => set.rir == null ? [] : [set.rir]);
+  return {
+    workoutId: session.id,
+    performedAt: session.startedAt,
+    totalReps: working.reduce((sum, set) => sum + set.reps, 0),
+    totalDurationSeconds: working.reduce((sum, set) => sum + (set.durationSeconds ?? 0), 0),
+    totalLoadVolume: working.reduce((sum, set) => sum + set.weight * set.reps, 0),
+    topWeight: Math.max(...working.map((set) => set.weight)),
+    estimatedOneRepMax: Math.max(...working.map((set) => estimateOneRepMax(set.weight, set.reps))),
+    workingSetCount: working.length,
+    averageRir: rirValues.length ? rirValues.reduce((sum, value) => sum + value, 0) / rirValues.length : null,
+    rirCompleteness: rirValues.length / working.length,
+  };
+}
+
+function exposurePerformanceScore(exposure: ExerciseExposureSummary, goal: TrainingGoalId, trackingMode: TrackingMode): number {
+  if (trackingMode === "duration" || goal === "mobility") return exposure.totalDurationSeconds || exposure.totalReps;
+  if (goal === "strength") return exposure.estimatedOneRepMax;
+  if (goal === "muscular_endurance") return exposure.totalReps + exposure.totalDurationSeconds / 10;
+  if (goal === "hypertrophy") {
+    // Total reps is the primary signal; a small load term recognizes productive
+    // load increases without letting tonnage dominate exercise-to-exercise comparisons.
+    return exposure.totalReps + exposure.topWeight * 0.08;
+  }
+  return exposure.totalReps + exposure.estimatedOneRepMax * 0.1;
+}
+
+export function evaluateExerciseTrend(
+  history: HistorySessionInput[],
+  exerciseId: number,
+  goal: TrainingGoalId,
+  trackingMode: TrackingMode,
+  settings: Pick<CoachSettings, "minComparableExposures" | "trendHistoryLimit">,
+): ExerciseTrendEvaluation {
+  const exposures = history
+    .map((session) => {
+      const exercise = session.exercises.find((item) => item.exerciseId === exerciseId);
+      return exercise ? summarizeExposure(session, exercise) : null;
+    })
+    .filter((item): item is ExerciseExposureSummary => item != null)
+    .sort((a, b) => a.performedAt.getTime() - b.performedAt.getTime())
+    .slice(-settings.trendHistoryLimit);
+
+  const averageRirValues = exposures.flatMap((item) => item.averageRir == null ? [] : [item.averageRir]);
+  const averageRir = averageRirValues.length
+    ? averageRirValues.reduce((sum, value) => sum + value, 0) / averageRirValues.length
+    : null;
+  const rirCompleteness = exposures.length
+    ? exposures.reduce((sum, item) => sum + item.rirCompleteness, 0) / exposures.length
+    : 0;
+
+  if (exposures.length < settings.minComparableExposures) {
+    return {
+      status: "Learning",
+      exposureCount: exposures.length,
+      exposures,
+      scoreChangePercent: 0,
+      averageRir,
+      rirCompleteness,
+      evidence: `${exposures.length}/${settings.minComparableExposures} comparable exposures logged.`,
+    };
+  }
+
+  const scores = exposures.map((item) => exposurePerformanceScore(item, goal, trackingMode));
+  const split = Math.max(1, Math.floor(scores.length / 2));
+  const early = scores.slice(0, split).reduce((sum, value) => sum + value, 0) / split;
+  const recentSlice = scores.slice(-split);
+  const recent = recentSlice.reduce((sum, value) => sum + value, 0) / recentSlice.length;
+  const scoreChangePercent = early > 0 ? ((recent - early) / early) * 100 : 0;
+  const status = scoreChangePercent >= 3
+    ? "Improving"
+    : scoreChangePercent <= -5
+      ? "Regressing"
+      : "Stable";
+  return {
+    status,
+    exposureCount: exposures.length,
+    exposures,
+    scoreChangePercent,
+    averageRir,
+    rirCompleteness,
+    evidence: `${status} across ${exposures.length} comparable exposures (${scoreChangePercent >= 0 ? "+" : ""}${fmt1(scoreChangePercent)}%).`,
+  };
+}
+
+export interface ConfidenceFactor {
+  label: string;
+  score: number;
+  detail: string;
+}
+
+export function calculateCoachingConfidence(trend: ExerciseTrendEvaluation): { score: number; factors: ConfidenceFactor[] } {
+  const exposureScore = Math.min(100, trend.exposureCount * 20);
+  const rirScore = Math.round(trend.rirCompleteness * 100);
+  const consistencyScore = trend.status === "Learning" ? 45 : trend.status === "Stable" ? 90 : 82;
+  const factors: ConfidenceFactor[] = [
+    { label: "Comparable history", score: exposureScore, detail: `${trend.exposureCount} exposures` },
+    { label: "RIR coverage", score: rirScore, detail: `${Math.round(trend.rirCompleteness * 100)}% of working sets` },
+    { label: "Trend clarity", score: consistencyScore, detail: trend.status },
+  ];
+  return {
+    score: Math.round(exposureScore * 0.5 + rirScore * 0.25 + consistencyScore * 0.25),
+    factors,
+  };
+}
+
+export interface MuscleVolumeContext {
+  muscleGroupId: number;
+  muscleName: string;
+  currentEffectiveSets: number;
+  mev: number;
+  mav: number;
+  mrv: number;
+  status: "under" | "optimal" | "high" | "excessive";
+  learnedLow?: number | null;
+  learnedHigh?: number | null;
+  learnedConfidence?: number;
+}
+
+export interface GoalAwareProgressionInput {
+  goal: TrainingGoalId;
+  trackingMode: TrackingMode;
+  prescription: ProgressionPrescription & {
+    targetSets?: number;
+    targetDurationMinSeconds?: number | null;
+    targetDurationMaxSeconds?: number | null;
+  };
+  previous: PreviousExercisePerformance;
+  trend: ExerciseTrendEvaluation;
+  settings: CoachSettings;
+  recovery: MuscleRecoveryState;
+  fatigue: FatigueSignal;
+  volumeContext?: MuscleVolumeContext | null;
+}
+
+export interface GoalAwareProgressionEvaluation extends ProgressionEvaluation {
+  trend: ExerciseTrendEvaluation["status"];
+  trendEvidence: string;
+  confidenceFactors: ConfidenceFactor[];
+  setRecommendation: "Add Set" | "Maintain Sets" | "Reduce Set" | "Learning";
+  prescribedSets: number;
+  prescribedRirMin: number;
+  prescribedRirMax: number;
+  volumeContext?: MuscleVolumeContext | null;
+}
+
+export function evaluateGoalAwareProgression(input: GoalAwareProgressionInput): GoalAwareProgressionEvaluation {
+  const { goal, trackingMode, prescription, previous, trend, settings, recovery, fatigue, volumeContext } = input;
+  const base = evaluateProgression(prescription, previous);
+  const confidence = calculateCoachingConfidence(trend);
+  const latest = trend.exposures.at(-1);
+  const templateRir = prescription.targetRir;
+  const rirMin = templateRir != null ? templateRir : settings.preferredRirMin;
+  const rirMax = templateRir != null ? templateRir : settings.preferredRirMax;
+  let recommendation = base.recommendation;
+  let reason = base.reason;
+  let nextGoalText = base.nextGoalText;
+  let suggestedWeight = base.suggestedWeight;
+
+  if (trackingMode === "duration") {
+    const targetMax = prescription.targetDurationMaxSeconds ?? 60;
+    const bestDuration = latest?.totalDurationSeconds ?? 0;
+    recommendation = bestDuration >= targetMax ? "Increase Hold Duration" : "Add Hold Time";
+    reason = `${trend.evidence} Duration is the relevant progression signal for this exercise.`;
+    nextGoalText = bestDuration > 0
+      ? `Add 5-${bestDuration >= targetMax ? 10 : 5} seconds while maintaining control.`
+      : `Start within ${prescription.targetDurationMinSeconds ?? 20}-${targetMax} seconds.`;
+    suggestedWeight = latest?.topWeight ?? 0;
+  } else if (trend.status === "Regressing") {
+    recommendation = recovery.fatiguePercent >= 55 || fatigue.riskScore >= 55 ? "Reduce Or Delay" : "Repeat Or Reduce";
+    reason = `${trend.evidence} Avoid forcing progression until performance stabilizes.`;
+    nextGoalText = "Repeat the prior load with cleaner execution, or reduce load/sets if the decline continues.";
+  } else if (goal === "strength" && trend.status === "Improving" && recovery.fatiguePercent < 55) {
+    recommendation = "Increase Weight";
+    const current = latest?.topWeight ?? base.suggestedWeight;
+    suggestedWeight = current > 0 ? current + (current >= 100 ? 5 : 2.5) : base.suggestedWeight;
+    reason = `${trend.evidence} Estimated strength and recovery support a conservative load increase.`;
+    nextGoalText = `Try ${fmt1(suggestedWeight)} lb while staying at RIR ${rirMin}-${rirMax}.`;
+  } else if (goal === "muscular_endurance" && trend.status === "Improving" && settings.progressionStyle !== "load_first") {
+    recommendation = "Add Reps";
+    reason = `${trend.evidence} Endurance coaching prioritizes total repetitions before load.`;
+    nextGoalText = `Keep the load and add 2-5 total reps while staying at RIR ${rirMin}-${rirMax}.`;
+  } else if (goal === "hypertrophy" && trend.status === "Improving" && !base.recommendation.includes("Increase")) {
+    recommendation = "Add Reps";
+    reason = `${trend.evidence} Progress is occurring before every set has reached the top of the range.`;
+    nextGoalText = `Keep the load and add 1-2 total reps while staying at RIR ${rirMin}-${rirMax}.`;
+  } else if (goal === "mobility") {
+    recommendation = trend.status === "Improving" ? "Increase Control" : "Maintain";
+    reason = `${trend.evidence} Forge is using duration and consistency, not hypertrophy volume, for this goal.`;
+    nextGoalText = "Maintain controlled execution and add duration or repetitions only when quality remains stable.";
+  } else if (settings.progressionStyle === "rep_first" && recommendation === "Optional Increase") {
+    recommendation = "Add Reps";
+    nextGoalText = `Repeat the load and improve total repetitions at RIR ${rirMin}-${rirMax}.`;
+  } else if (settings.progressionStyle === "load_first" && trend.status === "Improving" && recovery.fatiguePercent < 45) {
+    recommendation = "Increase Weight";
+  }
+
+  let setRecommendation: GoalAwareProgressionEvaluation["setRecommendation"] = "Learning";
+  const enoughHistory = trend.exposureCount >= settings.minComparableExposures;
+  if (enoughHistory) {
+    if (trend.status === "Regressing" || recovery.fatiguePercent >= 65 || fatigue.riskScore >= 70 || volumeContext?.status === "excessive") {
+      setRecommendation = "Reduce Set";
+    } else if (
+      goal === "hypertrophy" &&
+      trend.status === "Improving" &&
+      recovery.fatiguePercent <= 35 &&
+      volumeContext?.status === "under"
+    ) {
+      setRecommendation = settings.volumeProgressionSensitivity === "conservative" ? "Maintain Sets" : "Add Set";
+    } else {
+      setRecommendation = "Maintain Sets";
+    }
+  }
+
+  const targetSets = prescription.targetSets ?? latest?.workingSetCount ?? 3;
+  const prescribedSets = Math.max(1, targetSets + (setRecommendation === "Add Set" ? 1 : setRecommendation === "Reduce Set" ? -1 : 0));
+  return {
+    ...base,
+    status: trackingMode === "duration"
+      ? trend.status === "Improving"
+        ? "Progressing"
+        : trend.status === "Regressing"
+          ? "Regressing"
+          : latest
+            ? "Maintaining"
+            : "No History"
+      : trend.status === "Improving"
+        ? "Progressing"
+        : trend.status === "Regressing"
+          ? "Regressing"
+          : base.status,
+    recommendation,
+    reason,
+    nextGoalText,
+    confidenceScore: confidence.score,
+    suggestedWeight,
+    targetText: trackingMode === "duration"
+      ? `Target: ${prescription.targetDurationMinSeconds ?? 20}-${prescription.targetDurationMaxSeconds ?? 60} seconds | RIR ${rirMin}-${rirMax}`
+      : base.targetText,
+    trend: trend.status,
+    trendEvidence: trend.evidence,
+    confidenceFactors: confidence.factors,
+    setRecommendation,
+    prescribedSets,
+    prescribedRirMin: rirMin,
+    prescribedRirMax: rirMax,
+    volumeContext,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 2. RecoveryEngine — evaluateRecovery
 // ---------------------------------------------------------------------------
 
@@ -354,24 +709,48 @@ export const RECOVERY_HALF_LIFE_HOURS: Record<MuscleGroupName, number> = {
   Obliques: 40,
 };
 
-function resolveDecay(muscle: MuscleGroupName, hoursAgo: number, settings: RecoverySettings): number {
+export interface RecoveryModelOverrides {
+  muscleHalfLifeHours?: Partial<Record<MuscleGroupName, number>>;
+  exerciseFatigueCosts?: Record<number, number>;
+  failureFatigueMultiplier?: number;
+}
+
+function resolveDecay(
+  muscle: MuscleGroupName,
+  hoursAgo: number,
+  settings: RecoverySettings,
+  overrides?: RecoveryModelOverrides,
+): number {
   const muscleSpeed = settings.muscleRecoverySpeeds[muscle] ?? 1;
   const effectiveSpeed = settings.overallRecoverySpeed * muscleSpeed;
-  const halfLife = (RECOVERY_HALF_LIFE_HOURS[muscle] ?? 40) / effectiveSpeed;
+  const baseHalfLife = overrides?.muscleHalfLifeHours?.[muscle] ?? RECOVERY_HALF_LIFE_HOURS[muscle] ?? 40;
+  const halfLife = baseHalfLife / effectiveSpeed;
   return Math.pow(0.5, hoursAgo / halfLife);
 }
 
-function estimateFatigue(ex: HistoryExerciseInput): number {
+export const INTENSITY_TECHNIQUE_MODELS: Record<string, { stimulusMultiplier: number; fatigueMultiplier: number }> = {
+  normal: { stimulusMultiplier: 1, fatigueMultiplier: 1 },
+  "drop set": { stimulusMultiplier: 1.12, fatigueMultiplier: 1.22 },
+  "rest pause": { stimulusMultiplier: 1.1, fatigueMultiplier: 1.2 },
+  "myo reps": { stimulusMultiplier: 1.12, fatigueMultiplier: 1.18 },
+  superset: { stimulusMultiplier: 1.05, fatigueMultiplier: 1.12 },
+  "lengthened partials": { stimulusMultiplier: 1.1, fatigueMultiplier: 1.12 },
+};
+
+function estimateFatigue(ex: HistoryExerciseInput, overrides?: RecoveryModelOverrides): number {
   const completed = completedSetsOf(ex.sets).filter((set) => set.setType !== "Warmup");
   const setLoad = completed.length * 8;
   const rirVals = completed.filter((s) => s.rir != null).map((s) => s.rir as number);
   const averageRir = rirVals.length > 0 ? rirVals.reduce((a, b) => a + b, 0) / rirVals.length : 2;
   const rirPenalty = Math.min(Math.max(4 - averageRir, 0), 4) * 2;
-  const techniqueBonus = ex.intensityTechnique && ex.intensityTechnique !== "Normal" ? 5 : 0;
-  const failureBonus = ex.failureTarget && ex.failureTarget !== "Never" ? 4 : 0;
+  const technique = INTENSITY_TECHNIQUE_MODELS[ex.intensityTechnique?.toLowerCase()] ?? INTENSITY_TECHNIQUE_MODELS.normal;
+  const failureBonus = ex.failureTarget && ex.failureTarget !== "Never"
+    ? 4 * (overrides?.failureFatigueMultiplier ?? 1)
+    : 0;
   const volume = completed.reduce((sum, s) => sum + s.weight * s.reps, 0);
   const volumeBonus = volume > 0 ? Math.min(10, volume / 800) : 0;
-  const result = setLoad + rirPenalty + techniqueBonus + failureBonus + volumeBonus;
+  const exerciseCost = overrides?.exerciseFatigueCosts?.[ex.exerciseId] ?? 1;
+  const result = (setLoad + rirPenalty + failureBonus + volumeBonus) * technique.fatigueMultiplier * exerciseCost;
   return Math.min(Math.max(result, 4), 45);
 }
 
@@ -385,6 +764,7 @@ export function evaluateRecovery(
   lookup: MuscleGroupLookup,
   now: Date = new Date(),
   settings: RecoverySettings = DEFAULT_RECOVERY_SETTINGS,
+  overrides?: RecoveryModelOverrides,
 ): MuscleRecoveryState[] {
   const tenDaysAgo = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000);
   const recentSessions = history.filter((s) => s.startedAt >= tenDaysAgo);
@@ -398,7 +778,7 @@ export function evaluateRecovery(
       const completed = completedSetsOf(ex.sets).filter((set) => set.setType !== "Warmup");
       if (completed.length === 0) continue;
 
-      const baseFatigue = estimateFatigue(ex) * settings.fatigueSensitivity;
+      const baseFatigue = estimateFatigue(ex, overrides) * settings.fatigueSensitivity;
       const stimulus = ex.stimulus?.length
         ? ex.stimulus
         : [{ muscleGroupId: ex.primaryMuscleGroupId, stimulusRatio: 1 }];
@@ -406,7 +786,7 @@ export function evaluateRecovery(
         if (row.stimulusRatio <= 0) continue;
         const muscle = lookup.idToName.get(row.muscleGroupId);
         if (!muscle) continue;
-        const decayed = baseFatigue * row.stimulusRatio * resolveDecay(muscle, hoursAgo, settings);
+        const decayed = baseFatigue * row.stimulusRatio * resolveDecay(muscle, hoursAgo, settings, overrides);
         fatigueSum.set(muscle, (fatigueSum.get(muscle) ?? 0) + decayed);
         if (!lastTrained.has(muscle) || session.startedAt > lastTrained.get(muscle)!) {
           lastTrained.set(muscle, session.startedAt);
@@ -473,47 +853,89 @@ export interface FatigueSignal {
   summary: string;
   riskScore: number;
   deloadSuggested: boolean;
+  evidence?: string[];
 }
 
-export function evaluateFatigueTrend(history: HistorySessionInput[]): FatigueSignal {
+export function evaluateFatigueTrend(
+  history: HistorySessionInput[],
+  sensitivity: CoachSettings["fatigueSensitivity"] = "normal",
+): FatigueSignal {
   if (history.length < 3) {
     return {
       status: "Learning",
       summary: "Log at least three workouts before fatigue trends are evaluated.",
       riskScore: 10,
       deloadSuggested: false,
+      evidence: ["Fewer than three workouts are available."],
     };
   }
 
-  // history is most-recent-first; take 3 most recent, then order ascending (oldest of the 3 first)
-  const lastThreeDesc = [...history]
+  // Compare like with like: repeated exposures of the same exercise, never raw
+  // tonnage from unrelated Push/Pull/Legs sessions.
+  const byExercise = new Map<number, { name: string; values: number[] }>();
+  for (const session of [...history].sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime())) {
+    for (const exercise of session.exercises) {
+      const summary = summarizeExposure(session, exercise);
+      if (!summary) continue;
+      const value = exercise.trackingMode === "duration"
+        ? summary.totalDurationSeconds
+        : summary.estimatedOneRepMax + summary.totalReps * 0.15;
+      const item = byExercise.get(exercise.exerciseId) ?? { name: exercise.exerciseName, values: [] };
+      item.values.push(value);
+      byExercise.set(exercise.exerciseId, item);
+    }
+  }
+
+  const regressing: string[] = [];
+  for (const item of Array.from(byExercise.values())) {
+    const last = item.values.slice(-3);
+    if (last.length < 3 || last[0] <= 0 || last[1] <= 0) continue;
+    const firstDrop = (last[1] - last[0]) / last[0];
+    const secondDrop = (last[2] - last[1]) / last[1];
+    if (firstDrop <= -0.04 && secondDrop <= -0.04) regressing.push(item.name);
+  }
+
+  const templateRegressions: string[] = [];
+  const byTemplate = new Map<number, HistorySessionInput[]>();
+  for (const session of history) {
+    if (session.workoutTemplateId == null) continue;
+    const list = byTemplate.get(session.workoutTemplateId) ?? [];
+    list.push(session);
+    byTemplate.set(session.workoutTemplateId, list);
+  }
+  for (const sessions of Array.from(byTemplate.values())) {
+    const last = [...sessions].sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime()).slice(-3);
+    if (last.length < 3) continue;
+    const scores = last.map((session) => {
+      const values = session.exercises.flatMap((exercise) => {
+        const summary = summarizeExposure(session, exercise);
+        return summary ? [exercise.trackingMode === "duration" ? summary.totalDurationSeconds : summary.estimatedOneRepMax] : [];
+      });
+      return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+    });
+    if (scores[0] > 0 && scores[1] < scores[0] * 0.96 && scores[2] < scores[1] * 0.96) {
+      templateRegressions.push(last[2].workoutName);
+    }
+  }
+
+  const recentExercises = [...history]
     .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())
-    .slice(0, 3);
-  const lastThreeAsc = [...lastThreeDesc].sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
+    .slice(0, 3)
+    .flatMap((session) => session.exercises);
+  const workingSets = recentExercises.flatMap((exercise) => completedSetsOf(exercise.sets).filter((set) => set.setType !== "Warmup"));
+  const lowRirRate = workingSets.length
+    ? workingSets.filter((set) => set.rir != null && set.rir <= 0).length / workingSets.length
+    : 0;
 
-  const dynamicExercises = (session: HistorySessionInput) =>
-    session.exercises.filter((exercise) => exercise.trackingMode !== "duration");
-  const volumes = lastThreeAsc.map((session) =>
-    dynamicExercises(session).reduce((sum, exercise) => sum + exerciseVolume(exercise), 0),
-  );
-  const reps = lastThreeAsc.map((s) =>
-    dynamicExercises(s).reduce((sum, e) => sum + completedSetsOf(e.sets).reduce((rs, st) => rs + st.reps, 0), 0),
-  );
-  const setsCount = lastThreeAsc.map((session) =>
-    dynamicExercises(session).reduce((sum, exercise) => sum + exerciseCompletedSetCount(exercise), 0),
-  );
+  const evidence: string[] = [];
+  if (regressing.length) evidence.push(`Repeated exercise regression: ${regressing.slice(0, 3).join(", ")}.`);
+  if (templateRegressions.length) evidence.push(`Repeated template regression: ${templateRegressions.slice(0, 2).join(", ")}.`);
+  if (lowRirRate >= 0.3) evidence.push(`${Math.round(lowRirRate * 100)}% of recent working sets reached RIR 0.`);
+  if (!evidence.length) evidence.push("No repeated same-exercise or same-template decline detected.");
 
-  const volumeDeclining = volumes[2] < volumes[1] && volumes[1] < volumes[0];
-  const repsDeclining = reps[2] < reps[1] && reps[1] < reps[0];
-  const setVolumeDeclining =
-    setsCount[2] > 0 &&
-    setsCount[1] > 0 &&
-    setsCount[0] > 0 &&
-    volumes[2] / setsCount[2] < volumes[1] / setsCount[1] &&
-    volumes[1] / setsCount[1] < volumes[0] / setsCount[0];
-
-  let riskScore = 15 + (volumeDeclining ? 35 : 0) + (repsDeclining ? 25 : 0) + (setVolumeDeclining ? 25 : 0);
-  riskScore = Math.min(riskScore, 100);
+  const sensitivityMultiplier = sensitivity === "low" ? 0.8 : sensitivity === "high" ? 1.2 : 1;
+  let riskScore = 15 + Math.min(45, regressing.length * 18) + Math.min(20, templateRegressions.length * 20) + (lowRirRate >= 0.3 ? 15 : 0);
+  riskScore = Math.min(100, Math.round(riskScore * sensitivityMultiplier));
 
   if (riskScore >= 70) {
     return {
@@ -521,6 +943,7 @@ export function evaluateFatigueTrend(history: HistorySessionInput[]): FatigueSig
       summary: "Recent workout performance is declining across multiple sessions. Consider extra recovery or a lighter session.",
       riskScore,
       deloadSuggested: true,
+      evidence,
     };
   }
   if (riskScore >= 45) {
@@ -529,6 +952,7 @@ export function evaluateFatigueTrend(history: HistorySessionInput[]): FatigueSig
       summary: "Some recent performance markers are trending down. Monitor recovery and avoid forcing progression.",
       riskScore,
       deloadSuggested: false,
+      evidence,
     };
   }
   return {
@@ -536,6 +960,7 @@ export function evaluateFatigueTrend(history: HistorySessionInput[]): FatigueSig
     summary: "Recent workout performance does not show a meaningful fatigue trend.",
     riskScore,
     deloadSuggested: false,
+    evidence,
   };
 }
 
@@ -603,6 +1028,56 @@ export function evaluateReadiness(
   }
 
   return { score, status, summary, guidance };
+}
+
+export function evaluateGoalAwareReadiness(args: {
+  goal: TrainingGoalId;
+  recovery: MuscleRecoveryState;
+  trend: ExerciseTrendEvaluation;
+  fatigue: FatigueSignal;
+  volumeContext?: MuscleVolumeContext | null;
+  confidenceScore: number;
+  prescriptionAdherence?: number;
+}): ReadinessEvaluation {
+  const profile = resolveGoalCoachingProfile(args.goal);
+  const trendScore = args.trend.status === "Improving" ? 95 : args.trend.status === "Stable" ? 80 : args.trend.status === "Regressing" ? 35 : 60;
+  const fatigueScore = 100 - args.fatigue.riskScore;
+  const volumeScore = !args.volumeContext
+    ? 75
+    : args.volumeContext.status === "optimal"
+      ? 95
+      : args.volumeContext.status === "under"
+        ? 75
+        : args.volumeContext.status === "high"
+          ? 65
+          : 30;
+  const adherenceScore = Math.min(100, Math.max(0, args.prescriptionAdherence ?? 80));
+  const inputs = {
+    recovery: args.recovery.recoveryPercent,
+    trend: trendScore,
+    fatigue: fatigueScore,
+    volume: volumeScore,
+    adherence: adherenceScore,
+    confidence: args.confidenceScore,
+  };
+  const score = Math.round(Object.entries(profile.readinessWeights).reduce(
+    (sum, [key, weight]) => sum + inputs[key as keyof typeof inputs] * weight,
+    0,
+  ));
+  const status: ReadinessEvaluation["status"] = score >= 85 ? "Excellent" : score >= 70 ? "Ready" : score >= 55 ? "Caution" : "Needs Rest";
+  const guidance = status === "Excellent"
+    ? "Proceed with the planned progression if warm-ups confirm readiness."
+    : status === "Ready"
+      ? "Train as planned and keep the prescribed RIR as the limiter."
+      : status === "Caution"
+        ? "Hold load or trim a working set if performance is below trend."
+        : `Delay or substantially reduce ${args.recovery.displayName} work.`;
+  return {
+    score,
+    status,
+    summary: `Readiness ${score}% - ${status}. Recovery, ${args.trend.status.toLowerCase()} exercise trend, fatigue risk, volume, adherence, and data confidence were evaluated for ${profile.label}.`,
+    guidance,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -873,6 +1348,18 @@ export interface WorkoutExerciseSuggestion {
   readinessStatus: string;
   readinessText: string;
   readinessGuidance: string;
+  goal?: TrainingGoalId;
+  goalLabel?: string;
+  trackingMode?: TrackingMode;
+  trend?: ExerciseTrendEvaluation["status"];
+  trendEvidence?: string;
+  setRecommendation?: GoalAwareProgressionEvaluation["setRecommendation"];
+  prescribedSets?: number;
+  prescribedRirMin?: number;
+  prescribedRirMax?: number;
+  confidenceFactors?: ConfidenceFactor[];
+  volumeContext?: MuscleVolumeContext | null;
+  stimulusQuality?: "Understimulated" | "Productive" | "High Stimulus" | "Excessive Fatigue" | "Learning";
 }
 
 export function buildWorkoutSuggestion(
@@ -912,6 +1399,71 @@ export function buildWorkoutSuggestion(
   suggestion.readinessGuidance = readiness.guidance;
 
   return suggestion;
+}
+
+export function buildGoalAwareWorkoutSuggestion(
+  input: GoalAwareProgressionInput,
+  progression: GoalAwareProgressionEvaluation,
+): WorkoutExerciseSuggestion {
+  const latest = input.trend.exposures.at(-1);
+  const duration = input.trackingMode === "duration";
+  const suggestedGoal = duration
+    ? `${progression.prescribedSets} holds x ${input.prescription.targetDurationMinSeconds ?? 20}-${input.prescription.targetDurationMaxSeconds ?? 60} sec`
+    : `${progression.prescribedSets} sets x ${input.prescription.targetRepsMin}-${input.prescription.targetRepsMax} @ RIR ${progression.prescribedRirMin}-${progression.prescribedRirMax}${progression.suggestedWeight > 0 ? ` at ${fmt1(progression.suggestedWeight)} lb` : ""}`;
+  const readiness = evaluateGoalAwareReadiness({
+    goal: input.goal,
+    recovery: input.recovery,
+    trend: input.trend,
+    fatigue: input.fatigue,
+    volumeContext: input.volumeContext,
+    confidenceScore: progression.confidenceScore,
+    prescriptionAdherence: latest && input.prescription.targetSets
+      ? Math.min(100, (latest.workingSetCount / input.prescription.targetSets) * 100)
+      : 75,
+  });
+  const stimulusQuality: NonNullable<WorkoutExerciseSuggestion["stimulusQuality"]> = input.trend.status === "Learning"
+    ? "Learning"
+    : input.recovery.fatiguePercent >= 70 || input.volumeContext?.status === "excessive"
+      ? "Excessive Fatigue"
+      : input.volumeContext?.status === "under" && input.trend.status !== "Improving"
+        ? "Understimulated"
+        : input.trend.status === "Improving" && input.recovery.fatiguePercent <= 55
+          ? "High Stimulus"
+          : "Productive";
+  return {
+    exerciseName: input.previous.exerciseName,
+    lastPerformance: latest
+      ? duration
+        ? `${latest.workingSetCount} holds, ${latest.totalDurationSeconds} sec total`
+        : `${latest.workingSetCount} sets, ${latest.totalReps} total reps at up to ${fmt1(latest.topWeight)} lb`
+      : "No previous workout available.",
+    recommendation: progression.recommendation,
+    suggestedGoal,
+    reason: progression.reason,
+    evidenceText: progression.trendEvidence,
+    nextGoalText: progression.nextGoalText,
+    confidenceScore: progression.confidenceScore,
+    recoveryStatus: input.recovery.status,
+    recoveryText: `${input.recovery.displayName} recovery: ${input.recovery.recoveryPercent}%`,
+    recoveryPercent: input.recovery.recoveryPercent,
+    fatiguePercent: input.recovery.fatiguePercent,
+    readinessScore: readiness.score,
+    readinessStatus: readiness.status,
+    readinessText: readiness.summary,
+    readinessGuidance: readiness.guidance,
+    goal: input.goal,
+    goalLabel: resolveGoalCoachingProfile(input.goal).label,
+    trackingMode: input.trackingMode,
+    trend: progression.trend,
+    trendEvidence: progression.trendEvidence,
+    setRecommendation: progression.setRecommendation,
+    prescribedSets: progression.prescribedSets,
+    prescribedRirMin: progression.prescribedRirMin,
+    prescribedRirMax: progression.prescribedRirMax,
+    confidenceFactors: progression.confidenceFactors,
+    volumeContext: progression.volumeContext,
+    stimulusQuality,
+  };
 }
 
 function applyRecoveryAdjustment(
@@ -964,6 +1516,8 @@ export interface WorkoutCompositionExerciseInput {
   exerciseRole: string;
   failureTarget: string;
   primaryMuscleName: string;
+  intensityTechnique?: string | null;
+  effectiveMuscleSets?: { muscleName: string; effectiveSets: number; mrv?: number }[];
 }
 
 export interface WorkoutComposition {
@@ -979,6 +1533,7 @@ export interface WorkoutComposition {
 
 export function analyzeWorkoutComposition(
   rows: WorkoutCompositionExerciseInput[],
+  goal: TrainingGoalId = "hypertrophy",
 ): WorkoutComposition {
   const totalSets = rows.reduce((sum, r) => sum + r.targetSets, 0);
   const estimatedMinutes = Math.max(
@@ -993,8 +1548,9 @@ export function analyzeWorkoutComposition(
 
   const warnings: string[] = [];
   if (rows.length === 0) warnings.push("This workout has no exercises yet.");
-  if (rows.length > 0 && compoundCount === 0) warnings.push("No compound movement assigned.");
-  if (!rows.some((r) => r.exerciseRole.toLowerCase() === "primary compound")) {
+  const profile = resolveGoalCoachingProfile(goal);
+  if (rows.length > 0 && profile.requiresPrimaryCompound && compoundCount === 0) warnings.push("No compound movement assigned for a strength-focused workout.");
+  if (profile.requiresPrimaryCompound && !rows.some((r) => r.exerciseRole.toLowerCase() === "primary compound")) {
     warnings.push("No primary compound movement assigned.");
   }
   if (totalSets > 30) warnings.push("High total set count. Check fatigue and session length.");
@@ -1003,6 +1559,21 @@ export function analyzeWorkoutComposition(
     (r) => r.failureTarget.toLowerCase() === "every set" || r.failureTarget.toLowerCase() === "technical failure",
   ).length;
   if (failureSetCount >= 3) warnings.push("Multiple exercises target frequent failure.");
+  const techniqueCount = rows.filter((row) => row.intensityTechnique && row.intensityTechnique.toLowerCase() !== "normal").length;
+  if (techniqueCount >= 3) warnings.push("Multiple high-fatigue intensity techniques are planned.");
+  const muscleTotals = new Map<string, { sets: number; mrv?: number }>();
+  for (const row of rows) {
+    for (const muscle of row.effectiveMuscleSets ?? []) {
+      const current = muscleTotals.get(muscle.muscleName) ?? { sets: 0, mrv: muscle.mrv };
+      current.sets += muscle.effectiveSets;
+      current.mrv ??= muscle.mrv;
+      muscleTotals.set(muscle.muscleName, current);
+    }
+  }
+  for (const [muscle, value] of Array.from(muscleTotals.entries())) {
+    if (value.mrv != null && value.sets > value.mrv) warnings.push(`${muscle} exceeds its effective-volume MRV in this workout.`);
+  }
+  if (estimatedMinutes > 120) warnings.push("Very long estimated session.");
 
   let fatigueRating: WorkoutComposition["fatigueRating"];
   if (totalSets >= 30 || failureSetCount >= 4) fatigueRating = "High";
@@ -1033,6 +1604,9 @@ export interface DashboardTemplateInput {
       exerciseId: number;
       exerciseOrder: number;
       targetSets: number;
+      targetDurationMinSeconds?: number | null;
+      targetDurationMaxSeconds?: number | null;
+      trackingMode?: TrackingMode;
       warmupSets: number;
       topSets: number;
       backoffSets: number;
@@ -1163,6 +1737,9 @@ export interface GetDashboardSnapshotArgs {
   exercisePrimaryMuscleLookup: Map<number, MuscleGroupName>;
   muscleGroupLookup: MuscleGroupLookup;
   recoverySettings?: RecoverySettings;
+  recoveryOverrides?: RecoveryModelOverrides;
+  coachSettings?: CoachSettings;
+  trainingGoal?: TrainingGoalId;
   now?: Date;
   schedule?: DashboardScheduleInput | null;
   /**
@@ -1186,8 +1763,10 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
   const now = args.now ?? new Date();
   const zone = args.zone ?? "UTC";
 
-  const fatigue = evaluateFatigueTrend(history);
-  const recoveryStates = evaluateRecovery(history, muscleGroupLookup, now, args.recoverySettings);
+  const coachSettings = args.coachSettings ?? DEFAULT_COACH_SETTINGS;
+  const trainingGoal = args.trainingGoal ?? "hypertrophy";
+  const fatigue = evaluateFatigueTrend(history, coachSettings.fatigueSensitivity);
+  const recoveryStates = evaluateRecovery(history, muscleGroupLookup, now, args.recoverySettings, args.recoveryOverrides);
   const muscleFatigueMap: MuscleFatigueMapEntry[] = recoveryStates.map((s) => ({
     muscleName: s.muscle,
     displayName: s.displayName,
@@ -1296,15 +1875,29 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
     if (!previous.exerciseName) previous.exerciseName = fallbackName;
 
     const resolvedExerciseName = previous.exerciseName || "Exercise";
-    const evaluation = evaluateProgression(prescription, {
-      ...previous,
-      exerciseName: resolvedExerciseName,
-    });
+    const resolvedPrevious = { ...previous, exerciseName: resolvedExerciseName };
     const primaryMuscle = exercisePrimaryMuscleLookup.get(prescription.exerciseId);
     const recovery = primaryMuscle ? getPrimaryRecovery(recoveryStates, primaryMuscle) : recoveryStates[0];
+    const historicalExercise = history.flatMap((session) => session.exercises).find((exercise) => exercise.exerciseId === prescription.exerciseId);
+    const trackingMode = prescription.trackingMode === "duration" || historicalExercise?.trackingMode === "duration"
+      ? "duration" as const
+      : "reps" as const;
+    const trend = evaluateExerciseTrend(history, prescription.exerciseId, trainingGoal, trackingMode, coachSettings);
+    const progressionInput: GoalAwareProgressionInput = {
+      goal: trainingGoal,
+      trackingMode,
+      prescription,
+      previous: resolvedPrevious,
+      trend,
+      settings: coachSettings,
+      recovery,
+      fatigue,
+      volumeContext: null,
+    };
+    const evaluation = evaluateGoalAwareProgression(progressionInput);
     const suggestion: DashboardExerciseSuggestion = {
       exerciseId: prescription.exerciseId,
-      ...buildWorkoutSuggestion(prescription, previous, evaluation, recovery),
+      ...buildGoalAwareWorkoutSuggestion(progressionInput, evaluation),
     };
     suggestion.exerciseName = resolvedExerciseName;
 

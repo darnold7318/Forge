@@ -6,11 +6,17 @@ import {
   checkLivePersonalRecord,
   evaluateFatigueTrend,
   evaluateRecovery,
+  evaluateExerciseTrend,
+  evaluateGoalAwareProgression,
+  analyzeWorkoutComposition,
+  getPreviousExercisePerformance,
+  resolveGoalCoachingProfile,
   getPersonalRecords,
   type HistorySessionInput,
   type MuscleGroupLookup,
 } from "./coaching";
 import { primaryStimulusMuscle } from "./schema";
+import { DEFAULT_COACH_SETTINGS } from "./schema";
 
 test("weighted volume counts stimulus ratios for working sets", () => {
   const stimulus = [
@@ -184,4 +190,111 @@ test("static holds use longest-duration PRs and do not trigger rep fatigue decli
     })),
   }));
   assert.equal(getPersonalRecords(prHistory, 10)[0]?.recordType, "Longest Hold");
+});
+
+function exposureHistory(reps: number[][], rir: number = 2): HistorySessionInput[] {
+  return reps.map((setReps, index) => ({
+    id: index + 1,
+    workoutTemplateId: 1,
+    workoutName: "Upper",
+    startedAt: new Date(`2026-07-${String(index + 1).padStart(2, "0")}T12:00:00.000Z`),
+    exercises: [{
+      exerciseId: 10,
+      exerciseOrder: 1,
+      exerciseName: "Incline Press",
+      trackingMode: "reps" as const,
+      primaryMuscleGroupId: 1,
+      intensityTechnique: "Normal",
+      failureTarget: "Never",
+      sets: setReps.map((repsValue, setIndex) => ({
+        setNumber: setIndex + 1,
+        setType: "Working" as const,
+        weight: 75,
+        reps: repsValue,
+        rir,
+        completed: true,
+      })),
+    }],
+  })).reverse();
+}
+
+test("hypertrophy recognizes multi-exposure rep progress before every set reaches the ceiling", () => {
+  const history = exposureHistory([[10, 9, 8], [11, 10, 9], [11, 11, 10]]);
+  const trend = evaluateExerciseTrend(history, 10, "hypertrophy", "reps", DEFAULT_COACH_SETTINGS);
+  assert.equal(trend.status, "Improving");
+  const previous = getPreviousExercisePerformance(history, 10, "Incline Press");
+  const recovery = evaluateRecovery(history, { idToName: new Map([[1, "UpperChest"]]) }, new Date("2026-07-10T12:00:00.000Z"))
+    .find((state) => state.muscle === "UpperChest")!;
+  const progression = evaluateGoalAwareProgression({
+    goal: "hypertrophy",
+    trackingMode: "reps",
+    prescription: { targetSets: 3, targetRepsMin: 8, targetRepsMax: 12, targetRir: 2 },
+    previous,
+    trend,
+    settings: DEFAULT_COACH_SETTINGS,
+    recovery,
+    fatigue: { status: "Stable", summary: "", riskScore: 15, deloadSuggested: false },
+    volumeContext: { muscleGroupId: 1, muscleName: "Upper Chest", currentEffectiveSets: 10.5, mev: 6, mav: 12, mrv: 18, status: "optimal" },
+  });
+  assert.equal(progression.recommendation, "Add Reps");
+  assert.equal(progression.setRecommendation, "Maintain Sets");
+});
+
+test("repeated RIR zero prevents blind hypertrophy load progression", () => {
+  const history = exposureHistory([[12, 12, 12], [12, 12, 12], [12, 12, 12]], 0);
+  const trend = evaluateExerciseTrend(history, 10, "hypertrophy", "reps", DEFAULT_COACH_SETTINGS);
+  const previous = getPreviousExercisePerformance(history, 10, "Incline Press");
+  const progression = evaluateGoalAwareProgression({
+    goal: "hypertrophy",
+    trackingMode: "reps",
+    prescription: { targetSets: 3, targetRepsMin: 8, targetRepsMax: 12, targetRir: 2 },
+    previous,
+    trend,
+    settings: DEFAULT_COACH_SETTINGS,
+    recovery: { muscle: "UpperChest", displayName: "Upper Chest", fatiguePercent: 20, recoveryPercent: 80, lastTrainedAt: null, hoursSinceLastTrained: 0, status: "Recovered", summary: "" },
+    fatigue: { status: "Stable", summary: "", riskScore: 15, deloadSuggested: false },
+  });
+  assert.notEqual(progression.recommendation, "Increase Weight");
+});
+
+test("per-muscle half-life override changes only the supplied recovery model", () => {
+  const now = new Date("2026-08-08T12:00:00.000Z");
+  const history = exposureHistory([[10, 10, 10]]);
+  history[0].startedAt = new Date("2026-08-06T12:00:00.000Z");
+  const lookup: MuscleGroupLookup = { idToName: new Map([[1, "Lats"]]) };
+  const standard = evaluateRecovery(history, lookup, now).find((state) => state.muscle === "Lats")!.fatiguePercent;
+  const slower = evaluateRecovery(history, lookup, now, undefined, { muscleHalfLifeHours: { Lats: 60 } })
+    .find((state) => state.muscle === "Lats")!.fatiguePercent;
+  assert.ok(slower > standard);
+});
+
+test("compound warnings are goal-aware", () => {
+  const rows = [{ targetSets: 3, restSeconds: 60, isCompound: false, exerciseRole: "Isolation", failureTarget: "Never", primaryMuscleName: "Side Delts" }];
+  assert.doesNotMatch(analyzeWorkoutComposition(rows, "hypertrophy").warnings, /compound/i);
+  assert.match(analyzeWorkoutComposition(rows, "strength").warnings, /compound/i);
+});
+
+test("goal profiles keep experience-independent coaching priorities distinct", () => {
+  assert.equal(resolveGoalCoachingProfile("hypertrophy").usesHypertrophyVolume, true);
+  assert.equal(resolveGoalCoachingProfile("strength").progressionPriority, "load");
+  assert.equal(resolveGoalCoachingProfile("muscular_endurance").progressionPriority, "reps");
+  assert.equal(resolveGoalCoachingProfile("mobility").progressionPriority, "duration");
+  assert.equal(resolveGoalCoachingProfile("general_fitness").progressionPriority, "balanced");
+});
+
+test("muscular endurance keeps load and adds reps while its trend improves", () => {
+  const history = exposureHistory([[12, 12, 12], [13, 13, 12], [14, 13, 13]]);
+  const trend = evaluateExerciseTrend(history, 10, "muscular_endurance", "reps", DEFAULT_COACH_SETTINGS);
+  const previous = getPreviousExercisePerformance(history, 10, "Incline Press");
+  const result = evaluateGoalAwareProgression({
+    goal: "muscular_endurance",
+    trackingMode: "reps",
+    prescription: { targetSets: 3, targetRepsMin: 10, targetRepsMax: 12, targetRir: 2 },
+    previous,
+    trend,
+    settings: DEFAULT_COACH_SETTINGS,
+    recovery: { muscle: "UpperChest", displayName: "Upper Chest", fatiguePercent: 10, recoveryPercent: 90, lastTrainedAt: null, hoursSinceLastTrained: 0, status: "Recovered", summary: "" },
+    fatigue: { status: "Stable", summary: "", riskScore: 15, deloadSuggested: false },
+  });
+  assert.equal(result.recommendation, "Add Reps");
 });

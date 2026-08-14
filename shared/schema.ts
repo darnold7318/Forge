@@ -24,9 +24,12 @@ export const users = sqliteTable("users", {
   themeMode: text("theme_mode").notNull().default("dark"),
   // Preferred workout split — stored preference only, informational.
   workoutSplit: text("workout_split").notNull().default("ppl"),
-  // Controls how much training complexity the UI exposes. New accounts start
-  // simple; the startup migration promotes accounts that predate this field.
-  trainingLevel: text("training_level").notNull().default("beginner"),
+  // Controls how much training complexity the UI exposes. Existing values are
+  // never rewritten; newly-created accounts explicitly start Intermediate.
+  trainingLevel: text("training_level").notNull().default("intermediate"),
+  // Controls which outcome the coaching engine prioritizes. This is separate
+  // from training level, which only controls UI detail and advanced tuning.
+  trainingGoal: text("training_goal").notNull().default("hypertrophy"),
   // Timezone handling. "home" (default) anchors all calendar dates to
   // homeTimezone so training weeks stay stable while travelling. "auto"
   // follows whatever timezone the device reports on each request.
@@ -74,6 +77,23 @@ export const trainingLevelLabels: Record<TrainingLevelId, string> = {
   advanced: "Advanced",
 };
 
+export const trainingGoalIds = [
+  "hypertrophy",
+  "strength",
+  "general_fitness",
+  "mobility",
+  "muscular_endurance",
+] as const;
+export type TrainingGoalId = (typeof trainingGoalIds)[number];
+
+export const trainingGoalLabels: Record<TrainingGoalId, string> = {
+  hypertrophy: "Hypertrophy",
+  strength: "Strength",
+  general_fitness: "General Fitness",
+  mobility: "Mobility",
+  muscular_endurance: "Muscular Endurance",
+};
+
 export const timezoneModeIds = ["home", "auto"] as const;
 export type TimezoneModeId = (typeof timezoneModeIds)[number];
 
@@ -101,13 +121,14 @@ export function isValidTimezone(tz: string): boolean {
 }
 
 export const updateUserPreferencesSchema = createInsertSchema(users)
-  .pick({ themeColor: true, themeMode: true, workoutSplit: true, trainingLevel: true })
+  .pick({ themeColor: true, themeMode: true, workoutSplit: true, trainingLevel: true, trainingGoal: true })
   .partial()
   .extend({
     themeColor: z.enum(themeColorIds).optional(),
     themeMode: z.enum(themeModeIds).optional(),
     workoutSplit: z.enum(workoutSplitIds).optional(),
     trainingLevel: z.enum(trainingLevelIds).optional(),
+    trainingGoal: z.enum(trainingGoalIds).optional(),
     timezoneMode: z.enum(timezoneModeIds).optional(),
     homeTimezone: z
       .string()
@@ -205,6 +226,53 @@ export const userRecoverySettings = sqliteTable("user_recovery_settings", {
   muscleRecoverySpeeds: text("muscle_recovery_speeds").notNull().default("{}"),
 });
 
+export const progressionStyleIds = ["automatic", "rep_first", "load_first", "balanced"] as const;
+export type ProgressionStyleId = (typeof progressionStyleIds)[number];
+export const sensitivityIds = ["low", "normal", "high"] as const;
+export type SensitivityId = (typeof sensitivityIds)[number];
+export const volumeProgressionSensitivityIds = ["conservative", "normal", "aggressive"] as const;
+export type VolumeProgressionSensitivityId = (typeof volumeProgressionSensitivityIds)[number];
+
+export const coachSettingsSchema = z.object({
+  progressionStyle: z.enum(progressionStyleIds),
+  minComparableExposures: z.number().int().min(2).max(6),
+  trendHistoryLimit: z.number().int().min(3).max(8),
+  preferredRirMin: z.number().int().min(0).max(3),
+  preferredRirMax: z.number().int().min(1).max(4),
+  failureFatigueSensitivity: z.enum(sensitivityIds),
+  fatigueSensitivity: z.enum(sensitivityIds),
+  volumeProgressionSensitivity: z.enum(volumeProgressionSensitivityIds),
+}).superRefine((value, ctx) => {
+  if (value.preferredRirMin > value.preferredRirMax) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Minimum RIR cannot exceed maximum RIR" });
+  }
+});
+
+export type CoachSettings = z.infer<typeof coachSettingsSchema>;
+
+export const DEFAULT_COACH_SETTINGS: CoachSettings = {
+  progressionStyle: "automatic",
+  minComparableExposures: 3,
+  trendHistoryLimit: 5,
+  preferredRirMin: 1,
+  preferredRirMax: 2,
+  failureFatigueSensitivity: "normal",
+  fatigueSensitivity: "normal",
+  volumeProgressionSensitivity: "normal",
+};
+
+export const userCoachSettings = sqliteTable("user_coach_settings", {
+  userId: integer("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  progressionStyle: text("progression_style").notNull().default("automatic"),
+  minComparableExposures: integer("min_comparable_exposures").notNull().default(3),
+  trendHistoryLimit: integer("trend_history_limit").notNull().default(5),
+  preferredRirMin: integer("preferred_rir_min").notNull().default(1),
+  preferredRirMax: integer("preferred_rir_max").notNull().default(2),
+  failureFatigueSensitivity: text("failure_fatigue_sensitivity").notNull().default("normal"),
+  fatigueSensitivity: text("fatigue_sensitivity").notNull().default("normal"),
+  volumeProgressionSensitivity: text("volume_progression_sensitivity").notNull().default("normal"),
+});
+
 export const muscleGroups = sqliteTable("muscle_groups", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull().unique(), // one of muscleGroupNames
@@ -212,6 +280,35 @@ export const muscleGroups = sqliteTable("muscle_groups", {
   mav: real("mav").notNull(), // Maximum Adaptive Volume (sets/week)
   mrv: real("mrv").notNull(), // Maximum Recoverable Volume (sets/week)
 });
+
+export const userMuscleCoachOverrides = sqliteTable(
+  "user_muscle_coach_overrides",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    muscleGroupId: integer("muscle_group_id").notNull().references(() => muscleGroups.id, { onDelete: "cascade" }),
+    recoveryHalfLifeHours: real("recovery_half_life_hours"),
+    mev: real("mev"),
+    mav: real("mav"),
+    mrv: real("mrv"),
+  },
+  (table) => [uniqueIndex("idx_user_muscle_coach_override_unique").on(table.userId, table.muscleGroupId)],
+);
+
+export const muscleCoachOverrideSchema = z.object({
+  muscleGroupId: z.number().int().positive(),
+  recoveryHalfLifeHours: z.number().finite().min(18).max(120).nullable(),
+  mev: z.number().finite().min(0).max(60).nullable(),
+  mav: z.number().finite().min(0).max(70).nullable(),
+  mrv: z.number().finite().min(0).max(80).nullable(),
+}).superRefine((value, ctx) => {
+  const landmarks = [value.mev, value.mav, value.mrv];
+  if (landmarks.every((item) => item != null) && !(landmarks[0]! < landmarks[1]! && landmarks[1]! < landmarks[2]!)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Volume landmarks must satisfy MEV < MAV < MRV" });
+  }
+});
+
+export type MuscleCoachOverride = z.infer<typeof muscleCoachOverrideSchema>;
 
 export const insertMuscleGroupSchema = createInsertSchema(muscleGroups)
   .omit({ id: true })
@@ -303,6 +400,23 @@ export const userExerciseMuscleStimulusOverrides = sqliteTable(
     check("user_exercise_stimulus_ratio_range", sql`${table.stimulusRatio} >= 0 AND ${table.stimulusRatio} <= 1`),
   ],
 );
+
+export const userExerciseCoachOverrides = sqliteTable(
+  "user_exercise_coach_overrides",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    exerciseId: integer("exercise_id").notNull().references(() => exercises.id, { onDelete: "cascade" }),
+    fatigueCost: real("fatigue_cost").notNull(),
+  },
+  (table) => [uniqueIndex("idx_user_exercise_coach_override_unique").on(table.userId, table.exerciseId)],
+);
+
+export const exerciseCoachOverrideSchema = z.object({
+  exerciseId: z.number().int().positive(),
+  fatigueCost: z.number().finite().min(0.5).max(2),
+});
+export type ExerciseCoachOverride = z.infer<typeof exerciseCoachOverrideSchema>;
 
 export const insertExerciseSchema = createInsertSchema(exercises)
   .omit({ id: true })
@@ -480,6 +594,51 @@ export const workouts = sqliteTable("workouts", {
     () => workoutTemplates.id,
   ),
 });
+
+// Immutable per-workout copies of the prescription used when the workout was
+// created. Template edits/deletes must not rewrite the meaning of history.
+export const workoutExerciseSnapshots = sqliteTable(
+  "workout_exercise_snapshots",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    workoutId: integer("workout_id").notNull().references(() => workouts.id, { onDelete: "cascade" }),
+    exerciseId: integer("exercise_id").notNull().references(() => exercises.id),
+    exerciseRole: text("exercise_role").notNull().default("Isolation"),
+    targetSets: integer("target_sets").notNull().default(3),
+    targetRepsMin: integer("target_reps_min").notNull().default(8),
+    targetRepsMax: integer("target_reps_max").notNull().default(12),
+    targetDurationMinSeconds: integer("target_duration_min_seconds"),
+    targetDurationMaxSeconds: integer("target_duration_max_seconds"),
+    targetRir: integer("target_rir").notNull().default(2),
+    failureTarget: text("failure_target").notNull().default("Never"),
+    intensityTechnique: text("intensity_technique"),
+    restSeconds: integer("rest_seconds").notNull().default(90),
+    trackingMode: text("tracking_mode").notNull().default("reps"),
+  },
+  (table) => [uniqueIndex("idx_workout_exercise_snapshot_unique").on(table.workoutId, table.exerciseId)],
+);
+
+export type WorkoutExerciseSnapshot = typeof workoutExerciseSnapshots.$inferSelect;
+
+export const userMuscleLearnedRanges = sqliteTable(
+  "user_muscle_learned_ranges",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    muscleGroupId: integer("muscle_group_id").notNull().references(() => muscleGroups.id, { onDelete: "cascade" }),
+    productiveLow: real("productive_low"),
+    productiveHigh: real("productive_high"),
+    confidence: integer("confidence").notNull().default(0),
+  },
+  (table) => [uniqueIndex("idx_user_muscle_learned_range_unique").on(table.userId, table.muscleGroupId)],
+);
+
+export interface LearnedVolumeRange {
+  muscleGroupId: number;
+  productiveLow: number | null;
+  productiveHigh: number | null;
+  confidence: number;
+}
 
 export const insertWorkoutSchema = createInsertSchema(workouts).omit({
   id: true,

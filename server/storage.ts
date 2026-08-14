@@ -1,6 +1,11 @@
 import {
   users,
   userRecoverySettings,
+  userCoachSettings,
+  userMuscleCoachOverrides,
+  userExerciseCoachOverrides,
+  workoutExerciseSnapshots,
+  userMuscleLearnedRanges,
   muscleGroups,
   exercises,
   workouts,
@@ -17,6 +22,8 @@ import {
   muscleGroupNames,
   recoverySettingsSchema,
   DEFAULT_RECOVERY_SETTINGS,
+  DEFAULT_COACH_SETTINGS,
+  coachSettingsSchema,
 } from "@shared/schema";
 import type {
   User,
@@ -50,6 +57,12 @@ import type {
   CustomWeeklySlot,
   MuscleGroupName,
   RecoverySettings,
+  CoachSettings,
+  MuscleCoachOverride,
+  ExerciseCoachOverride,
+  WorkoutExerciseSnapshot,
+  TrainingGoalId,
+  LearnedVolumeRange,
 } from "@shared/schema";
 import {
   buildStarterTemplate,
@@ -90,7 +103,8 @@ function ensureTables() {
       theme_color TEXT NOT NULL DEFAULT 'green',
       theme_mode TEXT NOT NULL DEFAULT 'dark',
       workout_split TEXT NOT NULL DEFAULT 'ppl',
-      training_level TEXT NOT NULL DEFAULT 'beginner'
+      training_level TEXT NOT NULL DEFAULT 'intermediate',
+      training_goal TEXT NOT NULL DEFAULT 'hypertrophy'
     );
 
     CREATE TABLE IF NOT EXISTS muscle_groups (
@@ -106,6 +120,18 @@ function ensureTables() {
       fatigue_sensitivity REAL NOT NULL DEFAULT 1,
       overall_recovery_speed REAL NOT NULL DEFAULT 1,
       muscle_recovery_speeds TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS user_coach_settings (
+      user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      progression_style TEXT NOT NULL DEFAULT 'automatic',
+      min_comparable_exposures INTEGER NOT NULL DEFAULT 3,
+      trend_history_limit INTEGER NOT NULL DEFAULT 5,
+      preferred_rir_min INTEGER NOT NULL DEFAULT 1,
+      preferred_rir_max INTEGER NOT NULL DEFAULT 2,
+      failure_fatigue_sensitivity TEXT NOT NULL DEFAULT 'normal',
+      fatigue_sensitivity TEXT NOT NULL DEFAULT 'normal',
+      volume_progression_sensitivity TEXT NOT NULL DEFAULT 'normal'
     );
 
     CREATE TABLE IF NOT EXISTS exercises (
@@ -140,6 +166,16 @@ function ensureTables() {
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_user_exercise_stimulus_unique
       ON user_exercise_muscle_stimulus_overrides(user_id, exercise_id, muscle_group_id);
+
+    CREATE TABLE IF NOT EXISTS user_exercise_coach_overrides (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+      fatigue_cost REAL NOT NULL CHECK(fatigue_cost >= 0.5 AND fatigue_cost <= 2.0)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_exercise_coach_override_unique
+      ON user_exercise_coach_overrides(user_id, exercise_id);
 
     CREATE TABLE IF NOT EXISTS workout_templates (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,6 +218,26 @@ function ensureTables() {
       workout_template_id INTEGER REFERENCES workout_templates(id)
     );
 
+    CREATE TABLE IF NOT EXISTS workout_exercise_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workout_id INTEGER NOT NULL REFERENCES workouts(id) ON DELETE CASCADE,
+      exercise_id INTEGER NOT NULL REFERENCES exercises(id),
+      exercise_role TEXT NOT NULL DEFAULT 'Isolation',
+      target_sets INTEGER NOT NULL DEFAULT 3,
+      target_reps_min INTEGER NOT NULL DEFAULT 8,
+      target_reps_max INTEGER NOT NULL DEFAULT 12,
+      target_duration_min_seconds INTEGER,
+      target_duration_max_seconds INTEGER,
+      target_rir INTEGER NOT NULL DEFAULT 2,
+      failure_target TEXT NOT NULL DEFAULT 'Never',
+      intensity_technique TEXT,
+      rest_seconds INTEGER NOT NULL DEFAULT 90,
+      tracking_mode TEXT NOT NULL DEFAULT 'reps'
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workout_exercise_snapshot_unique
+      ON workout_exercise_snapshots(workout_id, exercise_id);
+
     CREATE TABLE IF NOT EXISTS sets (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       workout_id INTEGER NOT NULL REFERENCES workouts(id),
@@ -200,6 +256,31 @@ function ensureTables() {
       date TEXT NOT NULL,
       weight REAL NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS user_muscle_coach_overrides (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      muscle_group_id INTEGER NOT NULL REFERENCES muscle_groups(id) ON DELETE CASCADE,
+      recovery_half_life_hours REAL,
+      mev REAL,
+      mav REAL,
+      mrv REAL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_muscle_coach_override_unique
+      ON user_muscle_coach_overrides(user_id, muscle_group_id);
+
+    CREATE TABLE IF NOT EXISTS user_muscle_learned_ranges (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      muscle_group_id INTEGER NOT NULL REFERENCES muscle_groups(id) ON DELETE CASCADE,
+      productive_low REAL,
+      productive_high REAL,
+      confidence INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_muscle_learned_range_unique
+      ON user_muscle_learned_ranges(user_id, muscle_group_id);
 
     CREATE TABLE IF NOT EXISTS workout_schedules (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -267,7 +348,8 @@ function ensureTables() {
     { column: "is_admin", ddl: "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0" },
     { column: "timezone_mode", ddl: "ALTER TABLE users ADD COLUMN timezone_mode TEXT NOT NULL DEFAULT 'home'" },
     { column: "home_timezone", ddl: "ALTER TABLE users ADD COLUMN home_timezone TEXT" },
-    { column: "training_level", ddl: "ALTER TABLE users ADD COLUMN training_level TEXT NOT NULL DEFAULT 'beginner'" },
+    { column: "training_level", ddl: "ALTER TABLE users ADD COLUMN training_level TEXT NOT NULL DEFAULT 'intermediate'" },
+    { column: "training_goal", ddl: "ALTER TABLE users ADD COLUMN training_goal TEXT NOT NULL DEFAULT 'hypertrophy'" },
   ];
   for (const { column, ddl } of migrations) {
     if (!existingColumns.has(column)) {
@@ -281,7 +363,7 @@ function ensureTables() {
   }
   if (trainingLevelWasMissing) {
     // Preserve the existing unilateral editor for accounts present when this
-    // feature ships. The column default stays Beginner for future accounts.
+    // feature first shipped. New accounts are explicitly Intermediate.
     sqlite.prepare("UPDATE users SET training_level = 'advanced'").run();
   }
 
@@ -715,10 +797,20 @@ export interface IStorage {
   renameUser(id: number, name: string): Promise<UserRecord | undefined>;
   updateUserPreferences(
     id: number,
-    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "trainingLevel" | "timezoneMode" | "homeTimezone">>,
+    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "trainingLevel" | "trainingGoal" | "timezoneMode" | "homeTimezone">>,
   ): Promise<UserRecord | undefined>;
   getRecoverySettings(userId: number): Promise<RecoverySettings>;
   setRecoverySettings(userId: number, settings: RecoverySettings): Promise<RecoverySettings>;
+  getCoachSettings(userId: number): Promise<CoachSettings>;
+  setCoachSettings(userId: number, settings: CoachSettings): Promise<CoachSettings>;
+  resetCoachSettings(userId: number): Promise<CoachSettings>;
+  getMuscleCoachOverrides(userId: number): Promise<MuscleCoachOverride[]>;
+  setMuscleCoachOverride(userId: number, value: MuscleCoachOverride): Promise<MuscleCoachOverride>;
+  deleteMuscleCoachOverride(userId: number, muscleGroupId: number): Promise<void>;
+  getExerciseCoachOverrides(userId: number): Promise<ExerciseCoachOverride[]>;
+  setExerciseCoachOverride(userId: number, value: ExerciseCoachOverride): Promise<ExerciseCoachOverride>;
+  deleteExerciseCoachOverride(userId: number, exerciseId: number): Promise<void>;
+  getLearnedVolumeRanges(userId: number): Promise<LearnedVolumeRange[]>;
 
   // Muscle groups (shared/global)
   getMuscleGroups(): Promise<MuscleGroup[]>;
@@ -764,6 +856,7 @@ export interface IStorage {
   getWorkout(id: number): Promise<Workout | undefined>;
   getWorkoutWithSets(id: number): Promise<WorkoutWithSets | undefined>;
   createWorkout(workout: InsertWorkout): Promise<Workout>;
+  getWorkoutExerciseSnapshots(userId: number): Promise<WorkoutExerciseSnapshot[]>;
   updateWorkout(id: number, workout: Partial<InsertWorkout>): Promise<Workout | undefined>;
   deleteWorkout(id: number): Promise<void>;
 
@@ -806,7 +899,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createUser(user: InsertUser & { passwordHash: string; isAdmin?: boolean }): Promise<UserRecord> {
-    return db.insert(users).values(user).returning().get();
+    return db.insert(users).values({ trainingLevel: "intermediate", trainingGoal: "hypertrophy", ...user }).returning().get();
   }
 
   async renameUser(id: number, name: string): Promise<UserRecord | undefined> {
@@ -815,7 +908,7 @@ export class DatabaseStorage implements IStorage {
 
   async updateUserPreferences(
     id: number,
-    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "trainingLevel" | "timezoneMode" | "homeTimezone">>,
+    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "trainingLevel" | "trainingGoal" | "timezoneMode" | "homeTimezone">>,
   ): Promise<UserRecord | undefined> {
     return db.update(users).set(prefs).where(eq(users.id, id)).returning().get();
   }
@@ -856,6 +949,97 @@ export class DatabaseStorage implements IStorage {
       })
       .run();
     return settings;
+  }
+
+  async getCoachSettings(userId: number): Promise<CoachSettings> {
+    const row = db.select().from(userCoachSettings).where(eq(userCoachSettings.userId, userId)).get();
+    if (!row) return { ...DEFAULT_COACH_SETTINGS };
+    const parsed = coachSettingsSchema.safeParse(row);
+    return parsed.success ? parsed.data : { ...DEFAULT_COACH_SETTINGS };
+  }
+
+  async setCoachSettings(userId: number, settings: CoachSettings): Promise<CoachSettings> {
+    db.insert(userCoachSettings)
+      .values({ userId, ...settings })
+      .onConflictDoUpdate({
+        target: userCoachSettings.userId,
+        set: settings,
+      })
+      .run();
+    return settings;
+  }
+
+  async resetCoachSettings(userId: number): Promise<CoachSettings> {
+    db.delete(userCoachSettings).where(eq(userCoachSettings.userId, userId)).run();
+    return { ...DEFAULT_COACH_SETTINGS };
+  }
+
+  async getMuscleCoachOverrides(userId: number): Promise<MuscleCoachOverride[]> {
+    return db.select().from(userMuscleCoachOverrides).where(eq(userMuscleCoachOverrides.userId, userId)).all().map((row) => ({
+      muscleGroupId: row.muscleGroupId,
+      recoveryHalfLifeHours: row.recoveryHalfLifeHours,
+      mev: row.mev,
+      mav: row.mav,
+      mrv: row.mrv,
+    }));
+  }
+
+  async setMuscleCoachOverride(userId: number, value: MuscleCoachOverride): Promise<MuscleCoachOverride> {
+    const row = { userId, ...value };
+    db.insert(userMuscleCoachOverrides)
+      .values(row)
+      .onConflictDoUpdate({
+        target: [userMuscleCoachOverrides.userId, userMuscleCoachOverrides.muscleGroupId],
+        set: {
+          recoveryHalfLifeHours: value.recoveryHalfLifeHours,
+          mev: value.mev,
+          mav: value.mav,
+          mrv: value.mrv,
+        },
+      })
+      .run();
+    return value;
+  }
+
+  async deleteMuscleCoachOverride(userId: number, muscleGroupId: number): Promise<void> {
+    db.delete(userMuscleCoachOverrides).where(and(
+      eq(userMuscleCoachOverrides.userId, userId),
+      eq(userMuscleCoachOverrides.muscleGroupId, muscleGroupId),
+    )).run();
+  }
+
+  async getExerciseCoachOverrides(userId: number): Promise<ExerciseCoachOverride[]> {
+    return db.select().from(userExerciseCoachOverrides).where(eq(userExerciseCoachOverrides.userId, userId)).all().map((row) => ({
+      exerciseId: row.exerciseId,
+      fatigueCost: row.fatigueCost,
+    }));
+  }
+
+  async setExerciseCoachOverride(userId: number, value: ExerciseCoachOverride): Promise<ExerciseCoachOverride> {
+    db.insert(userExerciseCoachOverrides)
+      .values({ userId, ...value })
+      .onConflictDoUpdate({
+        target: [userExerciseCoachOverrides.userId, userExerciseCoachOverrides.exerciseId],
+        set: { fatigueCost: value.fatigueCost },
+      })
+      .run();
+    return value;
+  }
+
+  async deleteExerciseCoachOverride(userId: number, exerciseId: number): Promise<void> {
+    db.delete(userExerciseCoachOverrides).where(and(
+      eq(userExerciseCoachOverrides.userId, userId),
+      eq(userExerciseCoachOverrides.exerciseId, exerciseId),
+    )).run();
+  }
+
+  async getLearnedVolumeRanges(userId: number): Promise<LearnedVolumeRange[]> {
+    return db.select().from(userMuscleLearnedRanges).where(eq(userMuscleLearnedRanges.userId, userId)).all().map((row) => ({
+      muscleGroupId: row.muscleGroupId,
+      productiveLow: row.productiveLow,
+      productiveHigh: row.productiveHigh,
+      confidence: row.confidence,
+    }));
   }
 
   // ---------------- Muscle groups (shared) ----------------
@@ -1264,7 +1448,45 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createWorkout(workout: InsertWorkout): Promise<Workout> {
-    return db.insert(workouts).values(workout).returning().get();
+    return db.transaction((tx) => {
+      const created = tx.insert(workouts).values(workout).returning().get();
+      if (created.workoutTemplateId != null) {
+        const prescriptionRows = tx
+          .select({ template: workoutTemplateExercises, exercise: exercises })
+          .from(workoutTemplateExercises)
+          .innerJoin(exercises, eq(workoutTemplateExercises.exerciseId, exercises.id))
+          .where(eq(workoutTemplateExercises.workoutTemplateId, created.workoutTemplateId))
+          .all();
+        for (const { template, exercise } of prescriptionRows) {
+          tx.insert(workoutExerciseSnapshots).values({
+            workoutId: created.id,
+            exerciseId: template.exerciseId,
+            exerciseRole: template.exerciseRole,
+            targetSets: template.targetSets,
+            targetRepsMin: template.targetRepsMin,
+            targetRepsMax: template.targetRepsMax,
+            targetDurationMinSeconds: template.targetDurationMinSeconds,
+            targetDurationMaxSeconds: template.targetDurationMaxSeconds,
+            targetRir: template.targetRir,
+            failureTarget: template.failureTarget,
+            intensityTechnique: template.intensityTechnique,
+            restSeconds: template.restSeconds,
+            trackingMode: exercise.trackingMode,
+          }).run();
+        }
+      }
+      return created;
+    });
+  }
+
+  async getWorkoutExerciseSnapshots(userId: number): Promise<WorkoutExerciseSnapshot[]> {
+    return db
+      .select({ snapshot: workoutExerciseSnapshots })
+      .from(workoutExerciseSnapshots)
+      .innerJoin(workouts, eq(workoutExerciseSnapshots.workoutId, workouts.id))
+      .where(eq(workouts.userId, userId))
+      .all()
+      .map((row) => row.snapshot);
   }
 
   async updateWorkout(id: number, workout: Partial<InsertWorkout>): Promise<Workout | undefined> {
@@ -1272,6 +1494,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteWorkout(id: number): Promise<void> {
+    db.delete(workoutExerciseSnapshots).where(eq(workoutExerciseSnapshots.workoutId, id)).run();
     db.delete(sets).where(eq(sets.workoutId, id)).run();
     db.delete(workouts).where(eq(workouts.id, id)).run();
   }
