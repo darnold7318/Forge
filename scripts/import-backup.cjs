@@ -47,6 +47,13 @@ CREATE TABLE users (
   home_timezone TEXT
 );
 
+CREATE TABLE user_recovery_settings (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  fatigue_sensitivity REAL NOT NULL DEFAULT 1,
+  overall_recovery_speed REAL NOT NULL DEFAULT 1,
+  muscle_recovery_speeds TEXT NOT NULL DEFAULT '{}'
+);
+
 CREATE TABLE muscle_groups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
@@ -216,7 +223,8 @@ let userCount = 0,
   scheduleCount = 0,
   scheduleDayCount = 0,
   bwCount = 0,
-  stimulusOverrideCount = 0;
+  stimulusOverrideCount = 0,
+  recoverySettingsCount = 0;
 
 const insertUser = db.prepare(
   `INSERT INTO users (id, name, password_hash, is_admin, color_accent, theme_color, theme_mode, workout_split, training_level, timezone_mode, home_timezone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -245,6 +253,9 @@ const insertBw = db.prepare(
 const insertStimulusOverride = db.prepare(
   `INSERT INTO user_exercise_muscle_stimulus_overrides (id, user_id, exercise_id, muscle_group_id, stimulus_ratio) VALUES (?, ?, ?, ?, ?)`
 );
+const insertRecoverySettings = db.prepare(
+  `INSERT INTO user_recovery_settings (user_id, fatigue_sensitivity, overall_recovery_speed, muscle_recovery_speeds) VALUES (?, ?, ?, ?)`
+);
 
 const importAll = db.transaction(() => {
   for (const profile of d.profiles) {
@@ -266,6 +277,17 @@ const importAll = db.transaction(() => {
       u.homeTimezone || null
     );
     userCount++;
+
+    if (profile.recoverySettings) {
+      const settings = profile.recoverySettings;
+      insertRecoverySettings.run(
+        u.id,
+        settings.fatigueSensitivity ?? 1,
+        settings.overallRecoverySpeed ?? 1,
+        settings.muscleRecoverySpeeds ?? "{}"
+      );
+      recoverySettingsCount++;
+    }
 
     for (const t of profile.workoutTemplates || []) {
       insertTemplate.run(t.id, t.userId, t.name, t.notes);
@@ -387,4 +409,5 @@ console.log({
   bodyweightLogs: bwCount,
   exerciseMuscleStimulus: counts.exerciseMuscleStimulus,
   exerciseStimulusOverrides: stimulusOverrideCount,
+  recoverySettings: recoverySettingsCount,
 });

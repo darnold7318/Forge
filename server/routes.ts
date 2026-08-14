@@ -7,6 +7,7 @@ import type { SetWithExercise } from "./storage";
 import { hashPassword, verifyPassword, toPublicUser, requireAuth, requireAdmin, login as loginUser, issueTokenFor, logout as logoutToken } from "./auth";
 import {
   users as usersTable,
+  userRecoverySettings as userRecoverySettingsTable,
   muscleGroups as muscleGroupsTable,
   exercises as exercisesTable,
   workoutTemplates as workoutTemplatesTable,
@@ -41,6 +42,7 @@ import {
   signupSchema,
   loginSchema,
   updateUserPreferencesSchema,
+  recoverySettingsSchema,
   generateScheduleSchema,
   setWeeklyRestDaysSchema,
   setCustomWeeklyTemplateSchema,
@@ -1093,8 +1095,23 @@ export async function registerRoutes(
     if (userId == null) return;
     const history = await buildHistory(userId, zoneOf(req));
     const { lookup } = await buildMuscleGroupLookup();
-    const states = evaluateRecovery(history, lookup);
+    const recoverySettings = await storage.getRecoverySettings(userId);
+    const states = evaluateRecovery(history, lookup, new Date(), recoverySettings);
     res.json(states);
+  });
+
+  app.get("/api/recovery/settings", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    res.json(await storage.getRecoverySettings(userId));
+  });
+
+  app.put("/api/recovery/settings", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = recoverySettingsSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+    res.json(await storage.setRecoverySettings(userId, parsed.data));
   });
 
   // ---------------- Fatigue trend ----------------
@@ -1124,7 +1141,8 @@ export async function registerRoutes(
     const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
     const history = await buildHistory(userId, zoneOf(req));
     const { lookup, nameById } = await buildMuscleGroupLookup();
-    const recoveryStates = evaluateRecovery(history, lookup);
+    const recoverySettings = await storage.getRecoverySettings(userId);
+    const recoveryStates = evaluateRecovery(history, lookup, new Date(), recoverySettings);
 
     // Optional filter by template
     const templateId = req.query.templateId ? Number(req.query.templateId) : undefined;
@@ -1261,6 +1279,7 @@ export async function registerRoutes(
     }
 
     const history = (await buildHistory(userId, zoneOf(req))).slice(0, 50);
+    const recoverySettings = await storage.getRecoverySettings(userId);
 
     const todayIso = todayFor(req);
     const [monthStart, monthEnd] = monthBounds(todayIso.slice(0, 7));
@@ -1292,6 +1311,7 @@ export async function registerRoutes(
       exerciseNameLookup,
       exercisePrimaryMuscleLookup,
       muscleGroupLookup: lookup,
+      recoverySettings,
       schedule: scheduleForDashboard,
       zone: zoneOf(req),
     });
@@ -1365,6 +1385,7 @@ export async function registerRoutes(
     db.delete(userExerciseMuscleStimulusOverridesTable)
       .where(eq(userExerciseMuscleStimulusOverridesTable.userId, userId))
       .run();
+    db.delete(userRecoverySettingsTable).where(eq(userRecoverySettingsTable.userId, userId)).run();
     db.delete(usersTable).where(eq(usersTable.id, userId)).run();
 
     // Drop the now-orphaned session so the bearer token can't outlive the account.
@@ -1399,6 +1420,11 @@ export async function registerRoutes(
       .from(userExerciseMuscleStimulusOverridesTable)
       .where(eq(userExerciseMuscleStimulusOverridesTable.userId, userId))
       .all();
+    const recoverySettings = db
+      .select()
+      .from(userRecoverySettingsTable)
+      .where(eq(userRecoverySettingsTable.userId, userId))
+      .get() ?? null;
 
     return {
       user,
@@ -1410,6 +1436,7 @@ export async function registerRoutes(
       scheduleDays: days,
       bodyweightLogs: bodyweightRows,
       exerciseStimulusOverrides,
+      recoverySettings,
     };
   }
 
@@ -1430,7 +1457,7 @@ export async function registerRoutes(
     const payload = {
       exportType: "forge-profile-backup" as const,
       exportedAt: new Date().toISOString(),
-      version: 3,
+      version: 4,
       data: buildUserExport(user),
     };
 
@@ -1451,7 +1478,7 @@ export async function registerRoutes(
     const payload = {
       exportType: "forge-full-backup" as const,
       exportedAt: new Date().toISOString(),
-      version: 3,
+      version: 4,
       data: {
         muscleGroups: allMuscleGroups,
         exercises: allExercises,

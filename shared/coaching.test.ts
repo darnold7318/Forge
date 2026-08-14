@@ -93,6 +93,41 @@ test("recovery distributes fatigue by stimulus without related-muscle propagatio
   assert.equal(upperBack.fatiguePercent, 0);
 });
 
+test("recovery customization changes fatigue sensitivity and decay speed independently", () => {
+  const now = new Date("2026-08-08T12:00:00.000Z");
+  const history: HistorySessionInput[] = [{
+    id: 1,
+    workoutTemplateId: null,
+    workoutName: "Pull",
+    startedAt: new Date("2026-08-06T12:00:00.000Z"),
+    exercises: [{
+      exerciseId: 1,
+      exerciseOrder: 1,
+      exerciseName: "Pulldown",
+      primaryMuscleGroupId: 1,
+      stimulus: [{ muscleGroupId: 1, stimulusRatio: 1 }],
+      intensityTechnique: "Normal",
+      failureTarget: "Never",
+      sets: [
+        { setNumber: 1, setType: "Working", weight: 100, reps: 10, rir: 2, completed: true },
+        { setNumber: 2, setType: "Working", weight: 100, reps: 10, rir: 2, completed: true },
+      ],
+    }],
+  }];
+  const lookup: MuscleGroupLookup = { idToName: new Map([[1, "Lats"]]) };
+  const fatigue = (settings: Parameters<typeof evaluateRecovery>[3]) =>
+    evaluateRecovery(history, lookup, now, settings).find((state) => state.muscle === "Lats")!.fatiguePercent;
+
+  const standard = fatigue({ fatigueSensitivity: 1, overallRecoverySpeed: 1, muscleRecoverySpeeds: {} });
+  const faster = fatigue({ fatigueSensitivity: 1, overallRecoverySpeed: 1.25, muscleRecoverySpeeds: {} });
+  const moreSensitive = fatigue({ fatigueSensitivity: 1.25, overallRecoverySpeed: 1, muscleRecoverySpeeds: {} });
+  const slowerLats = fatigue({ fatigueSensitivity: 1, overallRecoverySpeed: 1, muscleRecoverySpeeds: { Lats: 0.75 } });
+
+  assert.ok(faster < standard);
+  assert.ok(moreSensitive > standard);
+  assert.ok(slowerLats > standard);
+});
+
 test("static holds count as completed working sets for recovery", () => {
   const now = new Date("2026-08-08T12:00:00.000Z");
   const history: HistorySessionInput[] = [{

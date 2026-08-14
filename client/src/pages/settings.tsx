@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2, Trash2, ShieldCheck, ShieldOff, UserPlus, KeyRound, LogOut, Globe, ChevronsUpDown, UserCog } from "lucide-react";
+import { Sun, Moon, Check, Settings as SettingsIcon, CalendarDays, ListChecks, Download, DatabaseBackup, Loader2, Trash2, ShieldCheck, ShieldOff, UserPlus, KeyRound, LogOut, Globe, ChevronsUpDown, UserCog, HeartPulse } from "lucide-react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -46,6 +46,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useActiveUser } from "@/lib/user-context";
 import { useTheme } from "@/components/theme-provider";
 import { useToast } from "@/hooks/use-toast";
+import { RecoverySettingsEditor } from "@/components/recovery-settings-editor";
 import {
   themeColorIds,
   workoutSplitIds,
@@ -1255,6 +1256,21 @@ export default function Settings() {
           <p className="text-xs text-muted-foreground">
             Advanced reveals additional exercise options. This does not change your training recommendations.
           </p>
+        </CardContent>
+      </Card>
+
+      <Card id="recovery-settings" data-testid="card-recovery-settings">
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <HeartPulse className="h-4 w-4" />
+            Recovery Model
+          </CardTitle>
+          <p className="text-xs text-muted-foreground">
+            Personalize Forge's fatigue estimate without changing your workout history.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <RecoverySettingsEditor />
         </CardContent>
       </Card>
 

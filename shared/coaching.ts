@@ -8,9 +8,11 @@
 // ---------------------------------------------------------------------------
 
 import {
+  DEFAULT_RECOVERY_SETTINGS,
   muscleGroupNames,
   muscleGroupDisplayNames,
   type MuscleGroupName,
+  type RecoverySettings,
   type WorkoutSplitId,
   type ExerciseRole,
   type FailureTarget,
@@ -329,7 +331,7 @@ export interface MuscleRecoveryState {
   summary: string;
 }
 
-const HALF_LIFE_HOURS: Record<MuscleGroupName, number> = {
+export const RECOVERY_HALF_LIFE_HOURS: Record<MuscleGroupName, number> = {
   UpperChest: 48,
   MidLowerChest: 48,
   Lats: 48,
@@ -352,8 +354,10 @@ const HALF_LIFE_HOURS: Record<MuscleGroupName, number> = {
   Obliques: 40,
 };
 
-function resolveDecay(muscle: MuscleGroupName, hoursAgo: number): number {
-  const halfLife = HALF_LIFE_HOURS[muscle] ?? 40;
+function resolveDecay(muscle: MuscleGroupName, hoursAgo: number, settings: RecoverySettings): number {
+  const muscleSpeed = settings.muscleRecoverySpeeds[muscle] ?? 1;
+  const effectiveSpeed = settings.overallRecoverySpeed * muscleSpeed;
+  const halfLife = (RECOVERY_HALF_LIFE_HOURS[muscle] ?? 40) / effectiveSpeed;
   return Math.pow(0.5, hoursAgo / halfLife);
 }
 
@@ -380,6 +384,7 @@ export function evaluateRecovery(
   history: HistorySessionInput[],
   lookup: MuscleGroupLookup,
   now: Date = new Date(),
+  settings: RecoverySettings = DEFAULT_RECOVERY_SETTINGS,
 ): MuscleRecoveryState[] {
   const tenDaysAgo = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000);
   const recentSessions = history.filter((s) => s.startedAt >= tenDaysAgo);
@@ -393,7 +398,7 @@ export function evaluateRecovery(
       const completed = completedSetsOf(ex.sets).filter((set) => set.setType !== "Warmup");
       if (completed.length === 0) continue;
 
-      const baseFatigue = estimateFatigue(ex);
+      const baseFatigue = estimateFatigue(ex) * settings.fatigueSensitivity;
       const stimulus = ex.stimulus?.length
         ? ex.stimulus
         : [{ muscleGroupId: ex.primaryMuscleGroupId, stimulusRatio: 1 }];
@@ -401,7 +406,7 @@ export function evaluateRecovery(
         if (row.stimulusRatio <= 0) continue;
         const muscle = lookup.idToName.get(row.muscleGroupId);
         if (!muscle) continue;
-        const decayed = baseFatigue * row.stimulusRatio * resolveDecay(muscle, hoursAgo);
+        const decayed = baseFatigue * row.stimulusRatio * resolveDecay(muscle, hoursAgo, settings);
         fatigueSum.set(muscle, (fatigueSum.get(muscle) ?? 0) + decayed);
         if (!lastTrained.has(muscle) || session.startedAt > lastTrained.get(muscle)!) {
           lastTrained.set(muscle, session.startedAt);
@@ -1157,6 +1162,7 @@ export interface GetDashboardSnapshotArgs {
   exerciseNameLookup: Map<number, string>;
   exercisePrimaryMuscleLookup: Map<number, MuscleGroupName>;
   muscleGroupLookup: MuscleGroupLookup;
+  recoverySettings?: RecoverySettings;
   now?: Date;
   schedule?: DashboardScheduleInput | null;
   /**
@@ -1181,7 +1187,7 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
   const zone = args.zone ?? "UTC";
 
   const fatigue = evaluateFatigueTrend(history);
-  const recoveryStates = evaluateRecovery(history, muscleGroupLookup, now);
+  const recoveryStates = evaluateRecovery(history, muscleGroupLookup, now, args.recoverySettings);
   const muscleFatigueMap: MuscleFatigueMapEntry[] = recoveryStates.map((s) => ({
     muscleName: s.muscle,
     displayName: s.displayName,

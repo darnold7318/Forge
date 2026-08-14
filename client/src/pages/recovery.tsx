@@ -1,10 +1,14 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { HeartPulse } from "lucide-react";
+import { HeartPulse, Settings2 } from "lucide-react";
 import { useActiveUser } from "@/lib/user-context";
 import { apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { RecoverySettingsEditor } from "@/components/recovery-settings-editor";
 import type { MuscleRecoveryState } from "@shared/coaching";
 
 const STATUS_STYLE: Record<string, string> = {
@@ -53,6 +57,7 @@ function MuscleCard({ state }: { state: MuscleRecoveryState }) {
 
 export default function RecoveryMap() {
   const { activeUserId } = useActiveUser();
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const { data, isLoading } = useQuery<MuscleRecoveryState[]>({
     queryKey: ["/api/recovery", activeUserId],
     queryFn: async () => {
@@ -66,14 +71,28 @@ export default function RecoveryMap() {
 
   return (
     <div className="mx-auto max-w-5xl p-4 md:p-6 space-y-6">
-      <div>
-        <h1 className="text-xl font-display font-bold flex items-center gap-2" data-testid="text-page-title">
-          <HeartPulse className="h-5 w-5" />
-          Muscle Recovery Map
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          Fatigue decay across all 20 muscle groups, distributed by each exercise's effective stimulus ratios
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-display font-bold flex items-center gap-2" data-testid="text-page-title">
+            <HeartPulse className="h-5 w-5" />
+            Muscle Recovery Map
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            Fatigue decay across all 20 muscle groups, distributed by each exercise's effective stimulus ratios
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="shrink-0"
+          onClick={() => setSettingsOpen(true)}
+          aria-label="Customize recovery model"
+          title="Customize recovery model"
+          data-testid="button-open-recovery-settings"
+        >
+          <Settings2 className="h-4 w-4" />
+        </Button>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -81,6 +100,21 @@ export default function RecoveryMap() {
           Array.from({ length: 9 }).map((_, i) => <Skeleton key={i} className="h-32 w-full" />)}
         {!isLoading && sorted.map((state) => <MuscleCard key={state.muscle} state={state} />)}
       </div>
+
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl" data-testid="dialog-recovery-settings">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Settings2 className="h-4 w-4" />
+              Customize Recovery Model
+            </DialogTitle>
+            <DialogDescription>
+              Adjust how strongly workouts create fatigue and how quickly that fatigue decays for this profile.
+            </DialogDescription>
+          </DialogHeader>
+          <RecoverySettingsEditor onSaved={() => setSettingsOpen(false)} />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

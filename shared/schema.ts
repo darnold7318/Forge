@@ -168,6 +168,43 @@ export const muscleGroupDisplayNames: Record<MuscleGroupName, string> = {
   Obliques: "Obliques",
 };
 
+export const RECOVERY_ADJUSTMENT_MIN = 0.75;
+export const RECOVERY_ADJUSTMENT_MAX = 1.25;
+
+const muscleRecoverySpeedsSchema = z.record(
+  z.number().finite().min(RECOVERY_ADJUSTMENT_MIN).max(RECOVERY_ADJUSTMENT_MAX),
+).superRefine((value, ctx) => {
+  for (const key of Object.keys(value)) {
+    if (!muscleGroupNames.includes(key as MuscleGroupName)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Unknown muscle group: ${key}` });
+    }
+  }
+});
+
+export const recoverySettingsSchema = z.object({
+  fatigueSensitivity: z.number().finite().min(RECOVERY_ADJUSTMENT_MIN).max(RECOVERY_ADJUSTMENT_MAX),
+  overallRecoverySpeed: z.number().finite().min(RECOVERY_ADJUSTMENT_MIN).max(RECOVERY_ADJUSTMENT_MAX),
+  muscleRecoverySpeeds: muscleRecoverySpeedsSchema,
+}).strict();
+
+export type RecoverySettings = z.infer<typeof recoverySettingsSchema>;
+
+export const DEFAULT_RECOVERY_SETTINGS: RecoverySettings = {
+  fatigueSensitivity: 1,
+  overallRecoverySpeed: 1,
+  muscleRecoverySpeeds: {},
+};
+
+export const userRecoverySettings = sqliteTable("user_recovery_settings", {
+  userId: integer("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  fatigueSensitivity: real("fatigue_sensitivity").notNull().default(1),
+  overallRecoverySpeed: real("overall_recovery_speed").notNull().default(1),
+  // Sparse JSON object keyed by MuscleGroupName. Missing entries use 1.0.
+  muscleRecoverySpeeds: text("muscle_recovery_speeds").notNull().default("{}"),
+});
+
 export const muscleGroups = sqliteTable("muscle_groups", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull().unique(), // one of muscleGroupNames

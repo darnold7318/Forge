@@ -1,5 +1,6 @@
 import {
   users,
+  userRecoverySettings,
   muscleGroups,
   exercises,
   workouts,
@@ -14,6 +15,8 @@ import {
   userExerciseMuscleStimulusOverrides,
   primaryStimulusMuscle,
   muscleGroupNames,
+  recoverySettingsSchema,
+  DEFAULT_RECOVERY_SETTINGS,
 } from "@shared/schema";
 import type {
   User,
@@ -46,6 +49,7 @@ import type {
   SetCustomWeeklyTemplateInput,
   CustomWeeklySlot,
   MuscleGroupName,
+  RecoverySettings,
 } from "@shared/schema";
 import {
   buildStarterTemplate,
@@ -95,6 +99,13 @@ function ensureTables() {
       mev REAL NOT NULL,
       mav REAL NOT NULL,
       mrv REAL NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS user_recovery_settings (
+      user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      fatigue_sensitivity REAL NOT NULL DEFAULT 1,
+      overall_recovery_speed REAL NOT NULL DEFAULT 1,
+      muscle_recovery_speeds TEXT NOT NULL DEFAULT '{}'
     );
 
     CREATE TABLE IF NOT EXISTS exercises (
@@ -706,6 +717,8 @@ export interface IStorage {
     id: number,
     prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "trainingLevel" | "timezoneMode" | "homeTimezone">>,
   ): Promise<UserRecord | undefined>;
+  getRecoverySettings(userId: number): Promise<RecoverySettings>;
+  setRecoverySettings(userId: number, settings: RecoverySettings): Promise<RecoverySettings>;
 
   // Muscle groups (shared/global)
   getMuscleGroups(): Promise<MuscleGroup[]>;
@@ -807,6 +820,44 @@ export class DatabaseStorage implements IStorage {
     return db.update(users).set(prefs).where(eq(users.id, id)).returning().get();
   }
 
+  async getRecoverySettings(userId: number): Promise<RecoverySettings> {
+    const row = db.select().from(userRecoverySettings).where(eq(userRecoverySettings.userId, userId)).get();
+    if (!row) return { ...DEFAULT_RECOVERY_SETTINGS, muscleRecoverySpeeds: {} };
+
+    let muscleRecoverySpeeds: Record<string, number> = {};
+    try {
+      muscleRecoverySpeeds = JSON.parse(row.muscleRecoverySpeeds ?? "{}");
+    } catch {
+      muscleRecoverySpeeds = {};
+    }
+    const parsed = recoverySettingsSchema.safeParse({
+      fatigueSensitivity: row.fatigueSensitivity,
+      overallRecoverySpeed: row.overallRecoverySpeed,
+      muscleRecoverySpeeds,
+    });
+    return parsed.success ? parsed.data : { ...DEFAULT_RECOVERY_SETTINGS, muscleRecoverySpeeds: {} };
+  }
+
+  async setRecoverySettings(userId: number, settings: RecoverySettings): Promise<RecoverySettings> {
+    db.insert(userRecoverySettings)
+      .values({
+        userId,
+        fatigueSensitivity: settings.fatigueSensitivity,
+        overallRecoverySpeed: settings.overallRecoverySpeed,
+        muscleRecoverySpeeds: JSON.stringify(settings.muscleRecoverySpeeds),
+      })
+      .onConflictDoUpdate({
+        target: userRecoverySettings.userId,
+        set: {
+          fatigueSensitivity: settings.fatigueSensitivity,
+          overallRecoverySpeed: settings.overallRecoverySpeed,
+          muscleRecoverySpeeds: JSON.stringify(settings.muscleRecoverySpeeds),
+        },
+      })
+      .run();
+    return settings;
+  }
+
   // ---------------- Muscle groups (shared) ----------------
   async getMuscleGroups(): Promise<MuscleGroup[]> {
     const order = new Map(muscleGroupNames.map((name, index) => [name, index] as const));
@@ -853,6 +904,26 @@ export class DatabaseStorage implements IStorage {
     for (const row of overrides) {
       append(row.exerciseId, { muscleGroupId: row.muscleGroupId, stimulusRatio: row.stimulusRatio });
     }
+
+    // A database copied without its WAL or opened by an older build can temporarily have the
+    // normalized stimulus tables present but empty. Fall back to the legacy exercise columns so
+    // recovery and volume never collapse to zero while the startup backfill repairs those rows.
+    for (const exercise of db.select().from(exercises).all()) {
+      if (result.has(exercise.id)) continue;
+      append(exercise.id, { muscleGroupId: exercise.primaryMuscleGroupId, stimulusRatio: 1 });
+      let secondary: number[] = [];
+      try {
+        secondary = JSON.parse(exercise.secondaryMuscles ?? "[]");
+      } catch {
+        secondary = [];
+      }
+      for (const muscleGroupId of Array.from(new Set(secondary))) {
+        if (muscleGroupId !== exercise.primaryMuscleGroupId) {
+          append(exercise.id, { muscleGroupId, stimulusRatio: 0.5 });
+        }
+      }
+    }
+
     for (const rows of Array.from(result.values())) {
       rows.sort((a, b) => b.stimulusRatio - a.stimulusRatio || a.muscleGroupId - b.muscleGroupId);
     }

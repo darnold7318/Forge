@@ -36,6 +36,18 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   assert.equal(newUser.trainingLevel, "beginner");
   const updatedUser = await storage.updateUserPreferences(newUser.id, { trainingLevel: "intermediate" });
   assert.equal(updatedUser?.trainingLevel, "intermediate");
+  assert.deepEqual(await storage.getRecoverySettings(newUser.id), {
+    fatigueSensitivity: 1,
+    overallRecoverySpeed: 1,
+    muscleRecoverySpeeds: {},
+  });
+  const customizedRecovery = {
+    fatigueSensitivity: 1.15,
+    overallRecoverySpeed: 0.9,
+    muscleRecoverySpeeds: { SpinalErectors: 0.8 },
+  };
+  await storage.setRecoverySettings(newUser.id, customizedRecovery);
+  assert.deepEqual(await storage.getRecoverySettings(newUser.id), customizedRecovery);
   const bench = (await storage.getExercises()).find((exercise) => exercise.name === "Barbell Bench Press");
   assert.ok(bench);
 
