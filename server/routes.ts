@@ -70,13 +70,11 @@ import {
 import {
   categorizeVolume,
   computeWeeklyVolumeByMuscleGroup,
-  evaluateProgression,
   evaluateRecovery,
   evaluateFatigueTrend,
   getPersonalRecords,
   checkLivePersonalRecord,
   markHistoricalPrs,
-  buildWorkoutSuggestion,
   getDashboardSnapshot,
   analyzeWorkoutComposition,
   getPreviousExercisePerformance,
@@ -90,10 +88,12 @@ import {
   type LivePrResult,
   monthBounds,
   evaluateExerciseTrend,
-  evaluateGoalAwareProgression,
+  evaluateGoalAwareProgressionV2,
   buildGoalAwareWorkoutSuggestion,
+  learnPersonalVolumeRanges,
+  COACH_MUSCLE_CONTEXT_MIN_STIMULUS,
   RECOVERY_HALF_LIFE_HOURS,
-  type MuscleVolumeContext,
+  type MuscleTrainingContext,
 } from "@shared/coaching";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -283,6 +283,18 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
       exercises: exercisesForSession,
     };
   });
+}
+
+async function refreshLearnedVolumeRanges(userId: number, history: HistorySessionInput[], zone: string): Promise<void> {
+  const learnedRanges = learnPersonalVolumeRanges(history, new Date(), zone);
+  await storage.setLearnedVolumeRanges(userId, learnedRanges.map((range) => ({
+    muscleGroupId: range.muscleGroupId,
+    productiveLow: range.productiveLow,
+    productiveHigh: range.productiveHigh,
+    confidence: range.confidence,
+    validWeekCount: range.validWeekCount,
+    explanation: range.explanation,
+  })));
 }
 
 
@@ -1165,6 +1177,8 @@ export async function registerRoutes(
   app.get("/api/coach/settings", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
+    const history = await buildHistory(userId, zoneOf(req));
+    await refreshLearnedVolumeRanges(userId, history, zoneOf(req));
     const [context, muscleOverrides, exerciseOverrides] = await Promise.all([
       getEffectiveCoachContext(userId),
       storage.getMuscleCoachOverrides(userId),
@@ -1275,6 +1289,7 @@ export async function registerRoutes(
     const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
     const history = await buildHistory(userId, zoneOf(req));
     const { lookup, nameById } = await buildMuscleGroupLookup();
+    await refreshLearnedVolumeRanges(userId, history, zoneOf(req));
     const coachContext = await getEffectiveCoachContext(userId);
     const recoveryStates = evaluateRecovery(
       history,
@@ -1358,16 +1373,35 @@ export async function registerRoutes(
         exercise.trackingMode === "duration" ? "duration" : "reps",
         coachContext.settings,
       );
-      const muscleSettings = coachContext.muscleById.get(primaryMuscleId);
-      const volumeContext: MuscleVolumeContext | null = muscleSettings ? {
-        muscleGroupId: primaryMuscleId,
-        muscleName: muscleSettings.displayName,
-        currentEffectiveSets: weeklyVolume.get(primaryMuscleId) ?? 0,
-        mev: muscleSettings.mev,
-        mav: muscleSettings.mav,
-        mrv: muscleSettings.mrv,
-        status: categorizeVolume(weeklyVolume.get(primaryMuscleId) ?? 0, muscleSettings),
-      } : null;
+      const meaningfulStimulus = exercise.stimulus
+        .filter((row) => row.stimulusRatio >= COACH_MUSCLE_CONTEXT_MIN_STIMULUS)
+        .sort((a, b) => b.stimulusRatio - a.stimulusRatio || a.muscleGroupId - b.muscleGroupId);
+      if (meaningfulStimulus.length === 0) meaningfulStimulus.push({ muscleGroupId: primaryMuscleId, stimulusRatio: 1 });
+      const muscleContexts: MuscleTrainingContext[] = meaningfulStimulus.flatMap((row) => {
+        const settings = coachContext.muscleById.get(row.muscleGroupId);
+        if (!settings) return [];
+        const recoveryState = recoveryStates.find((state) => state.muscle === settings.muscle);
+        const currentEffectiveSets = weeklyVolume.get(row.muscleGroupId) ?? 0;
+        return [{
+          muscleGroupId: row.muscleGroupId,
+          muscle: settings.muscle,
+          displayName: settings.displayName,
+          stimulusRatio: row.stimulusRatio,
+          currentEffectiveSets,
+          mev: settings.mev,
+          mav: settings.mav,
+          mrv: settings.mrv,
+          volumeStatus: categorizeVolume(currentEffectiveSets, settings),
+          recoveryPercent: recoveryState?.recoveryPercent ?? 100,
+          fatiguePercent: recoveryState?.fatiguePercent ?? 0,
+          recoveryStatus: recoveryState?.status ?? "Recovered",
+          learnedLow: settings.learnedRange.productiveLow,
+          learnedHigh: settings.learnedRange.productiveHigh,
+          learnedConfidence: settings.learnedRange.confidence,
+          learnedValidWeekCount: settings.learnedRange.validWeekCount,
+          learnedExplanation: settings.learnedRange.explanation,
+        }];
+      });
       const progressionInput = {
         goal: coachContext.goal,
         trackingMode: exercise.trackingMode === "duration" ? "duration" as const : "reps" as const,
@@ -1377,9 +1411,9 @@ export async function registerRoutes(
         settings: coachContext.settings,
         recovery,
         fatigue,
-        volumeContext,
+        muscleContexts,
       };
-      const evaluation = evaluateGoalAwareProgression(progressionInput);
+      const evaluation = evaluateGoalAwareProgressionV2(progressionInput);
       const suggestion = buildGoalAwareWorkoutSuggestion(progressionInput, evaluation);
 
       suggestions.push({
@@ -1480,7 +1514,9 @@ export async function registerRoutes(
       if (name) exercisePrimaryMuscleLookup.set(e.id, name);
     }
 
-    const history = (await buildHistory(userId, zoneOf(req))).slice(0, 50);
+    const fullHistory = await buildHistory(userId, zoneOf(req));
+    await refreshLearnedVolumeRanges(userId, fullHistory, zoneOf(req));
+    const history = fullHistory.slice(0, 50);
     const coachContext = await getEffectiveCoachContext(userId);
 
     const todayIso = todayFor(req);
@@ -1515,6 +1551,15 @@ export async function registerRoutes(
       history,
       exerciseNameLookup,
       exercisePrimaryMuscleLookup,
+      exerciseStimulusLookup: new Map(exercisesList.map((exercise) => [exercise.id, exercise.stimulus])),
+      muscleCoachSettingsLookup: new Map(coachContext.muscles.map((muscle) => [muscle.muscleGroupId, {
+        muscle: muscle.muscle,
+        displayName: muscle.displayName,
+        mev: muscle.mev,
+        mav: muscle.mav,
+        mrv: muscle.mrv,
+        learnedRange: muscle.learnedRange,
+      }])),
       muscleGroupLookup: lookup,
       recoverySettings: coachContext.recoverySettings,
       recoveryOverrides: coachContext.recoveryOverrides,

@@ -103,7 +103,7 @@ function ensureTables() {
       theme_color TEXT NOT NULL DEFAULT 'green',
       theme_mode TEXT NOT NULL DEFAULT 'dark',
       workout_split TEXT NOT NULL DEFAULT 'ppl',
-      training_level TEXT NOT NULL DEFAULT 'intermediate',
+      training_level TEXT NOT NULL DEFAULT 'beginner',
       training_goal TEXT NOT NULL DEFAULT 'hypertrophy'
     );
 
@@ -276,7 +276,9 @@ function ensureTables() {
       muscle_group_id INTEGER NOT NULL REFERENCES muscle_groups(id) ON DELETE CASCADE,
       productive_low REAL,
       productive_high REAL,
-      confidence INTEGER NOT NULL DEFAULT 0
+      confidence INTEGER NOT NULL DEFAULT 0,
+      valid_week_count INTEGER NOT NULL DEFAULT 0,
+      explanation TEXT NOT NULL DEFAULT 'Forge is still learning this range.'
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_user_muscle_learned_range_unique
@@ -348,7 +350,7 @@ function ensureTables() {
     { column: "is_admin", ddl: "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0" },
     { column: "timezone_mode", ddl: "ALTER TABLE users ADD COLUMN timezone_mode TEXT NOT NULL DEFAULT 'home'" },
     { column: "home_timezone", ddl: "ALTER TABLE users ADD COLUMN home_timezone TEXT" },
-    { column: "training_level", ddl: "ALTER TABLE users ADD COLUMN training_level TEXT NOT NULL DEFAULT 'intermediate'" },
+    { column: "training_level", ddl: "ALTER TABLE users ADD COLUMN training_level TEXT NOT NULL DEFAULT 'beginner'" },
     { column: "training_goal", ddl: "ALTER TABLE users ADD COLUMN training_goal TEXT NOT NULL DEFAULT 'hypertrophy'" },
   ];
   for (const { column, ddl } of migrations) {
@@ -363,7 +365,7 @@ function ensureTables() {
   }
   if (trainingLevelWasMissing) {
     // Preserve the existing unilateral editor for accounts present when this
-    // feature first shipped. New accounts are explicitly Intermediate.
+    // feature first shipped. New accounts are explicitly Beginner.
     sqlite.prepare("UPDATE users SET training_level = 'advanced'").run();
   }
 
@@ -486,6 +488,22 @@ function ensureTables() {
       );
     } catch (err) {
       // Guard against a race/rerun — don't crash server startup.
+    }
+  }
+
+  const learnedRangeColumns = new Set(
+    (sqlite.prepare("PRAGMA table_info(user_muscle_learned_ranges)").all() as { name: string }[]).map((c) => c.name),
+  );
+  for (const [column, ddl] of [
+    ["valid_week_count", "ALTER TABLE user_muscle_learned_ranges ADD COLUMN valid_week_count INTEGER NOT NULL DEFAULT 0"],
+    ["explanation", "ALTER TABLE user_muscle_learned_ranges ADD COLUMN explanation TEXT NOT NULL DEFAULT 'Forge is still learning this range.'"],
+  ] as const) {
+    if (!learnedRangeColumns.has(column)) {
+      try {
+        sqlite.exec(ddl);
+      } catch {
+        // Column already added by a concurrent boot — safe to ignore.
+      }
     }
   }
 }
@@ -811,6 +829,7 @@ export interface IStorage {
   setExerciseCoachOverride(userId: number, value: ExerciseCoachOverride): Promise<ExerciseCoachOverride>;
   deleteExerciseCoachOverride(userId: number, exerciseId: number): Promise<void>;
   getLearnedVolumeRanges(userId: number): Promise<LearnedVolumeRange[]>;
+  setLearnedVolumeRanges(userId: number, values: LearnedVolumeRange[]): Promise<LearnedVolumeRange[]>;
 
   // Muscle groups (shared/global)
   getMuscleGroups(): Promise<MuscleGroup[]>;
@@ -899,7 +918,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createUser(user: InsertUser & { passwordHash: string; isAdmin?: boolean }): Promise<UserRecord> {
-    return db.insert(users).values({ trainingLevel: "intermediate", trainingGoal: "hypertrophy", ...user }).returning().get();
+    return db.insert(users).values({ trainingLevel: "beginner", trainingGoal: "hypertrophy", ...user }).returning().get();
   }
 
   async renameUser(id: number, name: string): Promise<UserRecord | undefined> {
@@ -1039,7 +1058,31 @@ export class DatabaseStorage implements IStorage {
       productiveLow: row.productiveLow,
       productiveHigh: row.productiveHigh,
       confidence: row.confidence,
+      validWeekCount: row.validWeekCount,
+      explanation: row.explanation,
     }));
+  }
+
+  async setLearnedVolumeRanges(userId: number, values: LearnedVolumeRange[]): Promise<LearnedVolumeRange[]> {
+    db.transaction((tx) => {
+      tx.delete(userMuscleLearnedRanges).where(eq(userMuscleLearnedRanges.userId, userId)).run();
+      for (const value of values) {
+        tx.insert(userMuscleLearnedRanges)
+          .values({ userId, ...value })
+          .onConflictDoUpdate({
+            target: [userMuscleLearnedRanges.userId, userMuscleLearnedRanges.muscleGroupId],
+            set: {
+              productiveLow: value.productiveLow,
+              productiveHigh: value.productiveHigh,
+              confidence: value.confidence,
+              validWeekCount: value.validWeekCount,
+              explanation: value.explanation,
+            },
+          })
+          .run();
+      }
+    });
+    return values;
   }
 
   // ---------------- Muscle groups (shared) ----------------

@@ -42,7 +42,7 @@ CREATE TABLE users (
   theme_color TEXT NOT NULL DEFAULT 'green',
   theme_mode TEXT NOT NULL DEFAULT 'dark',
   workout_split TEXT NOT NULL DEFAULT 'ppl',
-  training_level TEXT NOT NULL DEFAULT 'intermediate',
+  training_level TEXT NOT NULL DEFAULT 'beginner',
   training_goal TEXT NOT NULL DEFAULT 'hypertrophy',
   timezone_mode TEXT NOT NULL DEFAULT 'home',
   home_timezone TEXT
@@ -93,6 +93,8 @@ CREATE TABLE user_muscle_learned_ranges (
   productive_low REAL,
   productive_high REAL,
   confidence INTEGER NOT NULL DEFAULT 0,
+  valid_week_count INTEGER NOT NULL DEFAULT 0,
+  explanation TEXT NOT NULL DEFAULT 'Forge is still learning this range.',
   UNIQUE(user_id, muscle_group_id)
 );
 
@@ -334,7 +336,7 @@ const insertWorkoutSnapshot = db.prepare(
   `INSERT INTO workout_exercise_snapshots (id, workout_id, exercise_id, exercise_role, target_sets, target_reps_min, target_reps_max, target_duration_min_seconds, target_duration_max_seconds, target_rir, failure_target, intensity_technique, rest_seconds, tracking_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const insertLearnedRange = db.prepare(
-  `INSERT INTO user_muscle_learned_ranges (id, user_id, muscle_group_id, productive_low, productive_high, confidence) VALUES (?, ?, ?, ?, ?, ?)`
+  `INSERT INTO user_muscle_learned_ranges (id, user_id, muscle_group_id, productive_low, productive_high, confidence, valid_week_count, explanation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 );
 
 const importAll = db.transaction(() => {
@@ -487,7 +489,16 @@ const importAll = db.transaction(() => {
       exerciseCoachOverrideCount++;
     }
     for (const row of profile.learnedVolumeRanges || []) {
-      insertLearnedRange.run(row.id, row.userId, row.muscleGroupId, row.productiveLow ?? null, row.productiveHigh ?? null, row.confidence ?? 0);
+      insertLearnedRange.run(
+        row.id,
+        row.userId,
+        row.muscleGroupId,
+        row.productiveLow ?? null,
+        row.productiveHigh ?? null,
+        row.confidence ?? 0,
+        row.validWeekCount ?? 0,
+        row.explanation ?? "Forge is still learning this range."
+      );
       learnedRangeCount++;
     }
   }

@@ -33,6 +33,8 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   assert.ok(columns("user_muscle_coach_overrides").has("recovery_half_life_hours"));
   assert.ok(columns("user_exercise_coach_overrides").has("fatigue_cost"));
   assert.ok(columns("workout_exercise_snapshots").has("target_rir"));
+  assert.ok(columns("user_muscle_learned_ranges").has("valid_week_count"));
+  assert.ok(columns("user_muscle_learned_ranges").has("explanation"));
   migrated.close();
 
   const users = await storage.getUsers();
@@ -40,7 +42,7 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   assert.equal(users[1].trainingLevel, "advanced");
   assert.equal(users[0].trainingGoal, "hypertrophy");
   const newUser = await storage.createUser({ name: "New user", passwordHash: "test:test" });
-  assert.equal(newUser.trainingLevel, "intermediate");
+  assert.equal(newUser.trainingLevel, "beginner");
   assert.equal(newUser.trainingGoal, "hypertrophy");
   const updatedUser = await storage.updateUserPreferences(newUser.id, { trainingLevel: "intermediate" });
   assert.equal(updatedUser?.trainingLevel, "intermediate");
@@ -88,6 +90,22 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   const snapshot = (await storage.getWorkoutExerciseSnapshots(newUser.id)).find((row) => row.workoutId === workout.id && row.exerciseId === bench.id);
   assert.equal(snapshot?.failureTarget, "Last Set");
   assert.equal(snapshot?.intensityTechnique, "Rest Pause");
+  await storage.setLearnedVolumeRanges(newUser.id, [{
+    muscleGroupId: bench.primaryMuscleGroupId,
+    productiveLow: 10,
+    productiveHigh: 16,
+    confidence: 72,
+    validWeekCount: 6,
+    explanation: "Stable or improving across six completed weeks.",
+  }]);
+  assert.deepEqual((await storage.getLearnedVolumeRanges(newUser.id))[0], {
+    muscleGroupId: bench.primaryMuscleGroupId,
+    productiveLow: 10,
+    productiveHigh: 16,
+    confidence: 72,
+    validWeekCount: 6,
+    explanation: "Stable or improving across six completed weeks.",
+  });
 
   const defaults = await storage.getEffectiveExerciseStimulus(users[0].id, bench.id);
   assert.equal(defaults.length, 4);

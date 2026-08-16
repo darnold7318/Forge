@@ -26,7 +26,7 @@ export interface EffectiveMuscleCoachSettings {
     recoveryHalfLifeHours: boolean;
     volumeLandmarks: boolean;
   };
-  learnedRange: { productiveLow: number | null; productiveHigh: number | null; confidence: number };
+  learnedRange: { productiveLow: number | null; productiveHigh: number | null; confidence: number; validWeekCount: number; explanation: string };
   forgeDefaults: { recoveryHalfLifeHours: number; mev: number; mav: number; mrv: number };
 }
 
@@ -76,7 +76,13 @@ export async function getEffectiveCoachContext(userId: number): Promise<Effectiv
         recoveryHalfLifeHours: override?.recoveryHalfLifeHours != null,
         volumeLandmarks: override?.mev != null || override?.mav != null || override?.mrv != null,
       },
-      learnedRange: learned ?? { productiveLow: null, productiveHigh: null, confidence: 0 },
+      learnedRange: learned ?? {
+        productiveLow: null,
+        productiveHigh: null,
+        confidence: 0,
+        validWeekCount: 0,
+        explanation: "Forge is still learning this range.",
+      },
       forgeDefaults: {
         recoveryHalfLifeHours: RECOVERY_HALF_LIFE_HOURS[name],
         mev: muscle.mev,

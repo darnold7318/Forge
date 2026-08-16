@@ -196,6 +196,8 @@ export default function Coach() {
             suggestions?.map((s) => {
               const meta = recommendationMeta(s.recommendation);
               const Icon = meta.icon;
+              const primaryContext = s.muscleContexts?.[0];
+              const learnedRangeLabel = s.goal === "hypertrophy" ? "Observed productive range" : "Observed volume tolerance";
               return (
                 <div
                   key={s.exerciseId}
@@ -231,30 +233,61 @@ export default function Coach() {
                     <p className="text-xs text-muted-foreground italic">{s.nextGoalText}</p>
                   )}
 
-                  {showIntermediate && <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs border-t pt-2">
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs border-t pt-2">
                     <span className="flex items-center gap-1">
                       <ShieldAlert className="h-3.5 w-3.5" />
                       <span className={RECOVERY_STATUS_STYLE[s.recoveryStatus] ?? "text-muted-foreground"}>
                         {s.recoveryText}
                       </span>
                     </span>
-                    <span className="flex items-center gap-1">
+                    {showIntermediate && <span className="flex items-center gap-1">
                       <Gauge className="h-3.5 w-3.5" />
-                      Readiness {s.readinessScore}/100 — {s.readinessStatus}
-                    </span>
-                    <span className="text-muted-foreground">Confidence {s.confidenceScore}%</span>
-                    {s.trend && <span>Trend {s.trend}</span>}
-                    {s.setRecommendation && <span>{s.setRecommendation}</span>}
-                  </div>}
-                  {showIntermediate && s.volumeContext && (
+                      Readiness {s.readinessScore}/100 - {s.readinessStatus}
+                    </span>}
+                    {showIntermediate && <span className="text-muted-foreground">Confidence {s.confidenceScore}%</span>}
+                    {showIntermediate && s.trend && <span>Trend {s.trend}</span>}
+                    {showIntermediate && s.setRecommendation && <span>{s.setRecommendation}</span>}
+                  </div>
+                  {showIntermediate && primaryContext && (
+                    <div className="space-y-1">
                     <p className="text-xs text-muted-foreground">
-                      {s.volumeContext.muscleName}: {s.volumeContext.currentEffectiveSets.toFixed(1)} effective sets · MEV {s.volumeContext.mev} / MAV {s.volumeContext.mav} / MRV {s.volumeContext.mrv}
+                      Target: {primaryContext.displayName} · {primaryContext.currentEffectiveSets.toFixed(1)} effective sets · MEV {primaryContext.mev} / MAV {primaryContext.mav} / MRV {primaryContext.mrv}
                     </p>
+                    {s.limitingMuscleNote && <p className="text-xs text-volume-high">Limiting context: {s.limitingMuscleNote}</p>}
+                    {s.goal !== "mobility" && (primaryContext.learnedLow != null && primaryContext.learnedHigh != null ? (
+                      <p className="text-xs text-muted-foreground">
+                        {learnedRangeLabel}: {primaryContext.learnedLow.toFixed(1)}-{primaryContext.learnedHigh.toFixed(1)} sets ({primaryContext.learnedConfidence ?? 0}% confidence)
+                      </p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">{learnedRangeLabel}: Learning ({primaryContext.learnedValidWeekCount ?? 0}/4 valid weeks)</p>
+                    ))}
+                    </div>
                   )}
                   {showAdvanced && s.confidenceFactors && (
-                    <div className="rounded bg-muted/40 p-2 text-[11px] text-muted-foreground">
-                      {s.confidenceFactors.map((factor) => <span key={factor.label} className="mr-3">{factor.label}: {factor.score}% ({factor.detail})</span>)}
-                      {s.stimulusQuality && <span>Stimulus: {s.stimulusQuality}</span>}
+                    <div className="space-y-2">
+                      <div className="rounded bg-muted/40 p-2 text-[11px] text-muted-foreground">
+                        {s.confidenceFactors.map((factor) => <span key={factor.label} className="mr-3">{factor.label}: {factor.score}% ({factor.detail})</span>)}
+                        {s.stimulusQuality && <span>Stimulus: {s.stimulusQuality}</span>}
+                        {s.rirAdherence && <span className="ml-3">RIR: {s.rirAdherence.status.replaceAll("_", " ")}</span>}
+                        {s.effortNormalizedStatus && <span className="ml-3">Effort-adjusted: {s.effortNormalizedStatus}</span>}
+                      </div>
+                      {(s.muscleContexts?.length ?? 0) > 0 && (
+                        <details className="rounded border bg-muted/20 p-2 text-xs text-muted-foreground">
+                          <summary className="cursor-pointer font-medium text-foreground">Per-muscle evidence</summary>
+                          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                            {s.muscleContexts?.map((context) => (
+                              <div key={context.muscleGroupId} className="rounded bg-background/60 p-2">
+                                <p className="font-medium text-foreground">{context.displayName}</p>
+                                <p>Stimulus {context.stimulusRatio.toFixed(2)}</p>
+                                <p>{context.currentEffectiveSets.toFixed(1)} effective sets · {context.volumeStatus}</p>
+                                <p>Recovery {context.recoveryPercent}% · {context.recoveryStatus}</p>
+                                <p>MEV {context.mev} / MAV {context.mav} / MRV {context.mrv}</p>
+                                {s.goal !== "mobility" && context.learnedExplanation && <p className="mt-1">{context.learnedExplanation}</p>}
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
                     </div>
                   )}
                   {s.readinessGuidance && (

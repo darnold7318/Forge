@@ -25,8 +25,8 @@ export const users = sqliteTable("users", {
   // Preferred workout split — stored preference only, informational.
   workoutSplit: text("workout_split").notNull().default("ppl"),
   // Controls how much training complexity the UI exposes. Existing values are
-  // never rewritten; newly-created accounts explicitly start Intermediate.
-  trainingLevel: text("training_level").notNull().default("intermediate"),
+  // never rewritten; newly-created accounts explicitly start Beginner.
+  trainingLevel: text("training_level").notNull().default("beginner"),
   // Controls which outcome the coaching engine prioritizes. This is separate
   // from training level, which only controls UI detail and advanced tuning.
   trainingGoal: text("training_goal").notNull().default("hypertrophy"),
@@ -629,6 +629,8 @@ export const userMuscleLearnedRanges = sqliteTable(
     productiveLow: real("productive_low"),
     productiveHigh: real("productive_high"),
     confidence: integer("confidence").notNull().default(0),
+    validWeekCount: integer("valid_week_count").notNull().default(0),
+    explanation: text("explanation").notNull().default("Forge is still learning this range."),
   },
   (table) => [uniqueIndex("idx_user_muscle_learned_range_unique").on(table.userId, table.muscleGroupId)],
 );
@@ -638,6 +640,8 @@ export interface LearnedVolumeRange {
   productiveLow: number | null;
   productiveHigh: number | null;
   confidence: number;
+  validWeekCount: number;
+  explanation: string;
 }
 
 export const insertWorkoutSchema = createInsertSchema(workouts).omit({

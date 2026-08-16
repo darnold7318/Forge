@@ -20,7 +20,13 @@ interface EffectiveMuscleSetting {
   mav: number;
   mrv: number;
   customized: { recoveryHalfLifeHours: boolean; volumeLandmarks: boolean };
-  learnedRange: { productiveLow: number | null; productiveHigh: number | null; confidence: number };
+  learnedRange: {
+    productiveLow: number | null;
+    productiveHigh: number | null;
+    confidence: number;
+    validWeekCount: number;
+    explanation: string;
+  };
   forgeDefaults: { recoveryHalfLifeHours: number; mev: number; mav: number; mrv: number };
 }
 
@@ -183,7 +189,7 @@ function MuscleRow({ muscle, onSave, onReset }: { muscle: EffectiveMuscleSetting
         <p className="text-[10px] text-muted-foreground">
           Learned range: {muscle.learnedRange.productiveLow != null && muscle.learnedRange.productiveHigh != null
             ? `${muscle.learnedRange.productiveLow.toFixed(1)}-${muscle.learnedRange.productiveHigh.toFixed(1)} (${muscle.learnedRange.confidence}% confidence)`
-            : "Learning"}
+            : `Learning (${muscle.learnedRange.validWeekCount}/4 valid weeks)`}
         </p>
       </div>
       <label className="text-[10px] text-muted-foreground">Half-life (h){field("recoveryHalfLifeHours", 18, 120)}</label>
