@@ -1,22 +1,29 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 
-interface RestTimerContextValue {
-  /** Seconds remaining, or null when no timer is running/paused-with-value. */
-  secondsLeft: number | null;
-  /** Total duration of the current/most-recent timer, for progress display. */
+export interface RestTimer {
+  id: string;
+  secondsLeft: number;
   totalSeconds: number;
   isRunning: boolean;
-  isPaused: boolean;
-  /** Label shown in the widget, e.g. the exercise name the rest is for. */
   label: string;
-  /** Start (or restart) a rest timer for `seconds`, optionally labeled. */
+}
+
+interface StoredRestTimer extends RestTimer {
+  /** Wall-clock finish time. This keeps timers accurate when the tab is backgrounded. */
+  endsAt: number | null;
+}
+
+interface RestTimerContextValue {
+  /** Active, paused, and newly completed timers in the order they were started. */
+  timers: RestTimer[];
+  /** Add a new rest timer without replacing timers that are already counting down. */
   start: (seconds: number, label?: string) => void;
-  pause: () => void;
-  resume: () => void;
-  /** Add/subtract seconds from the running or paused timer (e.g. +/-15s). */
-  adjust: (deltaSeconds: number) => void;
-  /** Stop and hide the timer entirely. */
-  dismiss: () => void;
+  pause: (id: string) => void;
+  resume: (id: string) => void;
+  /** Add/subtract seconds from one running or paused timer (e.g. +/-15s). */
+  adjust: (id: string, deltaSeconds: number) => void;
+  /** Stop and hide one timer. */
+  dismiss: (id: string) => void;
 }
 
 const RestTimerContext = createContext<RestTimerContextValue | undefined>(undefined);
@@ -58,96 +65,121 @@ function vibrate() {
   }
 }
 
+function currentSeconds(timer: StoredRestTimer, now = Date.now()): number {
+  if (!timer.isRunning || timer.endsAt === null) return timer.secondsLeft;
+  return Math.max(0, Math.ceil((timer.endsAt - now) / 1000));
+}
+
 export function RestTimerProvider({ children }: { children: ReactNode }) {
-  const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
-  const [totalSeconds, setTotalSeconds] = useState(0);
-  const [isRunning, setIsRunning] = useState(false);
-  const [label, setLabel] = useState("");
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const hasFiredCompletion = useRef(false);
-
-  const clearTick = () => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-  };
-
-  const tick = () => {
-    setSecondsLeft((prev) => {
-      if (prev === null) return prev;
-      if (prev <= 1) {
-        clearTick();
-        setIsRunning(false);
-        if (!hasFiredCompletion.current) {
-          hasFiredCompletion.current = true;
-          playBeep();
-          vibrate();
-        }
-        return 0;
-      }
-      return prev - 1;
-    });
-  };
+  const [timers, setTimers] = useState<StoredRestTimer[]>([]);
+  const nextId = useRef(0);
+  const completedTimerIds = useRef(new Set<string>());
+  const hasRunningTimer = timers.some((timer) => timer.isRunning);
 
   const start = (seconds: number, newLabel: string = "") => {
-    clearTick();
-    hasFiredCompletion.current = false;
-    setTotalSeconds(seconds);
-    setSecondsLeft(seconds);
-    setLabel(newLabel);
-    setIsRunning(true);
-    intervalRef.current = setInterval(tick, 1000);
+    const duration = Math.max(0, Math.floor(seconds));
+    const id = `rest-timer-${Date.now()}-${nextId.current++}`;
+    setTimers((current) => [
+      ...current,
+      {
+        id,
+        secondsLeft: duration,
+        totalSeconds: duration,
+        isRunning: duration > 0,
+        label: newLabel.trim(),
+        endsAt: duration > 0 ? Date.now() + duration * 1000 : null,
+      },
+    ]);
   };
 
-  const pause = () => {
-    clearTick();
-    setIsRunning(false);
+  const pause = (id: string) => {
+    const now = Date.now();
+    setTimers((current) =>
+      current.map((timer) =>
+        timer.id === id && timer.isRunning
+          ? { ...timer, secondsLeft: currentSeconds(timer, now), isRunning: false, endsAt: null }
+          : timer,
+      ),
+    );
   };
 
-  const resume = () => {
-    if (secondsLeft === null || secondsLeft <= 0) return;
-    clearTick();
-    hasFiredCompletion.current = false;
-    setIsRunning(true);
-    intervalRef.current = setInterval(tick, 1000);
+  const resume = (id: string) => {
+    const now = Date.now();
+    setTimers((current) =>
+      current.map((timer) => {
+        if (timer.id !== id || timer.isRunning || timer.secondsLeft <= 0) return timer;
+        completedTimerIds.current.delete(id);
+        return { ...timer, isRunning: true, endsAt: now + timer.secondsLeft * 1000 };
+      }),
+    );
   };
 
-  const adjust = (deltaSeconds: number) => {
-    setSecondsLeft((prev) => {
-      if (prev === null) return prev;
-      const next = Math.max(0, prev + deltaSeconds);
-      if (next > 0) hasFiredCompletion.current = false;
-      return next;
-    });
-    setTotalSeconds((prev) => Math.max(prev, (secondsLeft ?? 0) + deltaSeconds));
+  const adjust = (id: string, deltaSeconds: number) => {
+    const now = Date.now();
+    setTimers((current) =>
+      current.map((timer) => {
+        if (timer.id !== id) return timer;
+        const nextSeconds = Math.max(0, currentSeconds(timer, now) + deltaSeconds);
+        if (nextSeconds > 0) completedTimerIds.current.delete(id);
+        return {
+          ...timer,
+          secondsLeft: nextSeconds,
+          totalSeconds: Math.max(timer.totalSeconds, nextSeconds),
+          isRunning: timer.isRunning && nextSeconds > 0,
+          endsAt: timer.isRunning && nextSeconds > 0 ? now + nextSeconds * 1000 : null,
+        };
+      }),
+    );
   };
 
-  const dismiss = () => {
-    clearTick();
-    setIsRunning(false);
-    setSecondsLeft(null);
-    setTotalSeconds(0);
-    setLabel("");
+  const dismiss = (id: string) => {
+    completedTimerIds.current.delete(id);
+    setTimers((current) => current.filter((timer) => timer.id !== id));
   };
 
-  useEffect(() => () => clearTick(), []);
+  useEffect(() => {
+    if (!hasRunningTimer) return;
+
+    const tick = () => {
+      const now = Date.now();
+      setTimers((current) => {
+        let changed = false;
+        const next = current.map((timer) => {
+          if (!timer.isRunning) return timer;
+          const secondsLeft = currentSeconds(timer, now);
+          if (secondsLeft === timer.secondsLeft) return timer;
+          changed = true;
+          return {
+            ...timer,
+            secondsLeft,
+            isRunning: secondsLeft > 0,
+            endsAt: secondsLeft > 0 ? timer.endsAt : null,
+          };
+        });
+        return changed ? next : current;
+      });
+    };
+
+    const interval = window.setInterval(tick, 250);
+    return () => window.clearInterval(interval);
+  }, [hasRunningTimer]);
+
+  useEffect(() => {
+    let newlyCompleted = false;
+    for (const timer of timers) {
+      if (timer.secondsLeft === 0 && !completedTimerIds.current.has(timer.id)) {
+        completedTimerIds.current.add(timer.id);
+        newlyCompleted = true;
+      }
+    }
+    if (newlyCompleted) {
+      playBeep();
+      vibrate();
+    }
+  }, [timers]);
 
   return (
-    <RestTimerContext.Provider
-      value={{
-        secondsLeft,
-        totalSeconds,
-        isRunning,
-        isPaused: secondsLeft !== null && secondsLeft > 0 && !isRunning,
-        label,
-        start,
-        pause,
-        resume,
-        adjust,
-        dismiss,
-      }}
-    >
+    <RestTimerContext.Provider value={{ timers, start, pause, resume, adjust, dismiss }}>
       {children}
     </RestTimerContext.Provider>
   );
