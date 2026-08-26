@@ -12,15 +12,49 @@ import {
   estimateExerciseFatigue,
   learnPersonalVolumeRanges,
   analyzeWorkoutComposition,
+  getDashboardSnapshot,
   getPreviousExercisePerformance,
   resolveGoalCoachingProfile,
   getPersonalRecords,
   type HistorySessionInput,
+  type DashboardTemplateInput,
   type MuscleGroupLookup,
   type MuscleTrainingContext,
 } from "./coaching";
 import { primaryStimulusMuscle } from "./schema";
 import { DEFAULT_COACH_SETTINGS } from "./schema";
+
+test("dashboard distinguishes today's logged workout from a different scheduled template", () => {
+  const templates: DashboardTemplateInput[] = [
+    { id: 1, name: "Push A", exercises: [] },
+    { id: 2, name: "Pull A", exercises: [] },
+  ];
+  const history: HistorySessionInput[] = [{
+    id: 101,
+    workoutTemplateId: 1,
+    workoutName: "Push A",
+    startedAt: new Date("2026-08-25T13:19:00.000Z"),
+    exercises: [],
+  }];
+
+  const snapshot = getDashboardSnapshot({
+    templates,
+    history,
+    exerciseNameLookup: new Map(),
+    exercisePrimaryMuscleLookup: new Map(),
+    muscleGroupLookup: { idToName: new Map() },
+    schedule: { workoutTemplateId: 2, label: "Pull A" },
+    now: new Date("2026-08-25T18:00:00.000Z"),
+    zone: "America/Los_Angeles",
+  });
+
+  assert.equal(snapshot.todaysWorkoutName, "Pull A");
+  assert.equal(snapshot.todayScheduledWorkoutName, "Pull A");
+  assert.equal(snapshot.loggedWorkoutTodayName, "Push A");
+  assert.equal(snapshot.isOffScheduleWorkoutToday, true);
+  assert.equal(snapshot.workoutStatus, "Logged Today");
+  assert.match(snapshot.lastWorkoutText, /Workout logged today: Push A/);
+});
 
 test("weighted volume counts stimulus ratios for working sets", () => {
   const stimulus = [

@@ -2077,6 +2077,9 @@ export interface MuscleFatigueMapEntry {
 
 export interface DashboardSnapshot {
   todaysWorkoutName: string;
+  todayScheduledWorkoutName: string | null;
+  loggedWorkoutTodayName: string | null;
+  isOffScheduleWorkoutToday: boolean;
   workoutStatus: string;
   lastWorkoutText: string;
   recoveryText: string;
@@ -2247,16 +2250,39 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
   }));
 
   const lastSession = history[0] ?? null;
+  const daysSinceLastWorkout = lastSession
+    ? civilDaysBetween(lastSession.startedAt, now, zone)
+    : null;
+  const loggedSessionToday = daysSinceLastWorkout === 0 ? lastSession : null;
+  const loggedTemplateToday = loggedSessionToday?.workoutTemplateId != null
+    ? templates.find((template) => template.id === loggedSessionToday.workoutTemplateId) ?? null
+    : null;
 
   // Consult the schedule first (if one exists with at least one non-null slot).
   const scheduleResolution = resolveScheduledSlot(args.schedule);
   const scheduleSource: "schedule" | "fallback" = scheduleResolution.matched ? "schedule" : "fallback";
-  const isRestDay = scheduleResolution.matched && scheduleResolution.workoutTemplateId == null;
+  const scheduledTemplate = scheduleResolution.matched && scheduleResolution.workoutTemplateId != null
+    ? templates.find((template) => template.id === scheduleResolution.workoutTemplateId) ?? null
+    : null;
+  const todayScheduledWorkoutName = scheduleResolution.matched
+    ? scheduleResolution.workoutTemplateId == null
+      ? "Rest Day"
+      : scheduledTemplate?.name ?? args.schedule?.label ?? "Workout"
+    : null;
+  const loggedWorkoutTodayName = loggedSessionToday?.workoutName ?? null;
+  const isOffScheduleWorkoutToday = Boolean(
+    loggedSessionToday &&
+      scheduleResolution.matched &&
+      (scheduleResolution.workoutTemplateId == null ||
+        loggedSessionToday.workoutTemplateId !== scheduleResolution.workoutTemplateId),
+  );
+  // An actual workout prevents a scheduled rest day from hiding today's training.
+  const isRestDay = scheduleResolution.matched && scheduleResolution.workoutTemplateId == null && !loggedSessionToday;
 
-  let selectedTemplate: DashboardTemplateInput | null = null;
-  if (scheduleResolution.matched && scheduleResolution.workoutTemplateId != null) {
-    selectedTemplate = templates.find((t) => t.id === scheduleResolution.workoutTemplateId) ?? null;
-  }
+  // Keep an uncompleted calendar workout visible as the next scheduled training.
+  // If today was a scheduled rest day, the workout actually logged today is the
+  // only relevant template to display.
+  let selectedTemplate: DashboardTemplateInput | null = scheduledTemplate ?? loggedTemplateToday;
   if (!scheduleResolution.matched) {
     // Fallback: exact previous behavior (last-used template, else first template).
     selectedTemplate =
@@ -2266,14 +2292,18 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
             templates.find((t) => t.id === lastSession.workoutTemplateId)) ||
           templates[0];
   }
+  const lastWorkoutText = lastSession
+    ? `${loggedSessionToday ? "Workout logged today" : "Last workout"}: ${lastSession.workoutName} on ${formatInstantInZone(lastSession.startedAt, zone)}`
+    : "No workouts saved yet";
 
   if (isRestDay) {
     return {
       todaysWorkoutName: "Rest Day",
+      todayScheduledWorkoutName,
+      loggedWorkoutTodayName,
+      isOffScheduleWorkoutToday,
       workoutStatus: "Rest Day",
-      lastWorkoutText: lastSession
-        ? `Last workout: ${lastSession.workoutName} on ${formatInstantInZone(lastSession.startedAt, zone)}`
-        : "No workouts saved yet",
+      lastWorkoutText,
       recoveryText: resolveRecoveryText(
         lastSession
           ? civilDaysBetween(lastSession.startedAt, now, zone)
@@ -2297,8 +2327,11 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
   if (!selectedTemplate) {
     return {
       todaysWorkoutName: "Create a workout template",
+      todayScheduledWorkoutName,
+      loggedWorkoutTodayName,
+      isOffScheduleWorkoutToday,
       workoutStatus: "Setup Needed",
-      lastWorkoutText: history.length === 0 ? "No workouts saved yet" : `Last workout: ${lastSession!.workoutName}`,
+      lastWorkoutText,
       recoveryText: "Create a workout template to unlock training guidance.",
       fatigueStatus: fatigue.status,
       fatigueText: fatigue.summary,
@@ -2315,17 +2348,15 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
   }
 
   const templateExercises = [...selectedTemplate.exercises].sort((a, b) => a.exerciseOrder - b.exerciseOrder);
-  const daysSinceLastWorkout = lastSession
-    ? civilDaysBetween(lastSession.startedAt, now, zone)
-    : null;
   const overallRecovery = resolveOverallRecovery(recoveryStates);
 
   const snapshot: DashboardSnapshot = {
     todaysWorkoutName: selectedTemplate.name,
+    todayScheduledWorkoutName,
+    loggedWorkoutTodayName,
+    isOffScheduleWorkoutToday,
     workoutStatus: fatigue.deloadSuggested ? "Deload Suggested" : resolveWorkoutStatus(daysSinceLastWorkout, overallRecovery),
-    lastWorkoutText: lastSession
-      ? `Last workout: ${lastSession.workoutName} on ${formatInstantInZone(lastSession.startedAt, zone)}`
-      : "No workouts saved yet",
+    lastWorkoutText,
     recoveryText: resolveRecoveryText(daysSinceLastWorkout, overallRecovery),
     fatigueStatus: fatigue.status,
     fatigueText: fatigue.summary,

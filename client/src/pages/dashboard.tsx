@@ -86,9 +86,22 @@ export default function Dashboard() {
           <Card data-testid="card-todays-workout">
             <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
               <div className="min-w-0">
+                {snapshot.isOffScheduleWorkoutToday &&
+                  snapshot.todayScheduledWorkoutName === snapshot.todaysWorkoutName && (
+                    <p className="text-xs text-muted-foreground mb-1" data-testid="text-next-scheduled-training">
+                      Next scheduled training
+                    </p>
+                  )}
                 <CardTitle className="text-base truncate" data-testid="text-todays-workout-name">
                   {snapshot.todaysWorkoutName}
                 </CardTitle>
+                {snapshot.isOffScheduleWorkoutToday && snapshot.todayScheduledWorkoutName && (
+                  <p className="text-xs text-muted-foreground mt-1" data-testid="text-calendar-workout">
+                    {snapshot.todayScheduledWorkoutName === "Rest Day"
+                      ? "Today's calendar called for a rest day."
+                      : `Today's calendar workout was scheduled to be ${snapshot.todayScheduledWorkoutName}.`}
+                  </p>
+                )}
                 <p className="text-xs text-muted-foreground mt-1" data-testid="text-last-workout">
                   {snapshot.lastWorkoutText}
                 </p>
