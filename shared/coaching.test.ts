@@ -56,6 +56,54 @@ test("dashboard distinguishes today's logged workout from a different scheduled 
   assert.match(snapshot.lastWorkoutText, /Workout logged today: Push A/);
 });
 
+test("dashboard includes the user-local workout time in a new PR achievement", () => {
+  const exercise = (weight: number) => ({
+    exerciseId: 10,
+    exerciseOrder: 1,
+    exerciseName: "Dumbbell Chest Press",
+    primaryMuscleGroupId: 1,
+    intensityTechnique: "Normal",
+    failureTarget: "Never",
+    sets: [
+      { setNumber: 1, setType: "Working" as const, weight, reps: 10, rir: 2, completed: true },
+    ],
+  });
+  const history: HistorySessionInput[] = [
+    {
+      id: 2,
+      workoutTemplateId: 1,
+      workoutName: "Push A",
+      startedAt: new Date("2026-08-25T13:19:00.000Z"),
+      exercises: [exercise(110)],
+    },
+    {
+      id: 1,
+      workoutTemplateId: 1,
+      workoutName: "Push A",
+      startedAt: new Date("2026-08-18T13:00:00.000Z"),
+      exercises: [exercise(100)],
+    },
+  ];
+
+  const snapshot = getDashboardSnapshot({
+    templates: [{ id: 1, name: "Push A", exercises: [] }],
+    history,
+    exerciseNameLookup: new Map([[10, "Dumbbell Chest Press"]]),
+    exercisePrimaryMuscleLookup: new Map([[10, "UpperChest"]]),
+    muscleGroupLookup: { idToName: new Map([[1, "UpperChest"]]) },
+    now: new Date("2026-08-26T18:00:00.000Z"),
+    zone: "America/Los_Angeles",
+  });
+
+  assert.match(snapshot.recentAchievementText, /^New PR: Dumbbell Chest Press:/);
+  assert.match(snapshot.recentAchievementText, /Logged Aug 25, 2026, 6:19 AM$/);
+  assert.equal(snapshot.recentAchievementTexts.length, 3);
+  for (const achievement of snapshot.recentAchievementTexts) {
+    assert.match(achievement, /^New PR: Dumbbell Chest Press:/);
+    assert.match(achievement, /Logged Aug 25, 2026, 6:19 AM$/);
+  }
+});
+
 test("weighted volume counts stimulus ratios for working sets", () => {
   const stimulus = [
     { muscleGroupId: 1, stimulusRatio: 1 },

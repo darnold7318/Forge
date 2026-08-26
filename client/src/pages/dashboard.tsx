@@ -168,9 +168,20 @@ export default function Dashboard() {
           <Card data-testid="card-recent-achievement">
             <CardContent className="p-4 flex gap-3 items-start">
               <Trophy className="h-5 w-5 text-primary shrink-0 mt-0.5" />
-              <p className="text-sm" data-testid="text-recent-achievement">
-                {snapshot.recentAchievementText}
-              </p>
+              <div className="min-w-0 space-y-2" data-testid="text-recent-achievement">
+                {(snapshot.recentAchievementTexts?.length
+                  ? snapshot.recentAchievementTexts
+                  : [snapshot.recentAchievementText]
+                ).map((achievement, index) => (
+                  <p
+                    key={`${achievement}-${index}`}
+                    className="text-sm"
+                    data-testid={`text-recent-achievement-${index}`}
+                  >
+                    {achievement}
+                  </p>
+                ))}
+              </div>
             </CardContent>
           </Card>
 

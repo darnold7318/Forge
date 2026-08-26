@@ -2087,6 +2087,7 @@ export interface DashboardSnapshot {
   fatigueText: string;
   fatigueRiskScore: number;
   recentAchievementText: string;
+  recentAchievementTexts: string[];
   estimatedDurationMinutes: number;
   exerciseCount: number;
   completedWorkouts: number;
@@ -2141,13 +2142,15 @@ function resolveRecoveryText(daysSinceLastWorkout: number | null, overallRecover
   return `${recoveryPhrase} ${timingPhrase}`;
 }
 
-function resolveRecentAchievement(history: HistorySessionInput[]): string {
+function resolveRecentAchievements(history: HistorySessionInput[], zone: string): string[] {
   const recentRecords = getPersonalRecords(history, 3);
   if (recentRecords.length > 0) {
-    return "New PR: " + personalRecordSummary(recentRecords[0]);
+    return recentRecords.map(
+      (record) => `New PR: ${personalRecordSummary(record)} · Logged ${formatInstantInZone(record.achievedAt, zone)}`,
+    );
   }
   const latest = history[0];
-  if (!latest) return "No achievements yet. Save your first workout to start tracking progress.";
+  if (!latest) return ["No achievements yet. Save your first workout to start tracking progress."];
 
   let bestExercise: HistoryExerciseInput | null = null;
   let bestVolume = -1;
@@ -2158,8 +2161,8 @@ function resolveRecentAchievement(history: HistorySessionInput[]): string {
       bestExercise = ex;
     }
   }
-  if (!bestExercise) return `Latest workout saved: ${latest.workoutName}.`;
-  return `Latest highlight: ${bestExercise.exerciseName} - ${exerciseBestSetText(bestExercise)}, ${fmt1(exerciseVolume(bestExercise))} volume.`;
+  if (!bestExercise) return [`Latest workout saved: ${latest.workoutName}.`];
+  return [`Latest highlight: ${bestExercise.exerciseName} - ${exerciseBestSetText(bestExercise)}, ${fmt1(exerciseVolume(bestExercise))} volume.`];
 }
 
 function estimateDurationMinutes(exercises: DashboardTemplateInput["exercises"]): number {
@@ -2295,6 +2298,7 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
   const lastWorkoutText = lastSession
     ? `${loggedSessionToday ? "Workout logged today" : "Last workout"}: ${lastSession.workoutName} on ${formatInstantInZone(lastSession.startedAt, zone)}`
     : "No workouts saved yet";
+  const recentAchievementTexts = resolveRecentAchievements(history, zone);
 
   if (isRestDay) {
     return {
@@ -2314,7 +2318,8 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
       fatigueText: fatigue.summary,
       fatigueRiskScore: fatigue.riskScore,
       muscleFatigueMap,
-      recentAchievementText: resolveRecentAchievement(history),
+      recentAchievementText: recentAchievementTexts[0],
+      recentAchievementTexts,
       estimatedDurationMinutes: 0,
       exerciseCount: 0,
       completedWorkouts: history.length,
@@ -2338,6 +2343,7 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
       fatigueRiskScore: fatigue.riskScore,
       muscleFatigueMap,
       recentAchievementText: "Build a workout template, then log your first session.",
+      recentAchievementTexts: ["Build a workout template, then log your first session."],
       estimatedDurationMinutes: 0,
       exerciseCount: 0,
       completedWorkouts: history.length,
@@ -2362,7 +2368,8 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
     fatigueText: fatigue.summary,
     fatigueRiskScore: fatigue.riskScore,
     muscleFatigueMap,
-    recentAchievementText: resolveRecentAchievement(history),
+    recentAchievementText: recentAchievementTexts[0],
+    recentAchievementTexts,
     estimatedDurationMinutes: estimateDurationMinutes(templateExercises),
     exerciseCount: templateExercises.length,
     completedWorkouts: history.length,
