@@ -1028,7 +1028,7 @@ export interface GoalAwareProgressionV2Input {
   recovery: MuscleRecoveryState;
   fatigue: FatigueSignal;
   muscleContexts: MuscleTrainingContext[];
-  weightSettings?: EquipmentWeightSettings;
+  weightSettings?: EquipmentWeightSettings & { name?: string };
 }
 
 export type GoalAwareProgressionInput = GoalAwareProgressionV2Input;
@@ -1166,11 +1166,12 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
 
   if (trackingMode !== "duration" && topWeight > 0 && input.weightSettings) {
     const equipmentNextWeight = nextAvailableWeight(topWeight, input.weightSettings);
+    const equipmentLabel = input.weightSettings.name ?? input.weightSettings.equipment;
     if (recommendation === "Increase Weight") {
       if (equipmentNextWeight == null) {
         recommendation = "Maintain";
         suggestedWeight = topWeight;
-        reason = `You reached the configured ${input.weightSettings.equipment} maximum of ${fmt1(input.weightSettings.maxWeight)} lb. ${reason}`;
+        reason = `You reached the configured ${equipmentLabel} maximum of ${fmt1(input.weightSettings.maxWeight)} lb. ${reason}`;
         nextGoalText = "Maintain the available load and progress repetitions, tempo, or exercise difficulty.";
       } else {
         const projection = calculateRepProjection({
@@ -1184,7 +1185,7 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
         if (projection && projection.projectedRepsAtTargetWeight < prescription.targetRepsMin) {
           recommendation = "Add Reps";
           suggestedWeight = topWeight;
-          reason = `The next available ${input.weightSettings.equipment} load is ${fmt1(equipmentNextWeight)} lb, which is estimated below the ${prescription.targetRepsMin}-rep minimum right now.`;
+          reason = `The next available ${equipmentLabel} load is ${fmt1(equipmentNextWeight)} lb, which is estimated below the ${prescription.targetRepsMin}-rep minimum right now.`;
           nextGoalText = `Reach about ${projection.requiredRepsAtCurrentWeight} reps per working set at ${fmt1(topWeight)} lb and RIR ${prescription.targetRir} before the ${fmt1(equipmentNextWeight)} lb jump.`;
         } else {
           suggestedWeight = equipmentNextWeight;

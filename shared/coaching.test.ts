@@ -28,7 +28,7 @@ import {
   type MuscleGroupLookup,
   type MuscleTrainingContext,
 } from "./coaching";
-import { primaryStimulusMuscle } from "./schema";
+import { primaryStimulusMuscle, resolveEquipmentProfile } from "./schema";
 import { DEFAULT_COACH_SETTINGS } from "./schema";
 
 test("dashboard distinguishes today's logged workout from a different scheduled template", () => {
@@ -568,6 +568,16 @@ test("equipment increments and rep projections model the next available load", (
   });
   assert.equal(projection?.projectedRepsAtTargetWeight, 6);
   assert.equal(projection?.requiredRepsAtCurrentWeight, 10);
+});
+
+test("named equipment profiles resolve per exercise without changing their base category", () => {
+  const profiles = [
+    { id: 1, name: "Cable Tower A", equipment: "Cable" as const, minWeight: 10, maxWeight: 200, weightIncrement: 10 },
+    { id: 2, name: "Functional Trainer", equipment: "Cable" as const, minWeight: 5, maxWeight: 160, weightIncrement: 5 },
+  ];
+  assert.equal(resolveEquipmentProfile(profiles, "Cable", 2)?.name, "Functional Trainer");
+  assert.equal(resolveEquipmentProfile(profiles, "Cable")?.name, "Cable Tower A");
+  assert.equal(resolveEquipmentProfile(profiles, "Dumbbell", 2), null);
 });
 
 test("Coach builds reps when an equipment jump would fall below the prescribed range", () => {

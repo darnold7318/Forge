@@ -820,7 +820,7 @@ export default function LogWorkout() {
               <CardTitle className="text-base">{d.exercise.name}</CardTitle>
               <div className="flex flex-wrap gap-1.5 mt-1">
                 <Badge variant="outline" className="text-xs">
-                  {d.exercise.equipment}
+                  {d.exercise.equipmentSettings.name}
                 </Badge>
                 {d.prescription && (
                   <>

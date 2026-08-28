@@ -339,12 +339,13 @@ export const userEquipmentSettings = sqliteTable(
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
     equipment: text("equipment").notNull(),
     minWeight: real("min_weight").notNull().default(0),
     maxWeight: real("max_weight").notNull().default(1000),
     weightIncrement: real("weight_increment").notNull().default(5),
   },
-  (table) => [uniqueIndex("idx_user_equipment_settings_unique").on(table.userId, table.equipment)],
+  (table) => [uniqueIndex("idx_user_equipment_profile_name_unique").on(table.userId, table.name)],
 );
 
 export const equipmentWeightSettingsSchema = z.object({
@@ -360,6 +361,11 @@ export const equipmentWeightSettingsSchema = z.object({
 
 export type EquipmentWeightSettings = z.infer<typeof equipmentWeightSettingsSchema>;
 export type UserEquipmentSettingsRow = typeof userEquipmentSettings.$inferSelect;
+export const equipmentProfileInputSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+}).and(equipmentWeightSettingsSchema);
+export type EquipmentProfileInput = z.infer<typeof equipmentProfileInputSchema>;
+export type EquipmentProfile = EquipmentProfileInput & { id: number };
 
 export const DEFAULT_EQUIPMENT_WEIGHT_SETTINGS: Record<Equipment, EquipmentWeightSettings> = Object.fromEntries(
   equipmentTypes.map((equipment) => [equipment, {
@@ -369,6 +375,18 @@ export const DEFAULT_EQUIPMENT_WEIGHT_SETTINGS: Record<Equipment, EquipmentWeigh
     weightIncrement: equipment === "Other" ? 2.5 : 5,
   }]),
 ) as Record<Equipment, EquipmentWeightSettings>;
+
+export function resolveEquipmentProfile(
+  profiles: EquipmentProfile[],
+  equipment: Equipment,
+  assignedProfileId?: number | null,
+): EquipmentProfile | null {
+  const assigned = assignedProfileId == null ? null : profiles.find((profile) => profile.id === assignedProfileId) ?? null;
+  if (assigned?.equipment === equipment) return assigned;
+  return profiles
+    .filter((profile) => profile.equipment === equipment)
+    .sort((a, b) => a.id - b.id)[0] ?? null;
+}
 
 export const trackingModes = ["reps", "duration"] as const;
 export type TrackingMode = (typeof trackingModes)[number];
@@ -393,6 +411,17 @@ export const exercises = sqliteTable("exercises", {
     .default(false),
   trackingMode: text("tracking_mode").notNull().default("reps"),
 });
+
+export const userExerciseEquipmentProfiles = sqliteTable(
+  "user_exercise_equipment_profiles",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    exerciseId: integer("exercise_id").notNull().references(() => exercises.id, { onDelete: "cascade" }),
+    equipmentProfileId: integer("equipment_profile_id").notNull().references(() => userEquipmentSettings.id, { onDelete: "cascade" }),
+  },
+  (table) => [uniqueIndex("idx_user_exercise_equipment_profile_unique").on(table.userId, table.exerciseId)],
+);
 
 // Global Forge defaults. Ratios are effective-set multipliers and intentionally
 // do not need to sum to 1.0.
@@ -516,7 +545,7 @@ export interface ExerciseMuscleStimulusView {
 export type ExerciseView = ExerciseWithParsedMuscles & {
   stimulus: ExerciseMuscleStimulusView[];
   hasStimulusOverride: boolean;
-  equipmentSettings: EquipmentWeightSettings;
+  equipmentSettings: EquipmentProfile;
 };
 
 export function primaryStimulusMuscle<T extends { muscleGroupId: number; stimulusRatio: number }>(rows: T[]): T | null {

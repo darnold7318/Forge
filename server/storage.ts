@@ -5,6 +5,7 @@ import {
   userMuscleCoachOverrides,
   userExerciseCoachOverrides,
   userEquipmentSettings,
+  userExerciseEquipmentProfiles,
   workoutExerciseSnapshots,
   userMuscleLearnedRanges,
   muscleGroups,
@@ -66,7 +67,8 @@ import type {
   WorkoutExerciseSnapshot,
   TrainingGoalId,
   LearnedVolumeRange,
-  EquipmentWeightSettings,
+  EquipmentProfile,
+  EquipmentProfileInput,
 } from "@shared/schema";
 import {
   buildStarterTemplate,
@@ -185,14 +187,22 @@ function ensureTables() {
     CREATE TABLE IF NOT EXISTS user_equipment_settings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
       equipment TEXT NOT NULL,
       min_weight REAL NOT NULL DEFAULT 0,
       max_weight REAL NOT NULL DEFAULT 1000,
       weight_increment REAL NOT NULL DEFAULT 5
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_equipment_settings_unique
-      ON user_equipment_settings(user_id, equipment);
+    CREATE TABLE IF NOT EXISTS user_exercise_equipment_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+      equipment_profile_id INTEGER NOT NULL REFERENCES user_equipment_settings(id) ON DELETE CASCADE
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_exercise_equipment_profile_unique
+      ON user_exercise_equipment_profiles(user_id, exercise_id);
 
     CREATE TABLE IF NOT EXISTS workout_templates (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -326,6 +336,18 @@ function ensureTables() {
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_days_schedule_date ON schedule_days(schedule_id, date);
   `);
+
+  // Migration: category-only equipment settings become named profiles. Keep
+  // every existing value and use its category as the initial profile name.
+  const equipmentSettingColumns = new Set(
+    (sqlite.prepare("PRAGMA table_info(user_equipment_settings)").all() as { name: string }[]).map((column) => column.name),
+  );
+  if (!equipmentSettingColumns.has("name")) {
+    sqlite.exec("ALTER TABLE user_equipment_settings ADD COLUMN name TEXT");
+    sqlite.exec("UPDATE user_equipment_settings SET name = equipment WHERE name IS NULL OR trim(name) = ''");
+  }
+  sqlite.exec("DROP INDEX IF EXISTS idx_user_equipment_settings_unique");
+  sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_equipment_profile_name_unique ON user_equipment_settings(user_id, name)");
 
   // Drop the legacy weekday/rotation-position schedule table from earlier builds —
   // superseded by the calendar-date based schedule_days model above.
@@ -845,8 +867,13 @@ export interface IStorage {
   getExerciseCoachOverrides(userId: number): Promise<ExerciseCoachOverride[]>;
   setExerciseCoachOverride(userId: number, value: ExerciseCoachOverride): Promise<ExerciseCoachOverride>;
   deleteExerciseCoachOverride(userId: number, exerciseId: number): Promise<void>;
-  getEquipmentSettings(userId: number): Promise<EquipmentWeightSettings[]>;
-  setEquipmentSettings(userId: number, value: EquipmentWeightSettings): Promise<EquipmentWeightSettings>;
+  getEquipmentProfiles(userId: number): Promise<EquipmentProfile[]>;
+  createEquipmentProfile(userId: number, value: EquipmentProfileInput): Promise<EquipmentProfile>;
+  updateEquipmentProfile(userId: number, id: number, value: EquipmentProfileInput): Promise<EquipmentProfile | undefined>;
+  deleteEquipmentProfile(userId: number, id: number): Promise<void>;
+  getExerciseEquipmentProfileAssignments(userId: number): Promise<{ exerciseId: number; equipmentProfileId: number }[]>;
+  setExerciseEquipmentProfile(userId: number, exerciseId: number, equipmentProfileId: number): Promise<void>;
+  deleteExerciseEquipmentProfile(userId: number, exerciseId: number): Promise<void>;
   getLearnedVolumeRanges(userId: number): Promise<LearnedVolumeRange[]>;
   setLearnedVolumeRanges(userId: number, values: LearnedVolumeRange[]): Promise<LearnedVolumeRange[]>;
 
@@ -1071,30 +1098,92 @@ export class DatabaseStorage implements IStorage {
     )).run();
   }
 
-  async getEquipmentSettings(userId: number): Promise<EquipmentWeightSettings[]> {
-    const saved = db.select().from(userEquipmentSettings).where(eq(userEquipmentSettings.userId, userId)).all();
-    const savedByEquipment = new Map(saved.map((row) => [row.equipment, row]));
-    return equipmentTypes.map((equipment) => {
-      const row = savedByEquipment.get(equipment);
-      return row
-        ? { equipment, minWeight: row.minWeight, maxWeight: row.maxWeight, weightIncrement: row.weightIncrement }
-        : { ...DEFAULT_EQUIPMENT_WEIGHT_SETTINGS[equipment] };
-    });
+  private ensureEquipmentProfiles(userId: number): void {
+    const existing = db.select().from(userEquipmentSettings).where(eq(userEquipmentSettings.userId, userId)).all();
+    const existingTypes = new Set(existing.map((row) => row.equipment));
+    const existingNames = new Set(existing.map((row) => row.name.toLowerCase()));
+    for (const equipment of equipmentTypes) {
+      if (existingTypes.has(equipment)) continue;
+      const defaults = DEFAULT_EQUIPMENT_WEIGHT_SETTINGS[equipment];
+      const baseName = equipment === "SmithMachine" ? "Smith Machine" : equipment === "PlateLoaded" ? "Plate Loaded" : equipment;
+      let name = baseName;
+      let suffix = 1;
+      while (existingNames.has(name.toLowerCase())) {
+        name = suffix === 1 ? `${baseName} Default` : `${baseName} Default ${suffix}`;
+        suffix += 1;
+      }
+      db.insert(userEquipmentSettings)
+        .values({ userId, name, ...defaults })
+        .run();
+      existingNames.add(name.toLowerCase());
+      existingTypes.add(equipment);
+    }
   }
 
-  async setEquipmentSettings(userId: number, value: EquipmentWeightSettings): Promise<EquipmentWeightSettings> {
-    db.insert(userEquipmentSettings)
-      .values({ userId, ...value })
+  async getEquipmentProfiles(userId: number): Promise<EquipmentProfile[]> {
+    this.ensureEquipmentProfiles(userId);
+    return db.select().from(userEquipmentSettings).where(eq(userEquipmentSettings.userId, userId)).all()
+      .map((row) => ({
+        id: row.id,
+        name: row.name,
+        equipment: row.equipment as EquipmentProfile["equipment"],
+        minWeight: row.minWeight,
+        maxWeight: row.maxWeight,
+        weightIncrement: row.weightIncrement,
+      }))
+      .sort((a, b) => a.equipment.localeCompare(b.equipment) || a.name.localeCompare(b.name));
+  }
+
+  async createEquipmentProfile(userId: number, value: EquipmentProfileInput): Promise<EquipmentProfile> {
+    const duplicate = db.select().from(userEquipmentSettings).where(eq(userEquipmentSettings.userId, userId)).all()
+      .some((row) => row.name.toLowerCase() === value.name.toLowerCase());
+    if (duplicate) throw new Error("Duplicate equipment profile name");
+    const row = db.insert(userEquipmentSettings).values({ userId, ...value }).returning().get();
+    return { id: row.id, name: row.name, equipment: row.equipment as EquipmentProfile["equipment"], minWeight: row.minWeight, maxWeight: row.maxWeight, weightIncrement: row.weightIncrement };
+  }
+
+  async updateEquipmentProfile(userId: number, id: number, value: EquipmentProfileInput): Promise<EquipmentProfile | undefined> {
+    const duplicate = db.select().from(userEquipmentSettings).where(eq(userEquipmentSettings.userId, userId)).all()
+      .some((row) => row.id !== id && row.name.toLowerCase() === value.name.toLowerCase());
+    if (duplicate) throw new Error("Duplicate equipment profile name");
+    const row = db.update(userEquipmentSettings).set(value).where(and(
+      eq(userEquipmentSettings.id, id),
+      eq(userEquipmentSettings.userId, userId),
+    )).returning().get();
+    return row ? { id: row.id, name: row.name, equipment: row.equipment as EquipmentProfile["equipment"], minWeight: row.minWeight, maxWeight: row.maxWeight, weightIncrement: row.weightIncrement } : undefined;
+  }
+
+  async deleteEquipmentProfile(userId: number, id: number): Promise<void> {
+    db.delete(userExerciseEquipmentProfiles).where(and(
+      eq(userExerciseEquipmentProfiles.userId, userId),
+      eq(userExerciseEquipmentProfiles.equipmentProfileId, id),
+    )).run();
+    db.delete(userEquipmentSettings).where(and(
+      eq(userEquipmentSettings.id, id),
+      eq(userEquipmentSettings.userId, userId),
+    )).run();
+  }
+
+  async getExerciseEquipmentProfileAssignments(userId: number): Promise<{ exerciseId: number; equipmentProfileId: number }[]> {
+    return db.select().from(userExerciseEquipmentProfiles).where(eq(userExerciseEquipmentProfiles.userId, userId)).all()
+      .map((row) => ({ exerciseId: row.exerciseId, equipmentProfileId: row.equipmentProfileId }));
+  }
+
+  async setExerciseEquipmentProfile(userId: number, exerciseId: number, equipmentProfileId: number): Promise<void> {
+    db.insert(userExerciseEquipmentProfiles)
+      .values({ userId, exerciseId, equipmentProfileId })
       .onConflictDoUpdate({
-        target: [userEquipmentSettings.userId, userEquipmentSettings.equipment],
-        set: {
-          minWeight: value.minWeight,
-          maxWeight: value.maxWeight,
-          weightIncrement: value.weightIncrement,
-        },
+        target: [userExerciseEquipmentProfiles.userId, userExerciseEquipmentProfiles.exerciseId],
+        set: { equipmentProfileId },
       })
       .run();
-    return value;
+  }
+
+  async deleteExerciseEquipmentProfile(userId: number, exerciseId: number): Promise<void> {
+    db.delete(userExerciseEquipmentProfiles).where(and(
+      eq(userExerciseEquipmentProfiles.userId, userId),
+      eq(userExerciseEquipmentProfiles.exerciseId, exerciseId),
+    )).run();
   }
 
   async getLearnedVolumeRanges(userId: number): Promise<LearnedVolumeRange[]> {
@@ -1336,6 +1425,7 @@ export class DatabaseStorage implements IStorage {
     db.delete(userExerciseMuscleStimulusOverrides)
       .where(eq(userExerciseMuscleStimulusOverrides.exerciseId, id))
       .run();
+    db.delete(userExerciseEquipmentProfiles).where(eq(userExerciseEquipmentProfiles.exerciseId, id)).run();
     db.delete(exerciseMuscleStimulus).where(eq(exerciseMuscleStimulus.exerciseId, id)).run();
     db.delete(exercises).where(eq(exercises.id, id)).run();
     return { deleted: true };

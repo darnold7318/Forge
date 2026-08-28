@@ -35,7 +35,7 @@ import {
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useActiveUser } from "@/lib/user-context";
 import { useToast } from "@/hooks/use-toast";
-import { equipmentTypes, type Equipment, type MuscleGroup, type ExerciseView, type TrackingMode } from "@shared/schema";
+import { equipmentTypes, type Equipment, type EquipmentProfile, type MuscleGroup, type ExerciseView, type TrackingMode } from "@shared/schema";
 
 type Exercise = ExerciseView;
 type MuscleGroupWithDisplay = MuscleGroup & { displayName: string };
@@ -103,6 +103,12 @@ function ExerciseFormDialog({
     queryFn: async () => (await apiRequest("GET", "/api/coach/settings")).json(),
     enabled: open && showAdvanced,
   });
+  const { data: equipmentProfiles } = useQuery<EquipmentProfile[]>({
+    queryKey: ["/api/equipment-profiles"],
+    queryFn: async () => (await apiRequest("GET", "/api/equipment-profiles")).json(),
+    enabled: open,
+  });
+  const [equipmentProfileId, setEquipmentProfileId] = useState<number | null>(initial?.equipmentSettings.id ?? null);
   const currentFatigueOverride = coachConfig?.exerciseOverrides.find((item) => item.exerciseId === initial?.id);
   const [fatigueCost, setFatigueCost] = useState("1.00");
   useEffect(() => {
@@ -114,7 +120,19 @@ function ExerciseFormDialog({
   if (open && initial?.id !== lastInitialId) {
     setLastInitialId(initial?.id ?? null);
     setForm(initial ? toFormState(initial) : emptyForm);
+    setEquipmentProfileId(initial?.equipmentSettings.id ?? null);
   }
+
+  const compatibleEquipmentProfiles = useMemo(
+    () => (equipmentProfiles ?? []).filter((profile) => profile.equipment === form.equipment),
+    [equipmentProfiles, form.equipment],
+  );
+  useEffect(() => {
+    if (!open || compatibleEquipmentProfiles.length === 0) return;
+    if (!compatibleEquipmentProfiles.some((profile) => profile.id === equipmentProfileId)) {
+      setEquipmentProfileId(compatibleEquipmentProfiles[0].id);
+    }
+  }, [open, equipmentProfileId, compatibleEquipmentProfiles]);
 
   const addStimulusRow = () => {
     const used = new Set(form.stimulus.map((row) => row.muscleGroupId));
@@ -156,6 +174,9 @@ function ExerciseFormDialog({
         if (showAdvanced && Number(fatigueCost) !== 1) {
           await apiRequest("PUT", `/api/coach/settings/exercises/${exercise.id}`, { fatigueCost: Number(fatigueCost) });
         }
+        if (equipmentProfileId != null) {
+          return (await apiRequest("PUT", `/api/exercises/${exercise.id}/equipment-profile`, { equipmentProfileId })).json();
+        }
         return exercise;
       }
       const metadataResponse = await apiRequest("PATCH", `/api/exercises/${initial!.id}`, payload);
@@ -172,6 +193,9 @@ function ExerciseFormDialog({
         } else {
           await apiRequest("PUT", `/api/coach/settings/exercises/${initial!.id}`, { fatigueCost: Number(fatigueCost) });
         }
+      }
+      if (equipmentProfileId != null) {
+        exercise = await (await apiRequest("PUT", `/api/exercises/${initial!.id}/equipment-profile`, { equipmentProfileId })).json();
       }
       return exercise;
     },
@@ -210,6 +234,7 @@ function ExerciseFormDialog({
     normalizedStimulus.some((row) => row.stimulusRatio > 0) &&
     normalizedStimulus.every((row) => row.stimulusRatio >= 0 && row.stimulusRatio <= 1) &&
     new Set(normalizedStimulus.map((row) => row.muscleGroupId)).size === normalizedStimulus.length &&
+    equipmentProfileId != null && compatibleEquipmentProfiles.some((profile) => profile.id === equipmentProfileId) &&
     (!showAdvanced || (Number.isFinite(Number(fatigueCost)) && Number(fatigueCost) >= 0.5 && Number(fatigueCost) <= 2)) &&
     !saveMutation.isPending;
 
@@ -348,6 +373,20 @@ function ExerciseFormDialog({
                 ))}
               </SelectContent>
             </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label>Equipment profile</Label>
+            <Select value={equipmentProfileId != null ? String(equipmentProfileId) : undefined} onValueChange={(value) => setEquipmentProfileId(Number(value))}>
+              <SelectTrigger data-testid="select-exercise-equipment-profile"><SelectValue placeholder="Choose equipment profile" /></SelectTrigger>
+              <SelectContent>
+                {compatibleEquipmentProfiles.map((profile) => (
+                  <SelectItem key={profile.id} value={String(profile.id)}>
+                    {profile.name} · {profile.minWeight}-{profile.maxWeight} lb · {profile.weightIncrement} lb steps
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">Create additional towers or stacks under Settings → Equipment Profiles.</p>
           </div>
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-2">
@@ -581,7 +620,7 @@ export default function Exercises() {
                       {row.displayName} {row.stimulusRatio.toFixed(2)}
                     </Badge>
                   ))}
-                  <Badge variant="outline" className="text-xs">{ex.equipment}</Badge>
+                  <Badge variant="outline" className="text-xs">{ex.equipmentSettings.name}</Badge>
                   {ex.isCompound && <Badge variant="outline" className="text-xs">Compound</Badge>}
                   {ex.isUnilateral && <Badge variant="outline" className="text-xs">Unilateral</Badge>}
                   {ex.trackingMode === "duration" && <Badge variant="outline" className="text-xs">Static hold</Badge>}

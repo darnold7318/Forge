@@ -23,7 +23,7 @@ interface RepCalculatorProps {
   onOpenChange: (open: boolean) => void;
   exerciseId: number;
   exerciseName: string;
-  equipmentSettings: EquipmentWeightSettings;
+  equipmentSettings: EquipmentWeightSettings & { name?: string };
   prescribedRepMinimum?: number;
   prescribedRir?: number;
 }
@@ -88,7 +88,7 @@ export function RepCalculator({
             Rep calculator
           </DialogTitle>
           <DialogDescription>
-            {exerciseName}: estimate the reps a different load may allow. The latest working set is filled automatically and can be changed for hypotheticals.
+            {exerciseName}{equipmentSettings.name ? ` on ${equipmentSettings.name}` : ""}: estimate the reps a different load may allow. The latest working set is filled automatically and can be changed for hypotheticals.
           </DialogDescription>
         </DialogHeader>
 
