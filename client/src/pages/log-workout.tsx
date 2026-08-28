@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronsUpDown, Plus, Trash2, X, ClipboardList, Trophy, Flame, TimerIcon, Calculator } from "lucide-react";
+import { Check, ChevronDown, ChevronsUpDown, Plus, Trash2, X, ClipboardList, Trophy, Flame, TimerIcon, Calculator, Sparkles } from "lucide-react";
 import { apiRequest, queryClient as qc } from "@/lib/queryClient";
 import { useActiveUser } from "@/lib/user-context";
 import { useRestTimer } from "@/lib/rest-timer-context";
@@ -13,6 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { useLocation } from "wouter";
 import {
   Popover,
@@ -50,7 +51,7 @@ import type {
   Equipment,
 } from "@shared/schema";
 import { equipmentTypes } from "@shared/schema";
-import { resolveWorkingSetCount } from "@shared/coaching";
+import { resolveWorkingSetCount, type WorkoutExerciseSuggestion } from "@shared/coaching";
 
 type Exercise = ExerciseView;
 type MuscleGroupView = MuscleGroup & { displayName: string };
@@ -95,6 +96,75 @@ interface DraftExercise {
   exercise: Exercise;
   sets: DraftSet[];
   prescription?: WorkoutTemplateExerciseLite;
+}
+
+interface CoachSuggestion extends WorkoutExerciseSuggestion {
+  exerciseId: number;
+}
+
+const COACH_RECOMMENDATION_STYLE: Record<string, string> = {
+  "Increase Weight": "border-volume-optimal/50 text-volume-optimal",
+  "Optional Increase": "border-volume-optimal/50 text-volume-optimal",
+  "Add Reps": "border-volume-optimal/50 text-volume-optimal",
+  "Increase Hold Duration": "border-volume-optimal/50 text-volume-optimal",
+  "Add Hold Time": "border-volume-optimal/50 text-volume-optimal",
+  "Hold Weight": "border-volume-high/50 text-volume-high",
+  "Hold Progression": "border-volume-high/50 text-volume-high",
+  "Repeat Or Reduce": "border-volume-high/50 text-volume-high",
+  "Reduce Or Delay": "border-destructive/50 text-destructive",
+};
+
+function WorkoutCoachCue({ suggestion, loading }: { suggestion?: CoachSuggestion; loading: boolean }) {
+  const [open, setOpen] = useState(false);
+
+  if (loading) return <Skeleton className="h-20 w-full" data-testid="skeleton-workout-coach-cue" />;
+  if (!suggestion) return null;
+
+  const beginner = suggestion.experience === "beginner";
+  const summaryReason = beginner ? suggestion.plainLanguageReason ?? suggestion.reason : suggestion.reason;
+  const details = [
+    suggestion.nextGoalText,
+    suggestion.effortGuidance,
+    suggestion.restGuidance,
+    suggestion.learningText,
+  ].filter((value): value is string => !!value);
+
+  return (
+    <Collapsible
+      open={open}
+      onOpenChange={setOpen}
+      className="rounded-md border border-primary/25 bg-primary/5"
+      data-testid={`coach-cue-${suggestion.exerciseId}`}
+    >
+      <CollapsibleTrigger asChild>
+        <button type="button" className="w-full p-3 text-left hover:bg-primary/5 rounded-md">
+          <div className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4 shrink-0 text-primary" />
+            <span className="text-xs font-semibold uppercase tracking-wide text-primary">Coach</span>
+            <Badge
+              variant="outline"
+              className={`ml-auto text-[11px] ${COACH_RECOMMENDATION_STYLE[suggestion.recommendation] ?? "text-muted-foreground"}`}
+            >
+              {suggestion.recommendation}
+            </Badge>
+            <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} />
+          </div>
+          <p className="mt-1.5 text-sm font-medium" data-testid={`coach-cue-goal-${suggestion.exerciseId}`}>
+            {suggestion.suggestedGoal}
+          </p>
+          <p className="mt-0.5 text-xs text-muted-foreground" data-testid={`coach-cue-reason-${suggestion.exerciseId}`}>
+            {summaryReason}
+          </p>
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="space-y-1.5 border-t border-primary/15 px-3 py-2.5 text-xs text-muted-foreground">
+        {details.map((detail, index) => <p key={`${detail}-${index}`}>{detail}</p>)}
+        <p className={suggestion.recoveryStatus === "Recovered" ? "text-volume-optimal" : "text-volume-high"}>
+          {suggestion.recoveryText} · Readiness {suggestion.readinessScore}/100 ({suggestion.readinessStatus})
+        </p>
+      </CollapsibleContent>
+    </Collapsible>
+  );
 }
 
 function newSet(exercise?: Exercise): DraftSet {
@@ -551,7 +621,7 @@ export default function LogWorkout() {
   const { data: muscleGroups } = useQuery<MuscleGroupView[]>({
     queryKey: ["/api/muscle-groups"],
   });
-  const { activeUserId } = useActiveUser();
+  const { activeUserId, activeUser } = useActiveUser();
   const { data: templates } = useQuery<WorkoutTemplateLite[]>({
     queryKey: ["/api/workout-templates", activeUserId],
     queryFn: async () => {
@@ -560,6 +630,27 @@ export default function LogWorkout() {
     },
     enabled: activeUserId != null,
   });
+  const coachSuggestionUrl = activeTemplateId == null
+    ? "/api/coach/suggestions"
+    : `/api/coach/suggestions?templateId=${activeTemplateId}`;
+  const { data: coachSuggestions, isLoading: coachSuggestionsLoading } = useQuery<CoachSuggestion[]>({
+    queryKey: [
+      "/api/coach/suggestions",
+      "workout-log",
+      activeTemplateId ?? "all",
+      activeUserId,
+      activeUser?.trainingGoal,
+      activeUser?.trainingLevel,
+    ],
+    queryFn: async () => (await apiRequest("GET", coachSuggestionUrl)).json(),
+    enabled: activeUserId != null && draftExercises.length > 0,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+  const coachSuggestionByExercise = useMemo(
+    () => new Map((coachSuggestions ?? []).map((suggestion) => [suggestion.exerciseId, suggestion])),
+    [coachSuggestions],
+  );
 
   const exerciseMap = useMemo(() => {
     const m = new Map<number, Exercise>();
@@ -882,6 +973,10 @@ export default function LogWorkout() {
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
+            <WorkoutCoachCue
+              suggestion={coachSuggestionByExercise.get(d.exercise.id)}
+              loading={coachSuggestionsLoading}
+            />
             <ExerciseHistory exercise={d.exercise} />
 
             <div className="space-y-2">
