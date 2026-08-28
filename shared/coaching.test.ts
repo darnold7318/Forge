@@ -8,6 +8,8 @@ import {
   evaluateRecovery,
   evaluateExerciseTrend,
   evaluateGoalAwareProgressionV2,
+  buildGoalAwareWorkoutSuggestion,
+  applyExperienceCoachSettings,
   identifyLimitingMuscles,
   estimateExerciseFatigue,
   learnPersonalVolumeRanges,
@@ -15,6 +17,8 @@ import {
   getDashboardSnapshot,
   getPreviousExercisePerformance,
   resolveGoalCoachingProfile,
+  resolveGoalExperiencePrescription,
+  resolveProgressionStyle,
   getPersonalRecords,
   type HistorySessionInput,
   type DashboardTemplateInput,
@@ -381,7 +385,7 @@ test("compound warnings are goal-aware", () => {
   assert.match(analyzeWorkoutComposition(rows, "strength").warnings, /compound/i);
 });
 
-test("goal profiles keep experience-independent coaching priorities distinct", () => {
+test("goal profiles keep coaching priorities distinct", () => {
   assert.equal(resolveGoalCoachingProfile("hypertrophy").usesHypertrophyVolume, true);
   assert.equal(resolveGoalCoachingProfile("strength").progressionPriority, "load");
   assert.equal(resolveGoalCoachingProfile("muscular_endurance").progressionPriority, "reps");
@@ -505,9 +509,184 @@ test("the native V2 engine changes progression priorities by goal", () => {
   const history = historyWithRirs([[8, 8, 8], [9, 9, 9], [10, 10, 10]], [2, 2, 2]);
   assert.equal(v2Result(history, "hypertrophy").recommendation, "Add Reps");
   assert.equal(v2Result(history, "strength").recommendation, "Increase Weight");
-  assert.equal(v2Result(history, "general_fitness").recommendation, "Maintain");
+  assert.equal(v2Result(history, "general_fitness").recommendation, "Add Reps");
   assert.equal(v2Result(history, "mobility").recommendation, "Increase Control");
   assert.equal(v2Result(history, "muscular_endurance").recommendation, "Add Reps");
+});
+
+test("goal and experience resolve different effective training methods without changing the template", () => {
+  const template = { targetSets: 5, targetRepsMin: 8, targetRepsMax: 12, targetRir: 1, restSeconds: 60 };
+  const beginner = resolveGoalExperiencePrescription({
+    goal: "strength",
+    experience: "beginner",
+    trackingMode: "reps",
+    prescription: template,
+  });
+  const advanced = resolveGoalExperiencePrescription({
+    goal: "strength",
+    experience: "advanced",
+    trackingMode: "reps",
+    prescription: template,
+  });
+
+  assert.deepEqual([beginner.targetRepsMin, beginner.targetRepsMax, beginner.targetSets, beginner.targetRir], [5, 8, 3, 2]);
+  assert.deepEqual([advanced.targetRepsMin, advanced.targetRepsMax, advanced.targetSets, advanced.targetRir], [2, 6, 5, 1]);
+  assert.equal(beginner.restSeconds, 120);
+  assert.equal(advanced.restSeconds, 180);
+  assert.match(beginner.adjustmentNote ?? "", /saved template was not changed/i);
+  assert.deepEqual(template, { targetSets: 5, targetRepsMin: 8, targetRepsMax: 12, targetRir: 1, restSeconds: 60 });
+});
+
+test("beginner and intermediate policies do not inherit hidden advanced overrides", () => {
+  const customized = {
+    ...DEFAULT_COACH_SETTINGS,
+    progressionStyle: "load_first" as const,
+    minComparableExposures: 6,
+    trendHistoryLimit: 8,
+    volumeProgressionSensitivity: "aggressive" as const,
+  };
+  const beginner = applyExperienceCoachSettings(customized, "beginner");
+  const intermediate = applyExperienceCoachSettings(customized, "intermediate");
+  const advanced = applyExperienceCoachSettings(customized, "advanced");
+
+  assert.equal(beginner.progressionStyle, "automatic");
+  assert.equal(beginner.minComparableExposures, 2);
+  assert.equal(beginner.volumeProgressionSensitivity, "normal");
+  assert.equal(intermediate.minComparableExposures, 3);
+  assert.equal(advanced.progressionStyle, "load_first");
+  assert.equal(advanced.minComparableExposures, 6);
+});
+
+test("beginner coaching states exactly how many similar sessions remain", () => {
+  const history = exposureHistory([[10, 10, 10]]);
+  const settings = applyExperienceCoachSettings(DEFAULT_COACH_SETTINGS, "beginner");
+  const trend = evaluateExerciseTrend(history, 10, "hypertrophy", "reps", settings);
+  const input = {
+    goal: "hypertrophy" as const,
+    experience: "beginner" as const,
+    trackingMode: "reps" as const,
+    prescription: { targetSets: 3, targetRepsMin: 8, targetRepsMax: 12, targetRir: 2 },
+    previous: getPreviousExercisePerformance(history, 10, "Incline Press"),
+    trend,
+    settings,
+    recovery: { muscle: "UpperChest" as const, displayName: "Upper Chest", fatiguePercent: 15, recoveryPercent: 85, lastTrainedAt: null, hoursSinceLastTrained: 0, status: "Recovered" as const, summary: "" },
+    fatigue: { status: "Learning" as const, summary: "2 more workout sessions needed.", riskScore: 10, deloadSuggested: false },
+    muscleContexts: [muscleContext()],
+  };
+  const progression = evaluateGoalAwareProgressionV2(input);
+  const suggestion = buildGoalAwareWorkoutSuggestion(input, progression);
+
+  assert.equal(progression.learningSessionsRemaining, 1);
+  assert.equal(progression.learningText, "1 more similar session needed before Coach can evaluate your trend.");
+  assert.equal(suggestion.learningText, progression.learningText);
+  assert.doesNotMatch(suggestion.suggestedGoal, /RIR/i);
+  assert.match(suggestion.effortGuidance ?? "", /2 more good reps/i);
+  assert.match(suggestion.restGuidance ?? "", /1.5 minutes/i);
+});
+
+test("fatigue learning states show the exact remaining workout-session count", () => {
+  assert.equal(
+    evaluateFatigueTrend([]).summary,
+    "3 more workout sessions needed before fatigue trends can be evaluated.",
+  );
+  assert.equal(
+    evaluateFatigueTrend(exposureHistory([[10, 10, 10], [10, 10, 10]])).summary,
+    "1 more workout session needed before fatigue trends can be evaluated.",
+  );
+});
+
+test("explicit progression styles produce distinct behavior and automatic follows the goal", () => {
+  assert.equal(resolveProgressionStyle("strength", "automatic"), "load_first");
+  assert.equal(resolveProgressionStyle("hypertrophy", "automatic"), "rep_first");
+  assert.equal(resolveProgressionStyle("general_fitness", "automatic"), "balanced");
+
+  const history = historyWithRirs([[8, 8, 8], [9, 9, 9], [10, 10, 10]], [2, 2, 2]);
+  const resultFor = (progressionStyle: "rep_first" | "load_first") => {
+    const settings = { ...DEFAULT_COACH_SETTINGS, minComparableExposures: 2, progressionStyle };
+    const trend = evaluateExerciseTrend(history, 10, "hypertrophy", "reps", settings);
+    return evaluateGoalAwareProgressionV2({
+      goal: "hypertrophy",
+      experience: "advanced",
+      trackingMode: "reps",
+      prescription: { targetSets: 3, targetRepsMin: 8, targetRepsMax: 12, targetRir: 2 },
+      previous: getPreviousExercisePerformance(history, 10, "Incline Press"),
+      trend,
+      settings,
+      recovery: { muscle: "UpperChest", displayName: "Upper Chest", fatiguePercent: 15, recoveryPercent: 85, lastTrainedAt: null, hoursSinceLastTrained: 0, status: "Recovered", summary: "" },
+      fatigue: { status: "Stable", summary: "", riskScore: 15, deloadSuggested: false },
+      muscleContexts: [muscleContext()],
+    });
+  };
+
+  assert.equal(resultFor("rep_first").recommendation, "Add Reps");
+  assert.equal(resultFor("load_first").recommendation, "Increase Weight");
+});
+
+test("fatigue and recovery override every goal-specific progression", () => {
+  const history = historyWithRirs([[10, 10, 10], [11, 11, 11], [12, 12, 12]], [2, 2, 2]);
+  const settings = { ...DEFAULT_COACH_SETTINGS, minComparableExposures: 2 };
+  const trend = evaluateExerciseTrend(history, 10, "hypertrophy", "reps", settings);
+  const result = evaluateGoalAwareProgressionV2({
+    goal: "hypertrophy",
+    experience: "intermediate",
+    trackingMode: "reps",
+    prescription: { targetSets: 3, targetRepsMin: 8, targetRepsMax: 12, targetRir: 2 },
+    previous: getPreviousExercisePerformance(history, 10, "Incline Press"),
+    trend,
+    settings,
+    recovery: { muscle: "UpperChest", displayName: "Upper Chest", fatiguePercent: 80, recoveryPercent: 20, lastTrainedAt: null, hoursSinceLastTrained: 0, status: "Needs Rest", summary: "" },
+    fatigue: { status: "Fatigue Risk", summary: "", riskScore: 82, deloadSuggested: true },
+    muscleContexts: [muscleContext({ recoveryPercent: 20, fatiguePercent: 80, recoveryStatus: "Needs Rest" })],
+  });
+
+  assert.equal(result.recommendation, "Reduce Or Delay");
+  assert.equal(result.setRecommendation, "Reduce Set");
+  assert.equal(result.prescribedSets, 2);
+  assert.ok(result.suggestedWeight < 75);
+});
+
+test("duration progression compares the per-hold average rather than total session time", () => {
+  const history: HistorySessionInput[] = [1, 2, 3].map((id) => ({
+    id,
+    workoutTemplateId: 1,
+    workoutName: "Mobility",
+    startedAt: new Date(`2026-08-0${id}T12:00:00.000Z`),
+    exercises: [{
+      exerciseId: 99,
+      exerciseOrder: 1,
+      exerciseName: "Wall Sit",
+      trackingMode: "duration",
+      primaryMuscleGroupId: 1,
+      intensityTechnique: "Normal",
+      failureTarget: "Never",
+      sets: [1, 2, 3].map((setNumber) => ({
+        setNumber,
+        setType: "Working" as const,
+        weight: 0,
+        reps: 0,
+        durationSeconds: 30,
+        rir: null,
+        completed: true,
+      })),
+    }],
+  }));
+  const settings = { ...DEFAULT_COACH_SETTINGS, minComparableExposures: 2 };
+  const trend = evaluateExerciseTrend(history, 99, "mobility", "duration", settings);
+  const result = evaluateGoalAwareProgressionV2({
+    goal: "mobility",
+    experience: "intermediate",
+    trackingMode: "duration",
+    prescription: { targetSets: 3, targetRepsMin: 8, targetRepsMax: 12, targetDurationMinSeconds: 30, targetDurationMaxSeconds: 60, targetRir: 3 },
+    previous: getPreviousExercisePerformance(history, 99, "Wall Sit"),
+    trend,
+    settings,
+    recovery: { muscle: "Quads", displayName: "Quads", fatiguePercent: 15, recoveryPercent: 85, lastTrainedAt: null, hoursSinceLastTrained: 0, status: "Recovered", summary: "" },
+    fatigue: { status: "Stable", summary: "", riskScore: 15, deloadSuggested: false },
+    muscleContexts: [muscleContext({ muscle: "Quads", displayName: "Quads" })],
+  });
+
+  assert.equal(result.recommendation, "Add Hold Time");
+  assert.match(result.nextGoalText, /per hold/i);
 });
 
 test("learned volume range favors productive completed weeks and rejects a declining high week", () => {

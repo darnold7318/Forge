@@ -55,7 +55,6 @@ import {
   trainingLevelIds,
   trainingLevelLabels,
   trainingGoalIds,
-  trainingGoalLabels,
   timezoneModeIds,
   timezoneModeLabels,
   type ThemeColorId,
@@ -66,6 +65,20 @@ import {
   type CustomWeeklySlot,
   type User,
 } from "@shared/schema";
+
+const TRAINING_LEVEL_DESCRIPTIONS: Record<TrainingLevelId, string> = {
+  beginner: "Simple targets, conservative effort, and one progression change at a time. Coach learns exercise trends after 2 similar sessions.",
+  intermediate: "Trend-based load and set adjustments with more coaching detail. Coach learns exercise trends after 3 similar sessions.",
+  advanced: "Full coaching detail and customizable progression, fatigue, effort, and muscle-model settings.",
+};
+
+const TRAINING_GOAL_CHOICES: Record<TrainingGoalId, { label: string; description: string }> = {
+  hypertrophy: { label: "Build Muscle (Hypertrophy)", description: "Prioritizes adding quality repetitions, then weight, while monitoring productive weekly volume." },
+  strength: { label: "Get Stronger", description: "Prioritizes lower repetition targets, controlled effort, and gradual load increases." },
+  general_fitness: { label: "General Fitness", description: "Balances strength, repetitions, consistency, and manageable fatigue." },
+  mobility: { label: "Improve Mobility", description: "Prioritizes control, range of motion, and hold duration instead of load or muscle volume." },
+  muscular_endurance: { label: "Muscular Endurance", description: "Prioritizes higher repetitions or longer holds before increasing weight." },
+};
 
 // ---------------------------------------------------------------------------
 // Timezone
@@ -1096,8 +1109,13 @@ export default function Settings() {
       const res = await apiRequest("PATCH", `/api/users/${activeUserId}/preferences`, prefs);
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (updatedUser) => {
+      queryClient.setQueryData(["/api/auth/me"], updatedUser);
       queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/coach/settings"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/coach/fatigue-trend"] });
       toast({ title: "Preferences saved" });
     },
     onError: () => {
@@ -1234,7 +1252,6 @@ export default function Settings() {
         </CardContent>
       </Card>
 
-      {/* Training experience controls feature complexity only. */}
       <Card data-testid="card-training-experience">
         <CardHeader>
           <CardTitle className="text-base">Training Experience</CardTitle>
@@ -1258,7 +1275,7 @@ export default function Settings() {
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
-            Advanced reveals additional exercise options. This does not change your training recommendations.
+            {TRAINING_LEVEL_DESCRIPTIONS[activeUser.trainingLevel as TrainingLevelId] ?? TRAINING_LEVEL_DESCRIPTIONS.beginner}
           </p>
         </CardContent>
       </Card>
@@ -1276,14 +1293,15 @@ export default function Settings() {
           >
             <SelectTrigger id="training-goal" data-testid="select-training-goal"><SelectValue /></SelectTrigger>
             <SelectContent>
-              {trainingGoalIds.map((goal: TrainingGoalId) => <SelectItem key={goal} value={goal}>{trainingGoalLabels[goal]}</SelectItem>)}
+              {trainingGoalIds.map((goal: TrainingGoalId) => <SelectItem key={goal} value={goal}>{TRAINING_GOAL_CHOICES[goal].label}</SelectItem>)}
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground">Your goal changes what Coach prioritizes. Training Experience controls how much detail and customization you see.</p>
+          <p className="text-xs text-muted-foreground">{TRAINING_GOAL_CHOICES[activeUser.trainingGoal as TrainingGoalId]?.description ?? TRAINING_GOAL_CHOICES.hypertrophy.description}</p>
+          <p className="text-xs text-muted-foreground">Coach may adjust next-session targets that do not match this goal, but it will never rewrite your saved templates automatically.</p>
         </CardContent>
       </Card>
 
-      <Card id="recovery-settings" data-testid="card-recovery-settings">
+      {activeUser.trainingLevel !== "beginner" && <Card id="recovery-settings" data-testid="card-recovery-settings">
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
             <HeartPulse className="h-4 w-4" />
@@ -1294,9 +1312,9 @@ export default function Settings() {
           </p>
         </CardHeader>
         <CardContent>
-          <RecoverySettingsEditor />
+          <RecoverySettingsEditor showMuscleOverrides={activeUser.trainingLevel === "advanced"} />
         </CardContent>
-      </Card>
+      </Card>}
 
       {activeUser.trainingLevel === "advanced" && <AdvancedCoachSettings />}
 

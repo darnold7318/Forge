@@ -19,6 +19,7 @@ import {
   type FailureTarget,
   type TrackingMode,
   type TrainingGoalId,
+  type TrainingLevelId,
   type CoachSettings,
 } from "./schema";
 import { civilDateInZone } from "./timezone";
@@ -349,6 +350,106 @@ export interface GoalCoachingProfile {
   requiresPrimaryCompound: boolean;
 }
 
+export interface ExperienceCoachingProfile {
+  id: TrainingLevelId;
+  label: string;
+  minComparableExposures: number | null;
+  trendHistoryLimit: number | null;
+  maxRecommendedSets: number | null;
+  minimumTargetRir: number;
+  allowsSetIncreases: boolean;
+}
+
+export interface CoachingMethodPolicy {
+  targetRepsMin: number;
+  targetRepsMax: number;
+  targetDurationMinSeconds: number;
+  targetDurationMaxSeconds: number;
+  targetRir: number;
+  restSeconds: number;
+  progressionPriority: GoalCoachingProfile["progressionPriority"];
+}
+
+export const EXPERIENCE_COACHING_PROFILES: Record<TrainingLevelId, ExperienceCoachingProfile> = {
+  beginner: {
+    id: "beginner",
+    label: "Beginner",
+    minComparableExposures: 2,
+    trendHistoryLimit: 3,
+    maxRecommendedSets: 3,
+    minimumTargetRir: 2,
+    allowsSetIncreases: false,
+  },
+  intermediate: {
+    id: "intermediate",
+    label: "Intermediate",
+    minComparableExposures: 3,
+    trendHistoryLimit: 5,
+    maxRecommendedSets: 4,
+    minimumTargetRir: 1,
+    allowsSetIncreases: true,
+  },
+  advanced: {
+    id: "advanced",
+    label: "Advanced",
+    minComparableExposures: null,
+    trendHistoryLimit: null,
+    maxRecommendedSets: null,
+    minimumTargetRir: 0,
+    allowsSetIncreases: true,
+  },
+};
+
+export const COACHING_METHOD_POLICIES: Record<TrainingLevelId, Record<TrainingGoalId, CoachingMethodPolicy>> = {
+  beginner: {
+    strength: { targetRepsMin: 5, targetRepsMax: 8, targetDurationMinSeconds: 20, targetDurationMaxSeconds: 40, targetRir: 2, restSeconds: 120, progressionPriority: "load" },
+    hypertrophy: { targetRepsMin: 8, targetRepsMax: 12, targetDurationMinSeconds: 20, targetDurationMaxSeconds: 45, targetRir: 2, restSeconds: 90, progressionPriority: "reps" },
+    muscular_endurance: { targetRepsMin: 12, targetRepsMax: 18, targetDurationMinSeconds: 30, targetDurationMaxSeconds: 60, targetRir: 2, restSeconds: 60, progressionPriority: "reps" },
+    mobility: { targetRepsMin: 8, targetRepsMax: 12, targetDurationMinSeconds: 20, targetDurationMaxSeconds: 45, targetRir: 3, restSeconds: 45, progressionPriority: "duration" },
+    general_fitness: { targetRepsMin: 8, targetRepsMax: 12, targetDurationMinSeconds: 20, targetDurationMaxSeconds: 45, targetRir: 2, restSeconds: 75, progressionPriority: "balanced" },
+  },
+  intermediate: {
+    strength: { targetRepsMin: 3, targetRepsMax: 6, targetDurationMinSeconds: 20, targetDurationMaxSeconds: 45, targetRir: 2, restSeconds: 180, progressionPriority: "load" },
+    hypertrophy: { targetRepsMin: 6, targetRepsMax: 15, targetDurationMinSeconds: 20, targetDurationMaxSeconds: 60, targetRir: 2, restSeconds: 120, progressionPriority: "reps" },
+    muscular_endurance: { targetRepsMin: 12, targetRepsMax: 20, targetDurationMinSeconds: 30, targetDurationMaxSeconds: 75, targetRir: 2, restSeconds: 60, progressionPriority: "reps" },
+    mobility: { targetRepsMin: 8, targetRepsMax: 15, targetDurationMinSeconds: 30, targetDurationMaxSeconds: 60, targetRir: 3, restSeconds: 60, progressionPriority: "duration" },
+    general_fitness: { targetRepsMin: 6, targetRepsMax: 15, targetDurationMinSeconds: 20, targetDurationMaxSeconds: 60, targetRir: 2, restSeconds: 90, progressionPriority: "balanced" },
+  },
+  advanced: {
+    strength: { targetRepsMin: 2, targetRepsMax: 6, targetDurationMinSeconds: 20, targetDurationMaxSeconds: 60, targetRir: 1, restSeconds: 180, progressionPriority: "load" },
+    hypertrophy: { targetRepsMin: 5, targetRepsMax: 15, targetDurationMinSeconds: 20, targetDurationMaxSeconds: 75, targetRir: 1, restSeconds: 120, progressionPriority: "reps" },
+    muscular_endurance: { targetRepsMin: 12, targetRepsMax: 25, targetDurationMinSeconds: 30, targetDurationMaxSeconds: 90, targetRir: 1, restSeconds: 60, progressionPriority: "reps" },
+    mobility: { targetRepsMin: 8, targetRepsMax: 15, targetDurationMinSeconds: 30, targetDurationMaxSeconds: 90, targetRir: 2, restSeconds: 60, progressionPriority: "duration" },
+    general_fitness: { targetRepsMin: 6, targetRepsMax: 15, targetDurationMinSeconds: 20, targetDurationMaxSeconds: 75, targetRir: 1, restSeconds: 90, progressionPriority: "balanced" },
+  },
+};
+
+const BEGINNER_GOAL_LABELS: Record<TrainingGoalId, string> = {
+  hypertrophy: "Building Muscle",
+  strength: "Getting Stronger",
+  general_fitness: "General Fitness",
+  mobility: "Improving Mobility",
+  muscular_endurance: "Muscular Endurance",
+};
+
+export function resolveExperienceCoachingProfile(experience: TrainingLevelId): ExperienceCoachingProfile {
+  return EXPERIENCE_COACHING_PROFILES[experience] ?? EXPERIENCE_COACHING_PROFILES.beginner;
+}
+
+export function resolveCoachingMethodPolicy(goal: TrainingGoalId, experience: TrainingLevelId): CoachingMethodPolicy {
+  return COACHING_METHOD_POLICIES[experience]?.[goal] ?? COACHING_METHOD_POLICIES.beginner.hypertrophy;
+}
+
+export function applyExperienceCoachSettings(settings: CoachSettings, experience: TrainingLevelId): CoachSettings {
+  const profile = resolveExperienceCoachingProfile(experience);
+  const base = experience === "advanced" ? settings : DEFAULT_COACH_SETTINGS;
+  return {
+    ...base,
+    minComparableExposures: profile.minComparableExposures ?? base.minComparableExposures,
+    trendHistoryLimit: profile.trendHistoryLimit ?? base.trendHistoryLimit,
+  };
+}
+
 export const GOAL_COACHING_PROFILES: Record<TrainingGoalId, GoalCoachingProfile> = {
   hypertrophy: {
     id: "hypertrophy",
@@ -396,6 +497,90 @@ export function resolveGoalCoachingProfile(goal: TrainingGoalId): GoalCoachingPr
   return GOAL_COACHING_PROFILES[goal] ?? GOAL_COACHING_PROFILES.hypertrophy;
 }
 
+export interface CoachPrescriptionInput extends ProgressionPrescription {
+  targetSets?: number;
+  targetDurationMinSeconds?: number | null;
+  targetDurationMaxSeconds?: number | null;
+  restSeconds?: number;
+}
+
+export interface ResolvedCoachPrescription extends ProgressionPrescription {
+  targetSets: number;
+  targetDurationMinSeconds: number;
+  targetDurationMaxSeconds: number;
+  restSeconds: number;
+  adjustedForSettings: boolean;
+  adjustmentNote: string | null;
+}
+
+export function resolveProgressionStyle(
+  goal: TrainingGoalId,
+  selected: CoachSettings["progressionStyle"],
+  experience: TrainingLevelId = "intermediate",
+): Exclude<CoachSettings["progressionStyle"], "automatic"> {
+  if (selected !== "automatic") return selected;
+  const priority = resolveCoachingMethodPolicy(goal, experience).progressionPriority;
+  if (priority === "load") return "load_first";
+  if (priority === "balanced") return "balanced";
+  return "rep_first";
+}
+
+export function resolveGoalExperiencePrescription(args: {
+  goal: TrainingGoalId;
+  experience: TrainingLevelId;
+  trackingMode: TrackingMode;
+  prescription: CoachPrescriptionInput;
+}): ResolvedCoachPrescription {
+  const { goal, experience, trackingMode, prescription } = args;
+  const method = resolveCoachingMethodPolicy(goal, experience);
+  const experienceProfile = resolveExperienceCoachingProfile(experience);
+  const notes: string[] = [];
+  let targetSets = Math.max(1, prescription.targetSets ?? 3);
+  let targetRepsMin = prescription.targetRepsMin;
+  let targetRepsMax = prescription.targetRepsMax;
+  let targetDurationMinSeconds = prescription.targetDurationMinSeconds ?? method.targetDurationMinSeconds;
+  let targetDurationMaxSeconds = prescription.targetDurationMaxSeconds ?? method.targetDurationMaxSeconds;
+  let targetRir = Math.max(prescription.targetRir, experienceProfile.minimumTargetRir, method.targetRir);
+  const restSeconds = Math.max(prescription.restSeconds ?? method.restSeconds, method.restSeconds);
+
+  if (trackingMode === "duration") {
+    if (targetDurationMinSeconds < method.targetDurationMinSeconds || targetDurationMaxSeconds > method.targetDurationMaxSeconds) {
+      targetDurationMinSeconds = method.targetDurationMinSeconds;
+      targetDurationMaxSeconds = method.targetDurationMaxSeconds;
+      notes.push(`hold time adjusted for ${experienceProfile.label.toLowerCase()} ${resolveGoalCoachingProfile(goal).label.toLowerCase()} training`);
+    }
+  } else {
+    if (targetRepsMin < method.targetRepsMin || targetRepsMax > method.targetRepsMax) {
+      targetRepsMin = method.targetRepsMin;
+      targetRepsMax = method.targetRepsMax;
+      notes.push(`rep range adjusted for ${experienceProfile.label.toLowerCase()} ${resolveGoalCoachingProfile(goal).label.toLowerCase()} training`);
+    }
+  }
+
+  if (experienceProfile.maxRecommendedSets != null && targetSets > experienceProfile.maxRecommendedSets) {
+    targetSets = experienceProfile.maxRecommendedSets;
+    notes.push(`working sets capped at ${targetSets} for ${experienceProfile.label.toLowerCase()} training`);
+  }
+  if (targetRir !== prescription.targetRir) {
+    notes.push(`effort target kept conservative for ${experienceProfile.label.toLowerCase()} training`);
+  }
+  if (prescription.restSeconds != null && restSeconds !== prescription.restSeconds) {
+    notes.push(`rest increased to ${Math.round(restSeconds / 30) * 0.5} minutes for this goal`);
+  }
+
+  return {
+    targetSets,
+    targetRepsMin,
+    targetRepsMax,
+    targetDurationMinSeconds,
+    targetDurationMaxSeconds,
+    targetRir,
+    restSeconds,
+    adjustedForSettings: notes.length > 0,
+    adjustmentNote: notes.length > 0 ? `Coach adjusted this target: ${notes.join("; ")}. Your saved template was not changed.` : null,
+  };
+}
+
 export interface ExerciseExposureSummary {
   workoutId: number;
   performedAt: Date;
@@ -421,6 +606,7 @@ export interface ExerciseTrendEvaluation {
   averageRir: number | null;
   rirCompleteness: number;
   evidence: string;
+  requiredExposureCount?: number;
 }
 
 function summarizeExposure(session: HistorySessionInput, exercise: HistoryExerciseInput): ExerciseExposureSummary | null {
@@ -507,6 +693,7 @@ export function evaluateExerciseTrend(
       averageRir,
       rirCompleteness,
       evidence: `${exposures.length}/${settings.minComparableExposures} comparable exposures logged.`,
+      requiredExposureCount: settings.minComparableExposures,
     };
   }
 
@@ -529,6 +716,7 @@ export function evaluateExerciseTrend(
     averageRir,
     rirCompleteness,
     evidence: `${status} across ${exposures.length} comparable exposures (${scoreChangePercent >= 0 ? "+" : ""}${fmt1(scoreChangePercent)}%).`,
+    requiredExposureCount: settings.minComparableExposures,
   };
 }
 
@@ -610,7 +798,13 @@ export function evaluateEffortAdjustedTrend(
   const previous = trend.exposures.at(-2);
   const latest = trend.exposures.at(-1);
   if (!previous || !latest) {
-    return { rawTrend: trend, rirAdherence: adherence, effortNormalizedStatus: "uncertain", evidence: "More comparable exposures are needed." };
+    const sessionsRemaining = Math.max(1, (trend.requiredExposureCount ?? trend.exposureCount + 1) - trend.exposureCount);
+    return {
+      rawTrend: trend,
+      rirAdherence: adherence,
+      effortNormalizedStatus: "uncertain",
+      evidence: `${sessionsRemaining} more similar session${sessionsRemaining === 1 ? "" : "s"} needed before effort-adjusted progress can be evaluated.`,
+    };
   }
 
   const previousSignal = trackingMode === "duration" || goal === "mobility"
@@ -735,12 +929,9 @@ export function identifyLimitingMuscles(
 
 export interface GoalAwareProgressionV2Input {
   goal: TrainingGoalId;
+  experience?: TrainingLevelId;
   trackingMode: TrackingMode;
-  prescription: ProgressionPrescription & {
-    targetSets?: number;
-    targetDurationMinSeconds?: number | null;
-    targetDurationMaxSeconds?: number | null;
-  };
+  prescription: CoachPrescriptionInput;
   previous: PreviousExercisePerformance;
   trend: ExerciseTrendEvaluation;
   settings: CoachSettings;
@@ -763,21 +954,37 @@ export interface GoalAwareProgressionEvaluation extends ProgressionEvaluation {
   limitingMuscles: LimitingMuscle[];
   rirAdherence: RirAdherenceEvaluation;
   effortNormalizedStatus: EffortAdjustedTrend["effortNormalizedStatus"];
+  effectivePrescription: ResolvedCoachPrescription;
+  progressionStyle: Exclude<CoachSettings["progressionStyle"], "automatic">;
+  learningSessionsRemaining: number;
+  learningText: string | null;
 }
 
 export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Input): GoalAwareProgressionEvaluation {
-  const { goal, trackingMode, prescription, previous, trend, settings, recovery, fatigue, muscleContexts } = input;
+  const { goal, trackingMode, previous, trend, settings, recovery, fatigue, muscleContexts } = input;
+  const experience = input.experience ?? "intermediate";
+  const experienceProfile = resolveExperienceCoachingProfile(experience);
+  const prescription = resolveGoalExperiencePrescription({
+    goal,
+    experience,
+    trackingMode,
+    prescription: input.prescription,
+  });
+  const progressionStyle = resolveProgressionStyle(goal, settings.progressionStyle, experience);
   const rirAdherence = evaluateRirAdherence(trend, prescription.targetRir, trackingMode, goal);
   const effortTrend = evaluateEffortAdjustedTrend(trend, rirAdherence, goal, trackingMode);
   const confidence = calculateCoachingConfidence(trend, rirAdherence);
   const latest = trend.exposures.at(-1);
-  const templateRir = prescription.targetRir;
-  const rirMin = templateRir != null ? Math.max(0, templateRir - 1) : settings.preferredRirMin;
-  const rirMax = templateRir != null ? templateRir + 1 : settings.preferredRirMax;
+  const rirMin = Math.max(0, prescription.targetRir - 1);
+  const rirMax = prescription.targetRir + 1;
   const topWeight = latest?.topWeight ?? 0;
-  const targetSets = prescription.targetSets ?? latest?.workingSetCount ?? 3;
+  const targetSets = prescription.targetSets;
   const topRangeReached = !!latest && latest.workingSetCount >= targetSets && latest.totalReps >= targetSets * prescription.targetRepsMax;
   const lowRangeMissed = !!latest && latest.workingSetCount > 0 && latest.totalReps / latest.workingSetCount < prescription.targetRepsMin;
+  const averageReps = latest?.workingSetCount ? latest.totalReps / latest.workingSetCount : 0;
+  const rangeProgress = Math.min(1, Math.max(0,
+    (averageReps - prescription.targetRepsMin) / Math.max(1, prescription.targetRepsMax - prescription.targetRepsMin),
+  ));
   const onTargetEffort = rirAdherence.status === "on_target" || rirAdherence.status === "insufficient_data";
   const limitingMuscles = identifyLimitingMuscles(muscleContexts, goal);
   const primaryContext = [...muscleContexts].sort((a, b) => b.stimulusRatio - a.stimulusRatio)[0];
@@ -786,28 +993,36 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
   let reason = latest ? trend.evidence : "No previous completed sets are available.";
   let nextGoalText = latest ? "Repeat the prescription and collect another comparable exposure." : `Start within ${prescription.targetRepsMin}-${prescription.targetRepsMax} reps.`;
   let suggestedWeight = topWeight;
+  const improving = effortTrend.effortNormalizedStatus === "improving" || trend.status === "Improving";
+  const shouldIncreaseLoad = onTargetEffort && (
+    progressionStyle === "load_first"
+      ? improving && averageReps >= prescription.targetRepsMin
+      : progressionStyle === "balanced"
+        ? improving && rangeProgress >= 0.75
+        : topRangeReached
+  );
 
-  if (trackingMode === "duration") {
-    const targetMax = prescription.targetDurationMaxSeconds ?? 60;
-    const bestDuration = latest?.totalDurationSeconds ?? 0;
-    recommendation = bestDuration >= targetMax ? "Increase Hold Duration" : "Add Hold Time";
-    reason = `${trend.evidence} Duration is the relevant progression signal for this exercise.`;
-    nextGoalText = bestDuration > 0
-      ? `Add 5-${bestDuration >= targetMax ? 10 : 5} seconds while maintaining control.`
-      : `Start within ${prescription.targetDurationMinSeconds ?? 20}-${targetMax} seconds.`;
-    suggestedWeight = latest?.topWeight ?? 0;
-  } else if (!latest) {
+  if (!latest) {
     // Defaults above intentionally stay conservative until an exposure exists.
   } else if (effortTrend.effortNormalizedStatus === "declining" || trend.status === "Regressing") {
     recommendation = lowRangeMissed && rirAdherence.status === "too_hard" ? "Reduce Load" : fatigue.riskScore >= 55 ? "Reduce Or Delay" : "Hold Weight";
     reason = `${trend.evidence} ${effortTrend.evidence} Avoid forcing progression until performance stabilizes.`;
-    nextGoalText = lowRangeMissed ? "Reduce load slightly and return to the prescribed rep and RIR range." : "Repeat the prior load with cleaner execution.";
-  } else if (rirAdherence.status === "too_hard" || effortTrend.effortNormalizedStatus === "uncertain") {
+    nextGoalText = lowRangeMissed ? "Reduce load slightly and return to the prescribed rep and effort range." : "Repeat the prior load with cleaner execution.";
+  } else if (trackingMode !== "duration" && (rirAdherence.status === "too_hard" || effortTrend.effortNormalizedStatus === "uncertain")) {
     recommendation = "Hold Weight";
     reason = `Raw performance did not improve at comparable effort. ${effortTrend.evidence}`;
     nextGoalText = `Repeat ${fmt1(topWeight)} lb and stay within RIR ${rirMin}-${rirMax}.`;
+  } else if (trackingMode === "duration") {
+    const targetMax = prescription.targetDurationMaxSeconds;
+    const averageDuration = latest?.workingSetCount ? latest.totalDurationSeconds / latest.workingSetCount : 0;
+    recommendation = averageDuration >= targetMax ? "Increase Hold Duration" : "Add Hold Time";
+    reason = `${trend.evidence} Duration is the relevant progression signal for this exercise.`;
+    nextGoalText = averageDuration > 0
+      ? `Add 5-${averageDuration >= targetMax ? 10 : 5} seconds per hold while maintaining control.`
+      : `Start within ${prescription.targetDurationMinSeconds}-${targetMax} seconds.`;
+    suggestedWeight = latest?.topWeight ?? 0;
   } else if (goal === "strength") {
-    if ((effortTrend.effortNormalizedStatus === "improving" || trend.status === "Improving") && recovery.fatiguePercent < 55 && onTargetEffort) {
+    if (shouldIncreaseLoad) {
       recommendation = "Increase Weight";
       suggestedWeight = topWeight > 0 ? topWeight + (topWeight >= 100 ? 5 : 2.5) : 0;
       reason = `Estimated strength improved at controlled effort${latest.relativeIntensity != null ? ` with a same-exercise relative intensity of ${Math.round(latest.relativeIntensity * 100)}%` : ""}. ${effortTrend.evidence}`;
@@ -817,11 +1032,14 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
       reason = `Strength performance is not yet clearly improving at comparable effort. ${effortTrend.evidence}`;
     }
   } else if (goal === "muscular_endurance") {
-    recommendation = settings.progressionStyle === "load_first" && topRangeReached ? "Increase Weight" : "Add Reps";
+    recommendation = shouldIncreaseLoad ? "Increase Weight" : "Add Reps";
+    if (recommendation === "Increase Weight") suggestedWeight = topWeight > 0 ? topWeight + (topWeight >= 100 ? 5 : 2.5) : 0;
     reason = `Endurance coaching prioritizes repetitions and duration at comparable effort. ${effortTrend.evidence}`;
-    nextGoalText = `Keep the load and add 2-5 total reps while staying at RIR ${rirMin}-${rirMax}.`;
+    nextGoalText = recommendation === "Increase Weight"
+      ? `Try ${fmt1(suggestedWeight)} lb and return to the lower end of the rep range.`
+      : `Keep the load and add 2-5 total reps while staying at RIR ${rirMin}-${rirMax}.`;
   } else if (goal === "hypertrophy") {
-    if (topRangeReached && onTargetEffort) {
+    if (shouldIncreaseLoad) {
       recommendation = "Increase Weight";
       suggestedWeight = topWeight > 0 ? topWeight + (topWeight >= 100 ? 5 : 2.5) : 0;
       reason = `The rep range was completed at the prescribed effort. ${effortTrend.evidence}`;
@@ -836,10 +1054,14 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
     reason = `${trend.evidence} Forge is using duration and consistency, not hypertrophy volume, for this goal.`;
     nextGoalText = "Maintain controlled execution and add duration or repetitions only when quality remains stable.";
   } else {
-    recommendation = topRangeReached && settings.progressionStyle === "load_first" ? "Increase Weight" : "Maintain";
+    recommendation = shouldIncreaseLoad ? "Increase Weight" : rangeProgress < 0.75 ? "Add Reps" : "Maintain";
     if (recommendation === "Increase Weight") suggestedWeight = topWeight + (topWeight >= 100 ? 5 : 2.5);
     reason = `General Fitness uses conservative progression at sustainable effort. ${effortTrend.evidence}`;
-    nextGoalText = recommendation === "Increase Weight" ? `Try ${fmt1(suggestedWeight)} lb.` : "Repeat the plan and prioritize consistent technique.";
+    nextGoalText = recommendation === "Increase Weight"
+      ? `Try ${fmt1(suggestedWeight)} lb.`
+      : recommendation === "Add Reps"
+        ? "Keep the load and add 1-2 total reps with consistent technique."
+        : "Repeat the plan and prioritize consistent technique.";
   }
 
   let setRecommendation: GoalAwareProgressionEvaluation["setRecommendation"] = "Learning";
@@ -859,16 +1081,39 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
       )) &&
       !secondaryLimit
     ) {
-      setRecommendation = settings.volumeProgressionSensitivity === "conservative" ? "Maintain Sets" : "Add Set";
+      setRecommendation = !experienceProfile.allowsSetIncreases || settings.volumeProgressionSensitivity === "conservative" ? "Maintain Sets" : "Add Set";
     } else {
       setRecommendation = "Maintain Sets";
     }
   }
 
-  const prescribedSets = Math.max(1, targetSets + (setRecommendation === "Add Set" ? 1 : setRecommendation === "Reduce Set" ? -1 : 0));
+  let prescribedSets = Math.max(1, targetSets + (setRecommendation === "Add Set" ? 1 : setRecommendation === "Reduce Set" ? -1 : 0));
+  if (experienceProfile.maxRecommendedSets != null) {
+    prescribedSets = Math.min(prescribedSets, experienceProfile.maxRecommendedSets);
+  }
   if (secondaryLimit && recommendation !== "Reduce Load" && recommendation !== "Reduce Or Delay") {
     reason = `${reason} ${secondaryLimit.reason}; keep the compound work, but do not add direct ${secondaryLimit.context.displayName} volume.`;
   }
+  const severeFatigue = fatigue.deloadSuggested || fatigue.riskScore >= 70 || recovery.fatiguePercent >= 75;
+  const elevatedFatigue = !severeFatigue && (fatigue.riskScore >= 55 || recovery.fatiguePercent >= 55);
+  if (severeFatigue) {
+    recommendation = "Reduce Or Delay";
+    suggestedWeight = topWeight > 0 ? Math.round(topWeight * 0.9 * 2) / 2 : 0;
+    reason = `${recovery.displayName} recovery and the recent fatigue trend take priority over progression today.`;
+    nextGoalText = "Delay this work or use a lighter session with at least one fewer working set.";
+    setRecommendation = latest ? "Reduce Set" : "Learning";
+    prescribedSets = Math.max(1, targetSets - 1);
+  } else if (elevatedFatigue && !["Reduce Load", "Reduce Or Delay"].includes(recommendation)) {
+    recommendation = "Hold Progression";
+    reason = `${recovery.displayName} fatigue is elevated, so hold progression until recovery improves.`;
+    nextGoalText = "Repeat the prior load and trim one working set if warm-ups feel worse than usual.";
+    setRecommendation = latest ? "Reduce Set" : "Learning";
+    prescribedSets = Math.max(1, targetSets - 1);
+  }
+  const learningSessionsRemaining = Math.max(0, settings.minComparableExposures - trend.exposureCount);
+  const learningText = learningSessionsRemaining > 0
+    ? `${learningSessionsRemaining} more similar session${learningSessionsRemaining === 1 ? "" : "s"} needed before Coach can evaluate your trend.`
+    : null;
   return {
     exerciseId: previous.exerciseId,
     exerciseName: previous.exerciseName,
@@ -893,7 +1138,7 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
     confidenceScore: confidence.score,
     suggestedWeight,
     targetText: trackingMode === "duration"
-      ? `Target: ${prescription.targetDurationMinSeconds ?? 20}-${prescription.targetDurationMaxSeconds ?? 60} seconds | RIR ${rirMin}-${rirMax}`
+      ? `Target: ${prescription.targetDurationMinSeconds}-${prescription.targetDurationMaxSeconds} seconds`
       : `Target: ${prescription.targetRepsMin}-${prescription.targetRepsMax} reps | RIR ${rirMin}-${rirMax}`,
     evidenceText: effortTrend.evidence,
     trend: trend.status,
@@ -907,6 +1152,10 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
     limitingMuscles,
     rirAdherence,
     effortNormalizedStatus: effortTrend.effortNormalizedStatus,
+    effectivePrescription: prescription,
+    progressionStyle,
+    learningSessionsRemaining,
+    learningText,
   };
 }
 
@@ -1122,12 +1371,13 @@ export function evaluateFatigueTrend(
   sensitivity: CoachSettings["fatigueSensitivity"] = "normal",
 ): FatigueSignal {
   if (history.length < 3) {
+    const sessionsRemaining = 3 - history.length;
     return {
       status: "Learning",
-      summary: "Log at least three workouts before fatigue trends are evaluated.",
+      summary: `${sessionsRemaining} more workout session${sessionsRemaining === 1 ? "" : "s"} needed before fatigue trends can be evaluated.`,
       riskScore: 10,
       deloadSuggested: false,
-      evidence: ["Fewer than three workouts are available."],
+      evidence: [`${history.length}/3 workout sessions are available.`],
     };
   }
 
@@ -1387,9 +1637,10 @@ export function learnPersonalVolumeRanges(
     const confidence = Math.round(Math.min(100,
       Math.min(70, valid.length / 6 * 70) + (valid.length ? productive.length / valid.length * 20 : 0) + averageConfidence * 0.1,
     ));
+    const weeksRemaining = Math.max(0, 4 - valid.length);
     const explanation = hasRange
       ? `Performance was stable or improving around ${fmt1(productiveLow!)}-${fmt1(productiveHigh!)} effective sets across ${valid.length} comparable completed weeks.`
-      : `${valid.length}/4 comparable completed weeks available; Forge is still learning this range.`;
+      : `${weeksRemaining} more comparable training week${weeksRemaining === 1 ? "" : "s"} needed before Coach can estimate this range.`;
     return { muscleGroupId, productiveLow, productiveHigh, confidence, validWeekCount: valid.length, explanation, samples };
   });
 }
@@ -1800,6 +2051,13 @@ export interface WorkoutExerciseSuggestion {
   rirAdherence?: RirAdherenceEvaluation;
   effortNormalizedStatus?: EffortAdjustedTrend["effortNormalizedStatus"];
   stimulusQuality?: "Understimulated" | "Productive" | "High Stimulus" | "Excessive Fatigue" | "Learning";
+  experience?: TrainingLevelId;
+  plainLanguageReason?: string;
+  effortGuidance?: string;
+  learningSessionsRemaining?: number;
+  learningText?: string | null;
+  templateAdjustmentNote?: string | null;
+  restGuidance?: string;
 }
 
 export function buildWorkoutSuggestion(
@@ -1847,9 +2105,13 @@ export function buildGoalAwareWorkoutSuggestion(
 ): WorkoutExerciseSuggestion {
   const latest = input.trend.exposures.at(-1);
   const duration = input.trackingMode === "duration";
+  const experience = input.experience ?? "intermediate";
+  const prescription = progression.effectivePrescription;
   const suggestedGoal = duration
-    ? `${progression.prescribedSets} holds x ${input.prescription.targetDurationMinSeconds ?? 20}-${input.prescription.targetDurationMaxSeconds ?? 60} sec`
-    : `${progression.prescribedSets} sets x ${input.prescription.targetRepsMin}-${input.prescription.targetRepsMax} @ RIR ${progression.prescribedRirMin}-${progression.prescribedRirMax}${progression.suggestedWeight > 0 ? ` at ${fmt1(progression.suggestedWeight)} lb` : ""}`;
+    ? `${progression.prescribedSets} holds x ${prescription.targetDurationMinSeconds}-${prescription.targetDurationMaxSeconds} sec`
+    : experience === "beginner"
+      ? `${progression.prescribedSets} sets of ${prescription.targetRepsMin}-${prescription.targetRepsMax}${progression.suggestedWeight > 0 ? ` at ${fmt1(progression.suggestedWeight)} lb` : ""}`
+      : `${progression.prescribedSets} sets x ${prescription.targetRepsMin}-${prescription.targetRepsMax} @ RIR ${progression.prescribedRirMin}-${progression.prescribedRirMax}${progression.suggestedWeight > 0 ? ` at ${fmt1(progression.suggestedWeight)} lb` : ""}`;
   const readiness = evaluateGoalAwareReadiness({
     goal: input.goal,
     recovery: input.recovery,
@@ -1858,8 +2120,8 @@ export function buildGoalAwareWorkoutSuggestion(
     muscleContexts: input.muscleContexts,
     confidenceScore: progression.confidenceScore,
     prescriptionAdherence: progression.rirAdherence.status === "insufficient_data"
-      ? latest && input.prescription.targetSets
-        ? Math.min(100, (latest.workingSetCount / input.prescription.targetSets) * 100)
+      ? latest && prescription.targetSets
+        ? Math.min(100, (latest.workingSetCount / prescription.targetSets) * 100)
         : 75
       : progression.rirAdherence.score,
   });
@@ -1870,9 +2132,29 @@ export function buildGoalAwareWorkoutSuggestion(
       ? "Excessive Fatigue"
       : primaryContext?.volumeStatus === "under" && input.trend.status !== "Improving"
         ? "Understimulated"
-        : input.trend.status === "Improving" && input.recovery.fatiguePercent <= 55
+      : input.trend.status === "Improving" && input.recovery.fatiguePercent <= 55
           ? "High Stimulus"
           : "Productive";
+  const plainLanguageReason = progression.recommendation === "Reduce Or Delay"
+    ? "Your recent fatigue or recovery suggests an easier session or an extra rest day."
+    : progression.recommendation === "Hold Progression"
+      ? "Recovery is not quite ready for a harder session, so repeat or slightly reduce the work."
+      : progression.learningText
+        ? "Use this target to build a consistent baseline."
+        : progression.recommendation === "Increase Weight"
+          ? "You completed the current target with consistent effort, so a small weight increase is appropriate."
+          : progression.recommendation === "Add Reps"
+            ? "Keep the same weight and complete a few more good repetitions before adding weight."
+            : progression.recommendation === "Increase Hold Duration" || progression.recommendation === "Add Hold Time"
+              ? "Keep the movement controlled and gradually spend more time in the position."
+              : progression.recommendation === "Increase Control"
+                ? "Keep the movement smooth and increase range or control before making it harder."
+                : "Repeat the target with consistent technique before making it harder.";
+  const effortGuidance = duration || input.goal === "mobility"
+    ? "Move with control and stop if your range of motion or form gets worse."
+    : `Stop each set when you could still do about ${prescription.targetRir} more good rep${prescription.targetRir === 1 ? "" : "s"}.`;
+  const restMinutes = prescription.restSeconds / 60;
+  const restGuidance = `Rest about ${Number.isInteger(restMinutes) ? restMinutes : fmt1(restMinutes)} minute${restMinutes === 1 ? "" : "s"} between working sets.`;
   return {
     exerciseName: input.previous.exerciseName,
     lastPerformance: latest
@@ -1895,7 +2177,7 @@ export function buildGoalAwareWorkoutSuggestion(
     readinessText: readiness.summary,
     readinessGuidance: readiness.guidance,
     goal: input.goal,
-    goalLabel: resolveGoalCoachingProfile(input.goal).label,
+    goalLabel: experience === "beginner" ? BEGINNER_GOAL_LABELS[input.goal] : resolveGoalCoachingProfile(input.goal).label,
     trackingMode: input.trackingMode,
     trend: progression.trend,
     trendEvidence: progression.trendEvidence,
@@ -1911,6 +2193,13 @@ export function buildGoalAwareWorkoutSuggestion(
     rirAdherence: progression.rirAdherence,
     effortNormalizedStatus: progression.effortNormalizedStatus,
     stimulusQuality,
+    experience,
+    plainLanguageReason,
+    effortGuidance,
+    learningSessionsRemaining: progression.learningSessionsRemaining,
+    learningText: progression.learningText,
+    templateAdjustmentNote: prescription.adjustmentNote,
+    restGuidance,
   };
 }
 
@@ -2209,6 +2498,7 @@ export interface GetDashboardSnapshotArgs {
   recoveryOverrides?: RecoveryModelOverrides;
   coachSettings?: CoachSettings;
   trainingGoal?: TrainingGoalId;
+  trainingExperience?: TrainingLevelId;
   now?: Date;
   schedule?: DashboardScheduleInput | null;
   /**
@@ -2232,8 +2522,9 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
   const now = args.now ?? new Date();
   const zone = args.zone ?? "UTC";
 
-  const coachSettings = args.coachSettings ?? DEFAULT_COACH_SETTINGS;
   const trainingGoal = args.trainingGoal ?? "hypertrophy";
+  const trainingExperience = args.trainingExperience ?? "beginner";
+  const coachSettings = applyExperienceCoachSettings(args.coachSettings ?? DEFAULT_COACH_SETTINGS, trainingExperience);
   const fatigue = evaluateFatigueTrend(history, coachSettings.fatigueSensitivity);
   const recoveryStates = evaluateRecovery(history, muscleGroupLookup, now, args.recoverySettings, args.recoveryOverrides);
   const rollingStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
@@ -2428,6 +2719,7 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
     const trend = evaluateExerciseTrend(history, prescription.exerciseId, trainingGoal, trackingMode, coachSettings);
     const progressionInput: GoalAwareProgressionInput = {
       goal: trainingGoal,
+      experience: trainingExperience,
       trackingMode,
       prescription,
       previous: resolvedPrevious,
@@ -2443,13 +2735,6 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
       ...buildGoalAwareWorkoutSuggestion(progressionInput, evaluation),
     };
     suggestion.exerciseName = resolvedExerciseName;
-
-    if (fatigue.deloadSuggested) {
-      suggestion.recommendation = "Hold Progression";
-      suggestion.reason = "Fatigue trend detected. Avoid forcing load increases today.";
-      suggestion.nextGoalText = "Use a lighter session or reduce volume until performance rebounds.";
-      suggestion.confidenceScore = Math.min(95, suggestion.confidenceScore + 5);
-    }
 
     snapshot.suggestions.push(suggestion);
   }

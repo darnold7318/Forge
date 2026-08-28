@@ -189,7 +189,7 @@ function MuscleRow({ muscle, onSave, onReset }: { muscle: EffectiveMuscleSetting
         <p className="text-[10px] text-muted-foreground">
           Learned range: {muscle.learnedRange.productiveLow != null && muscle.learnedRange.productiveHigh != null
             ? `${muscle.learnedRange.productiveLow.toFixed(1)}-${muscle.learnedRange.productiveHigh.toFixed(1)} (${muscle.learnedRange.confidence}% confidence)`
-            : `Learning (${muscle.learnedRange.validWeekCount}/4 valid weeks)`}
+            : `${Math.max(0, 4 - muscle.learnedRange.validWeekCount)} more comparable training week${Math.max(0, 4 - muscle.learnedRange.validWeekCount) === 1 ? "" : "s"} needed`}
         </p>
       </div>
       <label className="text-[10px] text-muted-foreground">Half-life (h){field("recoveryHalfLifeHours", 18, 120)}</label>

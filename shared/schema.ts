@@ -630,7 +630,7 @@ export const userMuscleLearnedRanges = sqliteTable(
     productiveHigh: real("productive_high"),
     confidence: integer("confidence").notNull().default(0),
     validWeekCount: integer("valid_week_count").notNull().default(0),
-    explanation: text("explanation").notNull().default("Forge is still learning this range."),
+    explanation: text("explanation").notNull().default("4 more comparable training weeks needed before Coach can estimate this range."),
   },
   (table) => [uniqueIndex("idx_user_muscle_learned_range_unique").on(table.userId, table.muscleGroupId)],
 );

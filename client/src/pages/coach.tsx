@@ -73,6 +73,7 @@ const RECOVERY_STATUS_STYLE: Record<string, string> = {
 export default function Coach() {
   const [templateId, setTemplateId] = useState<string>("all");
   const { activeUserId, activeUser } = useActiveUser();
+  const isBeginner = activeUser?.trainingLevel === "beginner";
   const showIntermediate = activeUser?.trainingLevel !== "beginner";
   const showAdvanced = activeUser?.trainingLevel === "advanced";
 
@@ -86,7 +87,7 @@ export default function Coach() {
   });
 
   const { data: suggestions, isLoading: suggestionsLoading } = useQuery<Suggestion[]>({
-    queryKey: ["/api/coach/suggestions", templateId, activeUserId],
+    queryKey: ["/api/coach/suggestions", templateId, activeUserId, activeUser?.trainingGoal, activeUser?.trainingLevel],
     queryFn: async () => {
       const url =
         templateId === "all"
@@ -218,28 +219,55 @@ export default function Coach() {
                     </Badge>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                    <span>Last: {s.lastPerformance}</span>
-                    <span className="font-mono tabular-nums">Goal: {s.suggestedGoal}</span>
-                  </div>
-
-                  <p className="text-sm" data-testid={`text-suggestion-reason-${s.exerciseId}`}>
-                    {s.reason}
-                  </p>
-                  {showIntermediate && s.evidenceText && (
-                    <p className="text-xs text-muted-foreground">{s.evidenceText}</p>
+                  {isBeginner ? (
+                    <div className="space-y-2 rounded-md bg-muted/30 p-3">
+                      <div>
+                        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Next session</p>
+                        <p className="font-medium" data-testid={`text-beginner-target-${s.exerciseId}`}>{s.suggestedGoal}</p>
+                      </div>
+                      <p className="text-sm" data-testid={`text-suggestion-reason-${s.exerciseId}`}>
+                        {s.plainLanguageReason ?? s.reason}
+                      </p>
+                      {s.effortGuidance && <p className="text-sm text-muted-foreground">{s.effortGuidance}</p>}
+                      {s.learningText && (
+                        <p className="text-xs font-medium text-primary" data-testid={`text-learning-sessions-${s.exerciseId}`}>
+                          {s.learningText}
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                        <span>Last: {s.lastPerformance}</span>
+                        <span className="font-mono tabular-nums">Goal: {s.suggestedGoal}</span>
+                      </div>
+                      <p className="text-sm" data-testid={`text-suggestion-reason-${s.exerciseId}`}>
+                        {s.reason}
+                      </p>
+                      {s.evidenceText && <p className="text-xs text-muted-foreground">{s.evidenceText}</p>}
+                      {s.nextGoalText && <p className="text-xs text-muted-foreground italic">{s.nextGoalText}</p>}
+                    </>
                   )}
-                  {s.nextGoalText && (
-                    <p className="text-xs text-muted-foreground italic">{s.nextGoalText}</p>
+                  {s.restGuidance && <p className="text-xs text-muted-foreground">{s.restGuidance}</p>}
+                  {s.templateAdjustmentNote && (
+                    <p className="text-xs text-muted-foreground" data-testid={`text-template-adjustment-${s.exerciseId}`}>
+                      {s.templateAdjustmentNote}
+                    </p>
                   )}
 
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs border-t pt-2">
-                    <span className="flex items-center gap-1">
+                    {!isBeginner && <span className="flex items-center gap-1">
                       <ShieldAlert className="h-3.5 w-3.5" />
                       <span className={RECOVERY_STATUS_STYLE[s.recoveryStatus] ?? "text-muted-foreground"}>
                         {s.recoveryText}
                       </span>
-                    </span>
+                    </span>}
+                    {isBeginner && s.recoveryStatus !== "Recovered" && (
+                      <span className="flex items-center gap-1 text-volume-high">
+                        <ShieldAlert className="h-3.5 w-3.5" />
+                        Recovery is limited today
+                      </span>
+                    )}
                     {showIntermediate && <span className="flex items-center gap-1">
                       <Gauge className="h-3.5 w-3.5" />
                       Readiness {s.readinessScore}/100 - {s.readinessStatus}
@@ -259,7 +287,9 @@ export default function Coach() {
                         {learnedRangeLabel}: {primaryContext.learnedLow.toFixed(1)}-{primaryContext.learnedHigh.toFixed(1)} sets ({primaryContext.learnedConfidence ?? 0}% confidence)
                       </p>
                     ) : (
-                      <p className="text-xs text-muted-foreground">{learnedRangeLabel}: Learning ({primaryContext.learnedValidWeekCount ?? 0}/4 valid weeks)</p>
+                      <p className="text-xs text-muted-foreground">
+                        {learnedRangeLabel}: {Math.max(0, 4 - (primaryContext.learnedValidWeekCount ?? 0))} more comparable training week{Math.max(0, 4 - (primaryContext.learnedValidWeekCount ?? 0)) === 1 ? "" : "s"} needed
+                      </p>
                     ))}
                     </div>
                   )}
@@ -290,7 +320,7 @@ export default function Coach() {
                       )}
                     </div>
                   )}
-                  {s.readinessGuidance && (
+                  {showIntermediate && s.readinessGuidance && (
                     <p className="text-xs text-muted-foreground" data-testid={`text-readiness-guidance-${s.exerciseId}`}>
                       {s.readinessGuidance}
                     </p>

@@ -32,9 +32,10 @@ function recommendationStyle(rec: string) {
 }
 
 export default function Dashboard() {
-  const { activeUserId } = useActiveUser();
+  const { activeUserId, activeUser } = useActiveUser();
+  const isBeginner = activeUser?.trainingLevel === "beginner";
   const { data: snapshot, isLoading } = useQuery<DashboardSnapshot>({
-    queryKey: ["/api/dashboard", activeUserId],
+    queryKey: ["/api/dashboard", activeUserId, activeUser?.trainingGoal, activeUser?.trainingLevel],
     queryFn: async () => {
       const res = await apiRequest("GET", "/api/dashboard");
       return res.json();
@@ -256,7 +257,11 @@ export default function Dashboard() {
                       </Badge>
                     </div>
                     <p className="text-sm text-muted-foreground">{s.suggestedGoal}</p>
-                    <p className="text-xs text-muted-foreground">{s.reason}</p>
+                    <p className="text-xs text-muted-foreground">{isBeginner ? s.plainLanguageReason ?? s.reason : s.reason}</p>
+                    {isBeginner && s.effortGuidance && <p className="text-xs text-muted-foreground">{s.effortGuidance}</p>}
+                    {isBeginner && s.restGuidance && <p className="text-xs text-muted-foreground">{s.restGuidance}</p>}
+                    {s.learningText && <p className="text-xs font-medium text-primary">{s.learningText}</p>}
+                    {s.templateAdjustmentNote && <p className="text-xs text-muted-foreground">{s.templateAdjustmentNote}</p>}
                   </div>
                 ))}
               </CardContent>

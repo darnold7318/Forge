@@ -1,7 +1,9 @@
 import { storage } from "./storage";
 import {
   trainingGoalIds,
+  trainingLevelIds,
   type TrainingGoalId,
+  type TrainingLevelId,
   type MuscleGroupName,
   type CoachSettings,
   type RecoverySettings,
@@ -9,8 +11,11 @@ import {
 } from "@shared/schema";
 import {
   RECOVERY_HALF_LIFE_HOURS,
+  applyExperienceCoachSettings,
   resolveGoalCoachingProfile,
+  resolveExperienceCoachingProfile,
   type GoalCoachingProfile,
+  type ExperienceCoachingProfile,
   type RecoveryModelOverrides,
 } from "@shared/coaching";
 
@@ -33,6 +38,8 @@ export interface EffectiveMuscleCoachSettings {
 export interface EffectiveCoachContext {
   goal: TrainingGoalId;
   profile: GoalCoachingProfile;
+  experience: TrainingLevelId;
+  experienceProfile: ExperienceCoachingProfile;
   settings: CoachSettings;
   recoverySettings: RecoverySettings;
   muscles: EffectiveMuscleCoachSettings[];
@@ -53,6 +60,9 @@ export async function getEffectiveCoachContext(userId: number): Promise<Effectiv
   ]);
   const rawGoal = user?.trainingGoal as TrainingGoalId | undefined;
   const goal = rawGoal && trainingGoalIds.includes(rawGoal) ? rawGoal : "hypertrophy";
+  const rawExperience = user?.trainingLevel as TrainingLevelId | undefined;
+  const experience = rawExperience && trainingLevelIds.includes(rawExperience) ? rawExperience : "beginner";
+  const effectiveSettings = applyExperienceCoachSettings(settings, experience);
   const overrideByMuscle = new Map(muscleOverrides.map((item) => [item.muscleGroupId, item]));
   const learnedByMuscle = new Map(learnedRanges.map((item) => [item.muscleGroupId, item]));
   const muscles = muscleGroups.map((muscle) => {
@@ -81,7 +91,7 @@ export async function getEffectiveCoachContext(userId: number): Promise<Effectiv
         productiveHigh: null,
         confidence: 0,
         validWeekCount: 0,
-        explanation: "Forge is still learning this range.",
+        explanation: "4 more comparable training weeks needed before Coach can estimate this range.",
       },
       forgeDefaults: {
         recoveryHalfLifeHours: RECOVERY_HALF_LIFE_HOURS[name],
@@ -92,15 +102,17 @@ export async function getEffectiveCoachContext(userId: number): Promise<Effectiv
     };
   });
   const exerciseFatigueCosts = Object.fromEntries(exerciseOverrides.map((item) => [item.exerciseId, item.fatigueCost]));
-  const sensitivityMultiplier = settings.failureFatigueSensitivity === "low"
+  const sensitivityMultiplier = effectiveSettings.failureFatigueSensitivity === "low"
     ? 0.75
-    : settings.failureFatigueSensitivity === "high"
+    : effectiveSettings.failureFatigueSensitivity === "high"
       ? 1.25
       : 1;
   return {
     goal,
     profile: resolveGoalCoachingProfile(goal),
-    settings,
+    experience,
+    experienceProfile: resolveExperienceCoachingProfile(experience),
+    settings: effectiveSettings,
     recoverySettings,
     muscles,
     muscleById: new Map(muscles.map((item) => [item.muscleGroupId, item])),

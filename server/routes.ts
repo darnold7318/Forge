@@ -1187,6 +1187,8 @@ export async function registerRoutes(
     res.json({
       goal: context.goal,
       profile: context.profile,
+      experience: context.experience,
+      experienceProfile: context.experienceProfile,
       settings: context.settings,
       muscles: context.muscles,
       muscleOverrides,
@@ -1327,6 +1329,7 @@ export async function registerRoutes(
       targetDurationMinSeconds: number | null;
       targetDurationMaxSeconds: number | null;
       targetRir: number;
+      restSeconds: number;
     }>();
 
     if (templateId) {
@@ -1344,6 +1347,7 @@ export async function registerRoutes(
             targetDurationMinSeconds: te.targetDurationMinSeconds,
             targetDurationMaxSeconds: te.targetDurationMaxSeconds,
             targetRir: te.targetRir,
+            restSeconds: te.restSeconds,
           });
         }
       }
@@ -1404,6 +1408,7 @@ export async function registerRoutes(
       });
       const progressionInput = {
         goal: coachContext.goal,
+        experience: coachContext.experience,
         trackingMode: exercise.trackingMode === "duration" ? "duration" as const : "reps" as const,
         prescription,
         previous,
@@ -1565,6 +1570,7 @@ export async function registerRoutes(
       recoveryOverrides: coachContext.recoveryOverrides,
       coachSettings: coachContext.settings,
       trainingGoal: coachContext.goal,
+      trainingExperience: coachContext.experience,
       schedule: scheduleForDashboard,
       zone: zoneOf(req),
     });

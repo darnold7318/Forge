@@ -278,7 +278,7 @@ function ensureTables() {
       productive_high REAL,
       confidence INTEGER NOT NULL DEFAULT 0,
       valid_week_count INTEGER NOT NULL DEFAULT 0,
-      explanation TEXT NOT NULL DEFAULT 'Forge is still learning this range.'
+      explanation TEXT NOT NULL DEFAULT '4 more comparable training weeks needed before Coach can estimate this range.'
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_user_muscle_learned_range_unique
@@ -496,7 +496,7 @@ function ensureTables() {
   );
   for (const [column, ddl] of [
     ["valid_week_count", "ALTER TABLE user_muscle_learned_ranges ADD COLUMN valid_week_count INTEGER NOT NULL DEFAULT 0"],
-    ["explanation", "ALTER TABLE user_muscle_learned_ranges ADD COLUMN explanation TEXT NOT NULL DEFAULT 'Forge is still learning this range.'"],
+    ["explanation", "ALTER TABLE user_muscle_learned_ranges ADD COLUMN explanation TEXT NOT NULL DEFAULT '4 more comparable training weeks needed before Coach can estimate this range.'"],
   ] as const) {
     if (!learnedRangeColumns.has(column)) {
       try {

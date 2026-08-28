@@ -57,7 +57,13 @@ function PercentSlider({
   );
 }
 
-export function RecoverySettingsEditor({ onSaved }: { onSaved?: () => void }) {
+export function RecoverySettingsEditor({
+  onSaved,
+  showMuscleOverrides = true,
+}: {
+  onSaved?: () => void;
+  showMuscleOverrides?: boolean;
+}) {
   const { activeUserId } = useActiveUser();
   const { toast } = useToast();
   const [draft, setDraft] = useState<RecoverySettings>(() => cloneSettings(DEFAULT_RECOVERY_SETTINGS));
@@ -139,7 +145,7 @@ export function RecoverySettingsEditor({ onSaved }: { onSaved?: () => void }) {
         />
       </div>
 
-      <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen} className="rounded-md border">
+      {showMuscleOverrides && <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen} className="rounded-md border">
         <CollapsibleTrigger asChild>
           <Button type="button" variant="ghost" className="h-auto w-full justify-between gap-3 p-3 text-left" data-testid="button-toggle-muscle-overrides">
             <span>
@@ -221,7 +227,7 @@ export function RecoverySettingsEditor({ onSaved }: { onSaved?: () => void }) {
           );
         })}
         </CollapsibleContent>
-      </Collapsible>
+      </Collapsible>}
 
       <p className="text-xs text-muted-foreground">
         These controls tune Forge's estimated fatigue model. They do not modify workout history or measure biological recovery.
