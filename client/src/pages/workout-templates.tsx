@@ -18,7 +18,7 @@ import {
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useActiveUser } from "@/lib/user-context";
 import { useToast } from "@/hooks/use-toast";
-import type { WorkoutComposition } from "@shared/coaching";
+import { resolveWorkingSetCount, type WorkoutComposition } from "@shared/coaching";
 
 interface WorkoutTemplateExercise {
   id: number;
@@ -31,6 +31,9 @@ interface WorkoutTemplateExercise {
   targetRir: number;
   failureTarget: string;
   restSeconds: number;
+  warmupSets: number;
+  topSets: number;
+  backoffSets: number;
 }
 
 interface WorkoutTemplateFull {
@@ -133,7 +136,8 @@ function TemplateCard({
               </div>
               <div className="text-right text-xs text-muted-foreground shrink-0">
                 <p className="font-mono tabular-nums">
-                  {te.targetSets} × {te.targetRepsMin}-{te.targetRepsMax}
+                  {te.warmupSets > 0 ? `${te.warmupSets} warm-up + ` : ""}
+                  {resolveWorkingSetCount(te)} × {te.targetRepsMin}-{te.targetRepsMax}
                 </p>
                 <p>{te.targetRir} RIR · {te.restSeconds}s rest</p>
               </div>

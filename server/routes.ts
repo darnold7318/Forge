@@ -91,6 +91,7 @@ import {
   evaluateGoalAwareProgressionV2,
   buildGoalAwareWorkoutSuggestion,
   learnPersonalVolumeRanges,
+  resolveWorkingSetCount,
   COACH_MUSCLE_CONTEXT_MIN_STIMULUS,
   RECOVERY_HALF_LIFE_HOURS,
   type MuscleTrainingContext,
@@ -252,6 +253,7 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
         const exercise = exSets[0].exercise;
         const stimulus = stimulusMap.get(exerciseId) ?? [];
         const snapshot = snapshotMap.get(`${w.id}:${exerciseId}`);
+        const historySets = exSets.sort((a, b) => a.setNumber - b.setNumber).map(toHistorySet);
         return {
           exerciseId,
           exerciseOrder: idx,
@@ -263,14 +265,15 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
           failureTarget: snapshot?.failureTarget ?? "Never",
           prescriptionSnapshotAvailable: snapshot != null,
           prescription: snapshot ? {
-            targetSets: snapshot.targetSets,
+            targetSets: resolveWorkingSetCount({ targetSets: snapshot.targetSets }, historySets),
             targetRepsMin: snapshot.targetRepsMin,
             targetRepsMax: snapshot.targetRepsMax,
             targetDurationMinSeconds: snapshot.targetDurationMinSeconds,
             targetDurationMaxSeconds: snapshot.targetDurationMaxSeconds,
             targetRir: snapshot.targetRir,
+            restSeconds: snapshot.restSeconds,
           } : null,
-          sets: exSets.sort((a, b) => a.setNumber - b.setNumber).map(toHistorySet),
+          sets: historySets,
         };
       },
     );
@@ -717,11 +720,12 @@ export async function registerRoutes(
 
     const rows = template.exercises.map((te) => {
       const exercise = exerciseMap.get(te.exerciseId);
+      const workingSets = resolveWorkingSetCount(te);
       const primaryMuscleName = exercise
         ? muscleGroupDisplayNames[nameById.get(exercise.primaryMuscleGroupId) as MuscleGroupName] ?? ""
         : "";
       return {
-        targetSets: te.targetSets,
+        targetSets: workingSets,
         restSeconds: te.restSeconds,
         isCompound: exercise?.isCompound ?? false,
         exerciseRole: te.exerciseRole,
@@ -732,7 +736,7 @@ export async function registerRoutes(
           const muscle = coachContext.muscleById.get(stimulus.muscleGroupId);
           return {
             muscleName: muscle?.displayName ?? String(stimulus.muscleGroupId),
-            effectiveSets: te.targetSets * stimulus.stimulusRatio,
+            effectiveSets: workingSets * stimulus.stimulusRatio,
             mrv: muscle?.mrv,
           };
         }),
@@ -1319,8 +1323,12 @@ export async function registerRoutes(
         isWarmup: set.isWarmup,
       })));
 
-    // Optional filter by template
+    // Optional filter by template. In the all-trained view, resolve each
+    // exercise from the template used for its most recent workout so selecting
+    // that template cannot change the displayed prescription.
     const templateId = req.query.templateId ? Number(req.query.templateId) : undefined;
+    const allTemplates = await storage.getAllWorkoutTemplatesWithExercises(userId);
+    const templateById = new Map(allTemplates.map((template) => [template.id, template]));
     let targetExercises = exercisesList;
     let prescriptionByExercise = new Map<number, {
       targetSets: number;
@@ -1332,6 +1340,21 @@ export async function registerRoutes(
       restSeconds: number;
     }>();
 
+    const rememberTemplatePrescription = (
+      te: (typeof allTemplates)[number]["exercises"][number],
+      recentExercise?: HistoryExerciseInput,
+    ) => {
+      prescriptionByExercise.set(te.exerciseId, {
+        targetSets: resolveWorkingSetCount(te, recentExercise?.sets),
+        targetRepsMin: te.targetRepsMin,
+        targetRepsMax: te.targetRepsMax,
+        targetDurationMinSeconds: te.targetDurationMinSeconds,
+        targetDurationMaxSeconds: te.targetDurationMaxSeconds,
+        targetRir: te.targetRir,
+        restSeconds: te.restSeconds,
+      });
+    };
+
     if (templateId) {
       const template = await storage.getWorkoutTemplateWithExercises(templateId);
       if (template && template.userId !== userId) return res.status(403).json({ message: "You do not own this template" });
@@ -1340,14 +1363,40 @@ export async function registerRoutes(
           .map((te) => exerciseMap.get(te.exerciseId))
           .filter((e): e is (typeof exercisesList)[number] => !!e);
         for (const te of template.exercises) {
-          prescriptionByExercise.set(te.exerciseId, {
-            targetSets: te.targetSets,
-            targetRepsMin: te.targetRepsMin,
-            targetRepsMax: te.targetRepsMax,
-            targetDurationMinSeconds: te.targetDurationMinSeconds,
-            targetDurationMaxSeconds: te.targetDurationMaxSeconds,
-            targetRir: te.targetRir,
-            restSeconds: te.restSeconds,
+          const recentExercise = history
+            .find((session) => session.workoutTemplateId === template.id && session.exercises.some((row) => row.exerciseId === te.exerciseId))
+            ?.exercises.find((row) => row.exerciseId === te.exerciseId);
+          rememberTemplatePrescription(te, recentExercise);
+        }
+      }
+    } else {
+      for (const session of history) {
+        if (session.workoutTemplateId == null) continue;
+        const template = templateById.get(session.workoutTemplateId);
+        if (!template) continue;
+        for (const historyExercise of session.exercises) {
+          if (prescriptionByExercise.has(historyExercise.exerciseId)) continue;
+          const te = template.exercises.find((row) => row.exerciseId === historyExercise.exerciseId);
+          if (te) rememberTemplatePrescription(te, historyExercise);
+        }
+      }
+
+      // A deleted template can no longer supply its current prescription, but
+      // its immutable workout snapshot is still more accurate than a generic
+      // 3 x 8-12 fallback.
+      for (const session of history) {
+        for (const historyExercise of session.exercises) {
+          if (prescriptionByExercise.has(historyExercise.exerciseId)) continue;
+          const snapshot = historyExercise.prescriptionSnapshotAvailable ? historyExercise.prescription : null;
+          if (!snapshot) continue;
+          prescriptionByExercise.set(historyExercise.exerciseId, {
+            targetSets: snapshot.targetSets,
+            targetRepsMin: snapshot.targetRepsMin,
+            targetRepsMax: snapshot.targetRepsMax,
+            targetDurationMinSeconds: snapshot.targetDurationMinSeconds ?? null,
+            targetDurationMaxSeconds: snapshot.targetDurationMaxSeconds ?? null,
+            targetRir: snapshot.targetRir,
+            restSeconds: snapshot.restSeconds ?? 90,
           });
         }
       }

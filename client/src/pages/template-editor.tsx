@@ -52,6 +52,7 @@ import {
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { exerciseRoles, failureTargets, type ExerciseRole, type FailureTarget, type TrackingMode } from "@shared/schema";
+import { resolveWorkingSetCount } from "@shared/coaching";
 
 interface WorkoutTemplateExercise {
   id: number;
@@ -189,15 +190,29 @@ function ExerciseRow({
               </Select>
             </div>
             <div className="space-y-1">
-              <Label className="text-[11px] text-muted-foreground">Sets</Label>
+              <Label className="text-[11px] text-muted-foreground">Working sets</Label>
               <Input
+                key={`working-sets-${resolveWorkingSetCount(te)}`}
                 type="number"
                 min={1}
                 className="h-8 text-xs"
-                defaultValue={te.targetSets}
+                defaultValue={resolveWorkingSetCount(te)}
+                disabled={te.topSets + te.backoffSets > 0}
                 onChange={(e) => onUpdate({ targetSets: Number(e.target.value) || 1 })}
                 data-testid={`input-target-sets-${te.id}`}
               />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-[11px] text-muted-foreground">Warm-up sets</Label>
+              <Input
+                type="number"
+                min={0}
+                className="h-8 text-xs"
+                defaultValue={te.warmupSets}
+                onChange={(e) => onUpdate({ warmupSets: Number(e.target.value) || 0 })}
+                data-testid={`input-warmup-sets-${te.id}`}
+              />
+              <p className="text-[10px] text-muted-foreground">Added before working sets</p>
             </div>
             <div className="space-y-1">
               <Label className="text-[11px] text-muted-foreground">{isDuration ? "Hold min (sec)" : "Reps min"}</Label>
@@ -274,18 +289,7 @@ function ExerciseRow({
           </div>
 
           {expanded && (
-            <div className="grid grid-cols-3 gap-2 pt-2 border-t">
-              <div className="space-y-1">
-                <Label className="text-[11px] text-muted-foreground">Warmup sets</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  className="h-8 text-xs"
-                  defaultValue={te.warmupSets}
-                  onChange={(e) => onUpdate({ warmupSets: Number(e.target.value) || 0 })}
-                  data-testid={`input-warmup-sets-${te.id}`}
-                />
-              </div>
+            <div className="grid grid-cols-2 gap-2 pt-2 border-t">
               <div className="space-y-1">
                 <Label className="text-[11px] text-muted-foreground">Top sets</Label>
                 <Input
@@ -293,7 +297,11 @@ function ExerciseRow({
                   min={0}
                   className="h-8 text-xs"
                   defaultValue={te.topSets}
-                  onChange={(e) => onUpdate({ topSets: Number(e.target.value) || 0 })}
+                  onChange={(e) => {
+                    const topSets = Number(e.target.value) || 0;
+                    const structuredSets = topSets + te.backoffSets;
+                    onUpdate({ topSets, targetSets: structuredSets > 0 ? structuredSets : te.targetSets });
+                  }}
                   data-testid={`input-top-sets-${te.id}`}
                 />
               </div>
@@ -304,10 +312,17 @@ function ExerciseRow({
                   min={0}
                   className="h-8 text-xs"
                   defaultValue={te.backoffSets}
-                  onChange={(e) => onUpdate({ backoffSets: Number(e.target.value) || 0 })}
+                  onChange={(e) => {
+                    const backoffSets = Number(e.target.value) || 0;
+                    const structuredSets = te.topSets + backoffSets;
+                    onUpdate({ backoffSets, targetSets: structuredSets > 0 ? structuredSets : te.targetSets });
+                  }}
                   data-testid={`input-backoff-sets-${te.id}`}
                 />
               </div>
+              <p className="col-span-2 text-[11px] text-muted-foreground">
+                When top or back-off sets are used, their sum is the working-set target.
+              </p>
             </div>
           )}
         </div>

@@ -49,6 +49,7 @@ import type {
   Equipment,
 } from "@shared/schema";
 import { equipmentTypes } from "@shared/schema";
+import { resolveWorkingSetCount } from "@shared/coaching";
 
 type Exercise = ExerciseView;
 type MuscleGroupView = MuscleGroup & { displayName: string };
@@ -585,7 +586,7 @@ export default function LogWorkout() {
       // Working sets come from the explicit top+backoff breakdown when the
       // template specifies one; otherwise fall back to targetSets. Warm-up
       // sets are always additive on top of the working sets.
-      const workingSets = te.topSets + te.backoffSets > 0 ? te.topSets + te.backoffSets : te.targetSets;
+      const workingSets = resolveWorkingSetCount(te);
       const totalSets = Math.max(1, te.warmupSets + workingSets);
       const sets: DraftSet[] = [];
       for (let i = 0; i < totalSets; i++) {

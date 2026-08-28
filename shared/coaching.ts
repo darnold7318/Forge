@@ -60,6 +60,7 @@ export interface HistoryExerciseInput {
     targetDurationMinSeconds?: number | null;
     targetDurationMaxSeconds?: number | null;
     targetRir: number;
+    restSeconds?: number;
   } | null;
   prescriptionSnapshotAvailable?: boolean;
   sets: HistorySetInput[];
@@ -502,6 +503,38 @@ export interface CoachPrescriptionInput extends ProgressionPrescription {
   targetDurationMinSeconds?: number | null;
   targetDurationMaxSeconds?: number | null;
   restSeconds?: number;
+}
+
+/**
+ * Templates may describe working sets either as one total or as an explicit
+ * top-set/back-off split. The workout logger treats the explicit split as the
+ * source of truth, so every coaching surface must do the same.
+ */
+export function resolveWorkingSetCount(prescription: {
+  targetSets: number;
+  warmupSets?: number | null;
+  topSets?: number | null;
+  backoffSets?: number | null;
+}, observedSets?: Array<{
+  setType?: string;
+  isWarmup?: boolean;
+  completed?: boolean;
+}>): number {
+  const structuredSets = Math.max(0, prescription.topSets ?? 0) + Math.max(0, prescription.backoffSets ?? 0);
+  if (structuredSets > 0) return Math.max(1, structuredSets);
+
+  const configuredSets = Math.max(1, prescription.targetSets);
+  if ((prescription.warmupSets ?? 0) > 0 || !observedSets?.length) return configuredSets;
+
+  // Older templates were often padded with extra "working" rows that users
+  // manually marked as warm-ups. If all configured rows were logged and at
+  // least one was marked warm-up, the remaining rows are the true work target.
+  const completedSets = observedSets.filter((set) => set.completed !== false);
+  const warmupCount = completedSets.filter((set) => set.isWarmup === true || set.setType === "Warmup").length;
+  const workingCount = completedSets.length - warmupCount;
+  if (warmupCount > 0 && workingCount > 0 && completedSets.length === configuredSets) return workingCount;
+
+  return configuredSets;
 }
 
 export interface ResolvedCoachPrescription extends ProgressionPrescription {
@@ -1095,7 +1128,10 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
     reason = `${reason} ${secondaryLimit.reason}; keep the compound work, but do not add direct ${secondaryLimit.context.displayName} volume.`;
   }
   const severeFatigue = fatigue.deloadSuggested || fatigue.riskScore >= 70 || recovery.fatiguePercent >= 75;
-  const elevatedFatigue = !severeFatigue && (fatigue.riskScore >= 55 || recovery.fatiguePercent >= 55);
+  // A global Watch Trend is advisory. Only the exercise's primary-muscle
+  // recovery should place an otherwise productive exercise on hold. A severe
+  // global fatigue signal still applies across the workout above.
+  const elevatedFatigue = !severeFatigue && recovery.fatiguePercent >= 55;
   if (severeFatigue) {
     recommendation = "Reduce Or Delay";
     suggestedWeight = topWeight > 0 ? Math.round(topWeight * 0.9 * 2) / 2 : 0;
@@ -2457,7 +2493,7 @@ function resolveRecentAchievements(history: HistorySessionInput[], zone: string)
 function estimateDurationMinutes(exercises: DashboardTemplateInput["exercises"]): number {
   if (exercises.length === 0) return 0;
   const totalSets = exercises.reduce(
-    (sum, e) => sum + Math.max(1, e.targetSets + (e.warmupSets ?? 0) + (e.topSets ?? 0) + (e.backoffSets ?? 0)),
+    (sum, e) => sum + (e.warmupSets ?? 0) + resolveWorkingSetCount(e),
     0,
   );
   const averageRestSeconds =

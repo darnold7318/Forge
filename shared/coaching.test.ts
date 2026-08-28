@@ -19,6 +19,7 @@ import {
   resolveGoalCoachingProfile,
   resolveGoalExperiencePrescription,
   resolveProgressionStyle,
+  resolveWorkingSetCount,
   getPersonalRecords,
   type HistorySessionInput,
   type DashboardTemplateInput,
@@ -537,6 +538,18 @@ test("goal and experience resolve different effective training methods without c
   assert.deepEqual(template, { targetSets: 5, targetRepsMin: 8, targetRepsMax: 12, targetRir: 1, restSeconds: 60 });
 });
 
+test("working-set targets use explicit set structure and repair legacy warm-up padding", () => {
+  assert.equal(resolveWorkingSetCount({ targetSets: 6, topSets: 1, backoffSets: 2 }), 3);
+  assert.equal(resolveWorkingSetCount({ targetSets: 3, warmupSets: 3 }), 3);
+  assert.equal(resolveWorkingSetCount(
+    { targetSets: 6 },
+    [
+      ...Array.from({ length: 3 }, () => ({ setType: "Warmup" })),
+      ...Array.from({ length: 3 }, () => ({ setType: "Working" })),
+    ],
+  ), 3);
+});
+
 test("beginner and intermediate policies do not inherit hidden advanced overrides", () => {
   const customized = {
     ...DEFAULT_COACH_SETTINGS,
@@ -643,6 +656,28 @@ test("fatigue and recovery override every goal-specific progression", () => {
   assert.equal(result.setRecommendation, "Reduce Set");
   assert.equal(result.prescribedSets, 2);
   assert.ok(result.suggestedWeight < 75);
+});
+
+test("a global watch trend does not freeze a recovered improving exercise", () => {
+  const history = historyWithRirs([[10, 10, 10], [11, 11, 11], [12, 12, 12]], [2, 2, 2]);
+  const settings = { ...DEFAULT_COACH_SETTINGS, minComparableExposures: 2 };
+  const trend = evaluateExerciseTrend(history, 10, "hypertrophy", "reps", settings);
+  const result = evaluateGoalAwareProgressionV2({
+    goal: "hypertrophy",
+    experience: "intermediate",
+    trackingMode: "reps",
+    prescription: { targetSets: 3, targetRepsMin: 8, targetRepsMax: 12, targetRir: 2 },
+    previous: getPreviousExercisePerformance(history, 10, "Incline Press"),
+    trend,
+    settings,
+    recovery: { muscle: "UpperChest", displayName: "Upper Chest", fatiguePercent: 10, recoveryPercent: 90, lastTrainedAt: null, hoursSinceLastTrained: 0, status: "Recovered", summary: "" },
+    fatigue: { status: "Watch Trend", summary: "", riskScore: 60, deloadSuggested: false },
+    muscleContexts: [muscleContext({ recoveryPercent: 90, fatiguePercent: 10 })],
+  });
+
+  assert.equal(result.recommendation, "Increase Weight");
+  assert.equal(result.prescribedSets, 3);
+  assert.doesNotMatch(result.reason, /fatigue is elevated/i);
 });
 
 test("duration progression compares the per-hold average rather than total session time", () => {

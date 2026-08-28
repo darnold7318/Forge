@@ -68,6 +68,7 @@ import {
   buildStarterTemplate,
   monthBounds,
   enumerateDates,
+  resolveWorkingSetCount,
   type ScheduleCatalogExercise,
   type MuscleGroupLookup,
 } from "@shared/coaching";
@@ -1505,7 +1506,7 @@ export class DatabaseStorage implements IStorage {
             workoutId: created.id,
             exerciseId: template.exerciseId,
             exerciseRole: template.exerciseRole,
-            targetSets: template.targetSets,
+            targetSets: resolveWorkingSetCount(template),
             targetRepsMin: template.targetRepsMin,
             targetRepsMax: template.targetRepsMax,
             targetDurationMinSeconds: template.targetDurationMinSeconds,
