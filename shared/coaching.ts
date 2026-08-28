@@ -21,6 +21,7 @@ import {
   type TrainingGoalId,
   type TrainingLevelId,
   type CoachSettings,
+  type EquipmentWeightSettings,
 } from "./schema";
 import { civilDateInZone } from "./timezone";
 
@@ -349,6 +350,62 @@ export interface GoalCoachingProfile {
   };
   usesHypertrophyVolume: boolean;
   requiresPrimaryCompound: boolean;
+}
+
+function roundWeight(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+export function nextAvailableWeight(
+  currentWeight: number,
+  settings: EquipmentWeightSettings,
+): number | null {
+  const { minWeight, maxWeight, weightIncrement } = settings;
+  if (![currentWeight, minWeight, maxWeight, weightIncrement].every(Number.isFinite) || weightIncrement <= 0) return null;
+  if (currentWeight < minWeight) return minWeight;
+  const stepsAboveMin = Math.floor(((currentWeight - minWeight) / weightIncrement) + 1e-9) + 1;
+  const candidate = roundWeight(minWeight + stepsAboveMin * weightIncrement);
+  return candidate <= maxWeight + 1e-9 ? Math.min(candidate, maxWeight) : null;
+}
+
+export interface RepProjectionInput {
+  weight: number;
+  reps: number;
+  rir: number;
+  targetWeight: number;
+  targetReps: number;
+  targetRir?: number;
+}
+
+export interface RepProjection {
+  estimatedOneRepMax: number;
+  projectedRepsAtTargetWeight: number;
+  requiredRepsAtCurrentWeight: number;
+}
+
+/**
+ * RIR-aware Epley projection. This is an estimate, not a promise: exercise
+ * technique, fatigue, and unfamiliarity with a new load can change the result.
+ */
+export function calculateRepProjection(input: RepProjectionInput): RepProjection | null {
+  const { weight, reps, rir, targetWeight, targetReps } = input;
+  const targetRir = input.targetRir ?? rir;
+  if (![weight, reps, rir, targetWeight, targetReps, targetRir].every(Number.isFinite)) return null;
+  if (weight <= 0 || reps < 1 || rir < 0 || targetRir < 0 || targetWeight <= 0 || targetReps < 1) return null;
+
+  const estimatedOneRepMax = estimateOneRepMax(weight, reps + rir);
+  const projectedFailureReps = Math.max(0, 30 * (estimatedOneRepMax / targetWeight - 1));
+  const projectedRepsAtTargetWeight = Math.max(0, Math.floor(projectedFailureReps - targetRir + 1e-9));
+  const requiredFailureRepsAtCurrent = 30 * (
+    (targetWeight / weight) * (1 + (targetReps + targetRir) / 30) - 1
+  );
+  const requiredRepsAtCurrentWeight = Math.max(1, Math.ceil(requiredFailureRepsAtCurrent - targetRir - 1e-9));
+
+  return {
+    estimatedOneRepMax: Math.round(estimatedOneRepMax * 10) / 10,
+    projectedRepsAtTargetWeight,
+    requiredRepsAtCurrentWeight,
+  };
 }
 
 export interface ExperienceCoachingProfile {
@@ -971,6 +1028,7 @@ export interface GoalAwareProgressionV2Input {
   recovery: MuscleRecoveryState;
   fatigue: FatigueSignal;
   muscleContexts: MuscleTrainingContext[];
+  weightSettings?: EquipmentWeightSettings;
 }
 
 export type GoalAwareProgressionInput = GoalAwareProgressionV2Input;
@@ -1011,6 +1069,15 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
   const rirMin = Math.max(0, prescription.targetRir - 1);
   const rirMax = prescription.targetRir + 1;
   const topWeight = latest?.topWeight ?? 0;
+  const latestWorkingSets = completedSetsOf(previous.lastSets).filter((set) => set.setType === "Working");
+  const topLoadSets = latestWorkingSets.filter((set) => Math.abs(set.weight - topWeight) < 1e-9);
+  const topLoadAverageReps = topLoadSets.length
+    ? topLoadSets.reduce((sum, set) => sum + set.reps, 0) / topLoadSets.length
+    : 0;
+  const topLoadRirValues = topLoadSets.flatMap((set) => set.rir == null ? [] : [set.rir]);
+  const topLoadAverageRir = topLoadRirValues.length
+    ? topLoadRirValues.reduce((sum, value) => sum + value, 0) / topLoadRirValues.length
+    : null;
   const targetSets = prescription.targetSets;
   const topRangeReached = !!latest && latest.workingSetCount >= targetSets && latest.totalReps >= targetSets * prescription.targetRepsMax;
   const lowRangeMissed = !!latest && latest.workingSetCount > 0 && latest.totalReps / latest.workingSetCount < prescription.targetRepsMin;
@@ -1095,6 +1162,48 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
       : recommendation === "Add Reps"
         ? "Keep the load and add 1-2 total reps with consistent technique."
         : "Repeat the plan and prioritize consistent technique.";
+  }
+
+  if (trackingMode !== "duration" && topWeight > 0 && input.weightSettings) {
+    const equipmentNextWeight = nextAvailableWeight(topWeight, input.weightSettings);
+    if (recommendation === "Increase Weight") {
+      if (equipmentNextWeight == null) {
+        recommendation = "Maintain";
+        suggestedWeight = topWeight;
+        reason = `You reached the configured ${input.weightSettings.equipment} maximum of ${fmt1(input.weightSettings.maxWeight)} lb. ${reason}`;
+        nextGoalText = "Maintain the available load and progress repetitions, tempo, or exercise difficulty.";
+      } else {
+        const projection = calculateRepProjection({
+          weight: topWeight,
+          reps: Math.max(1, topLoadAverageReps || averageReps),
+          rir: topLoadAverageRir ?? latest?.averageRir ?? prescription.targetRir,
+          targetWeight: equipmentNextWeight,
+          targetReps: prescription.targetRepsMin,
+          targetRir: prescription.targetRir,
+        });
+        if (projection && projection.projectedRepsAtTargetWeight < prescription.targetRepsMin) {
+          recommendation = "Add Reps";
+          suggestedWeight = topWeight;
+          reason = `The next available ${input.weightSettings.equipment} load is ${fmt1(equipmentNextWeight)} lb, which is estimated below the ${prescription.targetRepsMin}-rep minimum right now.`;
+          nextGoalText = `Reach about ${projection.requiredRepsAtCurrentWeight} reps per working set at ${fmt1(topWeight)} lb and RIR ${prescription.targetRir} before the ${fmt1(equipmentNextWeight)} lb jump.`;
+        } else {
+          suggestedWeight = equipmentNextWeight;
+          nextGoalText = `Try the next available load, ${fmt1(equipmentNextWeight)} lb, for ${prescription.targetRepsMin}-${prescription.targetRepsMax} reps at RIR ${rirMin}-${rirMax}.`;
+        }
+      }
+    } else if (recommendation === "Add Reps" && equipmentNextWeight != null) {
+      const projection = calculateRepProjection({
+        weight: topWeight,
+        reps: Math.max(1, topLoadAverageReps || averageReps),
+        rir: topLoadAverageRir ?? latest?.averageRir ?? prescription.targetRir,
+        targetWeight: equipmentNextWeight,
+        targetReps: prescription.targetRepsMin,
+        targetRir: prescription.targetRir,
+      });
+      if (projection) {
+        nextGoalText = `Reach about ${projection.requiredRepsAtCurrentWeight} reps per working set at ${fmt1(topWeight)} lb and RIR ${prescription.targetRir} before the next available ${fmt1(equipmentNextWeight)} lb load.`;
+      }
+    }
   }
 
   let setRecommendation: GoalAwareProgressionEvaluation["setRecommendation"] = "Learning";

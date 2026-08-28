@@ -334,6 +334,42 @@ export const equipmentTypes = [
 ] as const;
 export type Equipment = (typeof equipmentTypes)[number];
 
+export const userEquipmentSettings = sqliteTable(
+  "user_equipment_settings",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    equipment: text("equipment").notNull(),
+    minWeight: real("min_weight").notNull().default(0),
+    maxWeight: real("max_weight").notNull().default(1000),
+    weightIncrement: real("weight_increment").notNull().default(5),
+  },
+  (table) => [uniqueIndex("idx_user_equipment_settings_unique").on(table.userId, table.equipment)],
+);
+
+export const equipmentWeightSettingsSchema = z.object({
+  equipment: z.enum(equipmentTypes),
+  minWeight: z.number().finite().min(0).max(10000),
+  maxWeight: z.number().finite().positive().max(10000),
+  weightIncrement: z.number().finite().positive().max(1000),
+}).superRefine((value, ctx) => {
+  if (value.maxWeight < value.minWeight) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Maximum weight must be at least the minimum weight" });
+  }
+});
+
+export type EquipmentWeightSettings = z.infer<typeof equipmentWeightSettingsSchema>;
+export type UserEquipmentSettingsRow = typeof userEquipmentSettings.$inferSelect;
+
+export const DEFAULT_EQUIPMENT_WEIGHT_SETTINGS: Record<Equipment, EquipmentWeightSettings> = Object.fromEntries(
+  equipmentTypes.map((equipment) => [equipment, {
+    equipment,
+    minWeight: 0,
+    maxWeight: equipment === "Dumbbell" || equipment === "Kettlebell" ? 200 : 1000,
+    weightIncrement: equipment === "Other" ? 2.5 : 5,
+  }]),
+) as Record<Equipment, EquipmentWeightSettings>;
+
 export const trackingModes = ["reps", "duration"] as const;
 export type TrackingMode = (typeof trackingModes)[number];
 
@@ -480,6 +516,7 @@ export interface ExerciseMuscleStimulusView {
 export type ExerciseView = ExerciseWithParsedMuscles & {
   stimulus: ExerciseMuscleStimulusView[];
   hasStimulusOverride: boolean;
+  equipmentSettings: EquipmentWeightSettings;
 };
 
 export function primaryStimulusMuscle<T extends { muscleGroupId: number; stimulusRatio: number }>(rows: T[]): T | null {

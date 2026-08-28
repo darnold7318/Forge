@@ -20,6 +20,8 @@ import {
   resolveGoalExperiencePrescription,
   resolveProgressionStyle,
   resolveWorkingSetCount,
+  nextAvailableWeight,
+  calculateRepProjection,
   getPersonalRecords,
   type HistorySessionInput,
   type DashboardTemplateInput,
@@ -548,6 +550,47 @@ test("working-set targets use explicit set structure and repair legacy warm-up p
       ...Array.from({ length: 3 }, () => ({ setType: "Working" })),
     ],
   ), 3);
+});
+
+test("equipment increments and rep projections model the next available load", () => {
+  const dumbbells = { equipment: "Dumbbell" as const, minWeight: 5, maxWeight: 60, weightIncrement: 5 };
+  assert.equal(nextAvailableWeight(55, dumbbells), 60);
+  assert.equal(nextAvailableWeight(60, dumbbells), null);
+  assert.equal(nextAvailableWeight(52, dumbbells), 55);
+
+  const projection = calculateRepProjection({
+    weight: 55,
+    reps: 10,
+    rir: 1,
+    targetWeight: 60,
+    targetReps: 6,
+    targetRir: 1,
+  });
+  assert.equal(projection?.projectedRepsAtTargetWeight, 6);
+  assert.equal(projection?.requiredRepsAtCurrentWeight, 10);
+});
+
+test("Coach builds reps when an equipment jump would fall below the prescribed range", () => {
+  const history = exposureHistory([[12, 12, 12], [12, 12, 12], [12, 12, 12]], 2);
+  const settings = { ...DEFAULT_COACH_SETTINGS, minComparableExposures: 2 };
+  const trend = evaluateExerciseTrend(history, 10, "hypertrophy", "reps", settings);
+  const result = evaluateGoalAwareProgressionV2({
+    goal: "hypertrophy",
+    experience: "intermediate",
+    trackingMode: "reps",
+    prescription: { targetSets: 3, targetRepsMin: 8, targetRepsMax: 12, targetRir: 2 },
+    previous: getPreviousExercisePerformance(history, 10, "Incline Press"),
+    trend,
+    settings,
+    recovery: { muscle: "UpperChest", displayName: "Upper Chest", fatiguePercent: 10, recoveryPercent: 90, lastTrainedAt: null, hoursSinceLastTrained: 0, status: "Recovered", summary: "" },
+    fatigue: { status: "Stable", summary: "", riskScore: 15, deloadSuggested: false },
+    muscleContexts: [muscleContext({ recoveryPercent: 90, fatiguePercent: 10 })],
+    weightSettings: { equipment: "Dumbbell", minWeight: 5, maxWeight: 200, weightIncrement: 10 },
+  });
+
+  assert.equal(result.recommendation, "Add Reps");
+  assert.equal(result.suggestedWeight, 75);
+  assert.match(result.nextGoalText, /before the 85 lb jump/i);
 });
 
 test("beginner and intermediate policies do not inherit hidden advanced overrides", () => {

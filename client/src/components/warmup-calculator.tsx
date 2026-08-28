@@ -17,6 +17,9 @@ interface WarmupCalculatorProps {
   exerciseName?: string;
   /** Pre-fill from the working set the user just entered, if any. */
   defaultWorkingWeight?: number;
+  weightIncrement?: number;
+  minWeight?: number;
+  maxWeight?: number;
 }
 
 interface WarmupStep {
@@ -53,6 +56,9 @@ export function WarmupCalculator({
   onOpenChange,
   exerciseName,
   defaultWorkingWeight,
+  weightIncrement = 5,
+  minWeight = 0,
+  maxWeight = 1000,
 }: WarmupCalculatorProps) {
   const [workingWeight, setWorkingWeight] = useState<string>(
     defaultWorkingWeight && defaultWorkingWeight > 0 ? String(defaultWorkingWeight) : "",
@@ -66,12 +72,12 @@ export function WarmupCalculator({
   const steps = useMemo(() => {
     if (!isValid) return [];
     const scheme = RAMP_SCHEMES[numSets];
-    const roundStep = 5;
+    const roundStep = weightIncrement;
     return scheme.map((s) => ({
       ...s,
-      weight: Math.max(roundStep, roundToStep((parsedWeight * s.pct) / 100, roundStep)),
+      weight: Math.min(maxWeight, Math.max(minWeight, roundToStep((parsedWeight * s.pct) / 100, roundStep))),
     }));
-  }, [isValid, numSets, parsedWeight, unitLabel]);
+  }, [isValid, maxWeight, minWeight, numSets, parsedWeight, unitLabel, weightIncrement]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

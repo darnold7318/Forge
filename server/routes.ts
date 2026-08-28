@@ -23,6 +23,7 @@ import {
   userCoachSettings as userCoachSettingsTable,
   userMuscleCoachOverrides as userMuscleCoachOverridesTable,
   userExerciseCoachOverrides as userExerciseCoachOverridesTable,
+  userEquipmentSettings as userEquipmentSettingsTable,
   workoutExerciseSnapshots as workoutExerciseSnapshotsTable,
   userMuscleLearnedRanges as userMuscleLearnedRangesTable,
 } from "@shared/schema";
@@ -52,6 +53,7 @@ import {
   coachSettingsSchema,
   muscleCoachOverrideSchema,
   exerciseCoachOverrideSchema,
+  equipmentWeightSettingsSchema,
   generateScheduleSchema,
   setWeeklyRestDaysSchema,
   setCustomWeeklyTemplateSchema,
@@ -66,6 +68,7 @@ import {
   type User,
   type InsertUser,
   type TrainingGoalId,
+  type Equipment,
 } from "@shared/schema";
 import {
   categorizeVolume,
@@ -195,11 +198,16 @@ async function buildMuscleGroupLookup(): Promise<{
 }
 
 async function buildExerciseViews(userId: number) {
-  const exercises = await storage.getExercisesWithStimulus(userId);
+  const [exercises, equipmentSettings] = await Promise.all([
+    storage.getExercisesWithStimulus(userId),
+    storage.getEquipmentSettings(userId),
+  ]);
+  const equipmentSettingsByType = new Map(equipmentSettings.map((setting) => [setting.equipment, setting]));
   const groups = await storage.getMuscleGroups();
   const groupById = new Map(groups.map((group) => [group.id, group]));
   return exercises.map((exercise) => ({
     ...exercise,
+    equipmentSettings: equipmentSettingsByType.get(exercise.equipment as Equipment)!,
     stimulus: exercise.stimulus
       .map((row) => {
         const group = groupById.get(row.muscleGroupId);
@@ -496,6 +504,24 @@ export async function registerRoutes(
       displayName: muscleGroupDisplayNames[g.name as MuscleGroupName] ?? g.name,
     }));
     res.json(enriched);
+  });
+
+  // ---------------- User equipment capabilities ----------------
+  app.get("/api/equipment-settings", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    res.json(await storage.getEquipmentSettings(userId));
+  });
+
+  app.put("/api/equipment-settings/:equipment", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = equipmentWeightSettingsSchema.safeParse({
+      ...req.body,
+      equipment: req.params.equipment,
+    });
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message ?? "Invalid equipment settings" });
+    res.json(await storage.setEquipmentSettings(userId, parsed.data));
   });
 
   // ---------------- Exercises (shared/global) ----------------
@@ -1292,6 +1318,8 @@ export async function registerRoutes(
     const userId = getUserId(req, res);
     if (userId == null) return;
     const exercisesList = await storage.getExercisesWithStimulus(userId);
+    const equipmentSettings = await storage.getEquipmentSettings(userId);
+    const equipmentSettingsByType = new Map(equipmentSettings.map((setting) => [setting.equipment, setting]));
     const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
     const history = await buildHistory(userId, zoneOf(req));
     const { lookup, nameById } = await buildMuscleGroupLookup();
@@ -1466,6 +1494,7 @@ export async function registerRoutes(
         recovery,
         fatigue,
         muscleContexts,
+        weightSettings: equipmentSettingsByType.get(exercise.equipment as Equipment),
       };
       const evaluation = evaluateGoalAwareProgressionV2(progressionInput);
       const suggestion = buildGoalAwareWorkoutSuggestion(progressionInput, evaluation);
@@ -1698,6 +1727,7 @@ export async function registerRoutes(
     db.delete(userCoachSettingsTable).where(eq(userCoachSettingsTable.userId, userId)).run();
     db.delete(userMuscleCoachOverridesTable).where(eq(userMuscleCoachOverridesTable.userId, userId)).run();
     db.delete(userExerciseCoachOverridesTable).where(eq(userExerciseCoachOverridesTable.userId, userId)).run();
+    db.delete(userEquipmentSettingsTable).where(eq(userEquipmentSettingsTable.userId, userId)).run();
     db.delete(userMuscleLearnedRangesTable).where(eq(userMuscleLearnedRangesTable.userId, userId)).run();
     db.delete(usersTable).where(eq(usersTable.id, userId)).run();
 
@@ -1744,6 +1774,7 @@ export async function registerRoutes(
     const coachSettings = db.select().from(userCoachSettingsTable).where(eq(userCoachSettingsTable.userId, userId)).get() ?? null;
     const muscleCoachOverrides = db.select().from(userMuscleCoachOverridesTable).where(eq(userMuscleCoachOverridesTable.userId, userId)).all();
     const exerciseCoachOverrides = db.select().from(userExerciseCoachOverridesTable).where(eq(userExerciseCoachOverridesTable.userId, userId)).all();
+    const equipmentSettings = db.select().from(userEquipmentSettingsTable).where(eq(userEquipmentSettingsTable.userId, userId)).all();
     const learnedVolumeRanges = db.select().from(userMuscleLearnedRangesTable).where(eq(userMuscleLearnedRangesTable.userId, userId)).all();
 
     return {
@@ -1761,6 +1792,7 @@ export async function registerRoutes(
       coachSettings,
       muscleCoachOverrides,
       exerciseCoachOverrides,
+      equipmentSettings,
       learnedVolumeRanges,
     };
   }
@@ -1782,7 +1814,7 @@ export async function registerRoutes(
     const payload = {
       exportType: "forge-profile-backup" as const,
       exportedAt: new Date().toISOString(),
-      version: 5,
+      version: 6,
       data: buildUserExport(user),
     };
 
@@ -1803,7 +1835,7 @@ export async function registerRoutes(
     const payload = {
       exportType: "forge-full-backup" as const,
       exportedAt: new Date().toISOString(),
-      version: 5,
+      version: 6,
       data: {
         muscleGroups: allMuscleGroups,
         exercises: allExercises,

@@ -4,6 +4,7 @@ import {
   userCoachSettings,
   userMuscleCoachOverrides,
   userExerciseCoachOverrides,
+  userEquipmentSettings,
   workoutExerciseSnapshots,
   userMuscleLearnedRanges,
   muscleGroups,
@@ -24,6 +25,8 @@ import {
   DEFAULT_RECOVERY_SETTINGS,
   DEFAULT_COACH_SETTINGS,
   coachSettingsSchema,
+  equipmentTypes,
+  DEFAULT_EQUIPMENT_WEIGHT_SETTINGS,
 } from "@shared/schema";
 import type {
   User,
@@ -63,6 +66,7 @@ import type {
   WorkoutExerciseSnapshot,
   TrainingGoalId,
   LearnedVolumeRange,
+  EquipmentWeightSettings,
 } from "@shared/schema";
 import {
   buildStarterTemplate,
@@ -177,6 +181,18 @@ function ensureTables() {
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_user_exercise_coach_override_unique
       ON user_exercise_coach_overrides(user_id, exercise_id);
+
+    CREATE TABLE IF NOT EXISTS user_equipment_settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      equipment TEXT NOT NULL,
+      min_weight REAL NOT NULL DEFAULT 0,
+      max_weight REAL NOT NULL DEFAULT 1000,
+      weight_increment REAL NOT NULL DEFAULT 5
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_equipment_settings_unique
+      ON user_equipment_settings(user_id, equipment);
 
     CREATE TABLE IF NOT EXISTS workout_templates (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -829,6 +845,8 @@ export interface IStorage {
   getExerciseCoachOverrides(userId: number): Promise<ExerciseCoachOverride[]>;
   setExerciseCoachOverride(userId: number, value: ExerciseCoachOverride): Promise<ExerciseCoachOverride>;
   deleteExerciseCoachOverride(userId: number, exerciseId: number): Promise<void>;
+  getEquipmentSettings(userId: number): Promise<EquipmentWeightSettings[]>;
+  setEquipmentSettings(userId: number, value: EquipmentWeightSettings): Promise<EquipmentWeightSettings>;
   getLearnedVolumeRanges(userId: number): Promise<LearnedVolumeRange[]>;
   setLearnedVolumeRanges(userId: number, values: LearnedVolumeRange[]): Promise<LearnedVolumeRange[]>;
 
@@ -1051,6 +1069,32 @@ export class DatabaseStorage implements IStorage {
       eq(userExerciseCoachOverrides.userId, userId),
       eq(userExerciseCoachOverrides.exerciseId, exerciseId),
     )).run();
+  }
+
+  async getEquipmentSettings(userId: number): Promise<EquipmentWeightSettings[]> {
+    const saved = db.select().from(userEquipmentSettings).where(eq(userEquipmentSettings.userId, userId)).all();
+    const savedByEquipment = new Map(saved.map((row) => [row.equipment, row]));
+    return equipmentTypes.map((equipment) => {
+      const row = savedByEquipment.get(equipment);
+      return row
+        ? { equipment, minWeight: row.minWeight, maxWeight: row.maxWeight, weightIncrement: row.weightIncrement }
+        : { ...DEFAULT_EQUIPMENT_WEIGHT_SETTINGS[equipment] };
+    });
+  }
+
+  async setEquipmentSettings(userId: number, value: EquipmentWeightSettings): Promise<EquipmentWeightSettings> {
+    db.insert(userEquipmentSettings)
+      .values({ userId, ...value })
+      .onConflictDoUpdate({
+        target: [userEquipmentSettings.userId, userEquipmentSettings.equipment],
+        set: {
+          minWeight: value.minWeight,
+          maxWeight: value.maxWeight,
+          weightIncrement: value.weightIncrement,
+        },
+      })
+      .run();
+    return value;
   }
 
   async getLearnedVolumeRanges(userId: number): Promise<LearnedVolumeRange[]> {

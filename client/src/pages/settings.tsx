@@ -48,6 +48,7 @@ import { useTheme } from "@/components/theme-provider";
 import { useToast } from "@/hooks/use-toast";
 import { RecoverySettingsEditor } from "@/components/recovery-settings-editor";
 import { AdvancedCoachSettings } from "@/components/advanced-coach-settings";
+import { EquipmentSettingsEditor } from "@/components/equipment-settings-editor";
 import {
   themeColorIds,
   workoutSplitIds,
@@ -1317,6 +1318,8 @@ export default function Settings() {
       </Card>}
 
       {activeUser.trainingLevel === "advanced" && <AdvancedCoachSettings />}
+
+      <EquipmentSettingsEditor />
 
       <TimezoneCard
         activeUser={activeUser}

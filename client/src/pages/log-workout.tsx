@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronsUpDown, Plus, Trash2, X, ClipboardList, Trophy, Flame, TimerIcon } from "lucide-react";
+import { Check, ChevronsUpDown, Plus, Trash2, X, ClipboardList, Trophy, Flame, TimerIcon, Calculator } from "lucide-react";
 import { apiRequest, queryClient as qc } from "@/lib/queryClient";
 import { useActiveUser } from "@/lib/user-context";
 import { useRestTimer } from "@/lib/rest-timer-context";
 import { WarmupCalculator } from "@/components/warmup-calculator";
+import { RepCalculator } from "@/components/rep-calculator";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -532,9 +533,17 @@ export default function LogWorkout() {
   // logged mid-session (via "Log set"). Reused for subsequent per-set logs
   // and for the final batch save, so we never create duplicate workouts.
   const [liveWorkoutId, setLiveWorkoutId] = useState<number | null>(null);
-  const [warmupDialogFor, setWarmupDialogFor] = useState<{ exerciseName: string; weight?: number } | null>(
+  const [warmupDialogFor, setWarmupDialogFor] = useState<{
+    exerciseName: string;
+    weight?: number;
+    equipmentSettings: Exercise["equipmentSettings"];
+  } | null>(
     null,
   );
+  const [repCalculatorFor, setRepCalculatorFor] = useState<{
+    exercise: Exercise;
+    prescription?: WorkoutTemplateExerciseLite;
+  } | null>(null);
 
   const { data: exercises, isLoading: exercisesLoading } = useQuery<Exercise[]>({
     queryKey: ["/api/exercises"],
@@ -833,6 +842,17 @@ export default function LogWorkout() {
               </div>
             </div>
             <div className="flex items-center gap-1 shrink-0">
+              {d.exercise.trackingMode !== "duration" && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setRepCalculatorFor({ exercise: d.exercise, prescription: d.prescription })}
+                  data-testid={`button-rep-calc-${d.exercise.id}`}
+                  aria-label="Rep calculator"
+                >
+                  <Calculator className="h-4 w-4" />
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="icon"
@@ -843,6 +863,7 @@ export default function LogWorkout() {
                       const lastWorking = [...d.sets].reverse().find((s) => !s.isWarmup && s.weight !== "");
                       return lastWorking ? Number(lastWorking.weight) : undefined;
                     })(),
+                    equipmentSettings: d.exercise.equipmentSettings,
                   })
                 }
                 data-testid={`button-warmup-calc-${d.exercise.id}`}
@@ -883,6 +904,9 @@ export default function LogWorkout() {
                   <Input
                     type="number"
                     inputMode="decimal"
+                    min={d.exercise.equipmentSettings.minWeight}
+                    max={d.exercise.equipmentSettings.maxWeight}
+                    step={d.exercise.equipmentSettings.weightIncrement}
                     placeholder={d.exercise.equipment === "Bodyweight" ? "+ lb" : "lb"}
                     value={s.weight}
                     disabled={!!s.loggedSetId}
@@ -984,7 +1008,24 @@ export default function LogWorkout() {
         }}
         exerciseName={warmupDialogFor?.exerciseName}
         defaultWorkingWeight={warmupDialogFor?.weight}
+        weightIncrement={warmupDialogFor?.equipmentSettings.weightIncrement}
+        minWeight={warmupDialogFor?.equipmentSettings.minWeight}
+        maxWeight={warmupDialogFor?.equipmentSettings.maxWeight}
       />
+
+      {repCalculatorFor && (
+        <RepCalculator
+          open
+          onOpenChange={(open) => {
+            if (!open) setRepCalculatorFor(null);
+          }}
+          exerciseId={repCalculatorFor.exercise.id}
+          exerciseName={repCalculatorFor.exercise.name}
+          equipmentSettings={repCalculatorFor.exercise.equipmentSettings}
+          prescribedRepMinimum={repCalculatorFor.prescription?.targetRepsMin}
+          prescribedRir={repCalculatorFor.prescription?.targetRir}
+        />
+      )}
 
       {!exercisesLoading && (
         <ExercisePicker
