@@ -55,6 +55,10 @@ interface PersonalRecord {
   summary: string;
 }
 
+interface TrackedExercisesResponse {
+  exerciseIds: number[];
+}
+
 function estimate1RM(weight: number, reps: number): number {
   if (weight <= 0 || reps <= 0) return 0;
   return weight * (1 + reps / 30);
@@ -71,9 +75,29 @@ export default function ProgressPage() {
     queryKey: ["/api/exercises"],
   });
 
+  const sortedExercises = useMemo(
+    () =>
+      [...(exercises ?? [])].sort(
+        (a, b) =>
+          a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) || a.id - b.id,
+      ),
+    [exercises],
+  );
+
   const activeId = params.exerciseId ?? selectedId;
 
   const { activeUserId } = useActiveUser();
+
+  const { data: trackedExercises } = useQuery<TrackedExercisesResponse>({
+    queryKey: ["/api/progress/tracked-exercises", activeUserId],
+    queryFn: async () => (await apiRequest("GET", "/api/progress/tracked-exercises")).json(),
+    enabled: activeUserId != null,
+    staleTime: 0,
+  });
+  const trackedExerciseIds = useMemo(
+    () => new Set(trackedExercises?.exerciseIds ?? []),
+    [trackedExercises],
+  );
 
   const { data: history, isLoading: historyLoading } = useQuery<HistorySet[]>({
     queryKey: ["/api/exercises", activeId, "sets", activeUserId],
@@ -157,9 +181,18 @@ export default function ProgressPage() {
                 <SelectValue placeholder="Choose an exercise" />
               </SelectTrigger>
               <SelectContent>
-                {(exercises ?? []).map((ex) => (
+                {sortedExercises.map((ex) => (
                   <SelectItem key={ex.id} value={String(ex.id)}>
-                    {ex.name}
+                    <span className="flex w-full items-center justify-between gap-3">
+                      <span>{ex.name}</span>
+                      {trackedExerciseIds.has(ex.id) && (
+                        <span
+                          className="h-2 w-2 shrink-0 rounded-full bg-primary"
+                          aria-label="Has tracked data"
+                          data-testid={`indicator-progress-data-${ex.id}`}
+                        />
+                      )}
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>

@@ -928,6 +928,7 @@ export interface IStorage {
   // Sets (scope inherited via workoutId -> workouts.userId)
   getSetsForWorkout(workoutId: number): Promise<SetWithExercise[]>;
   getSetsForExercise(exerciseId: number, userId: number): Promise<SetWithExercise[]>;
+  getTrackedExerciseIds(userId: number): Promise<number[]>;
   getAllSets(userId: number): Promise<SetWithExercise[]>;
   getSet(id: number): Promise<Set | undefined>;
   createSet(set: InsertSet): Promise<Set>;
@@ -1697,6 +1698,16 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(sets.exerciseId, exerciseId), eq(workouts.userId, userId)))
       .all();
     return rows.map((r) => ({ ...r.sets, exercise: r.exercises }));
+  }
+
+  async getTrackedExerciseIds(userId: number): Promise<number[]> {
+    const rows = db
+      .selectDistinct({ exerciseId: sets.exerciseId })
+      .from(sets)
+      .innerJoin(workouts, eq(sets.workoutId, workouts.id))
+      .where(and(eq(workouts.userId, userId), eq(sets.isWarmup, false)))
+      .all();
+    return rows.map((row) => row.exerciseId);
   }
 
   async getAllSets(userId: number): Promise<SetWithExercise[]> {

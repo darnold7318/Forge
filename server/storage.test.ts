@@ -121,4 +121,44 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   await storage.deleteExerciseStimulusOverride(users[0].id, bench.id);
   assert.deepEqual(await storage.getEffectiveExerciseStimulus(users[0].id, bench.id), defaults);
   assert.equal((await storage.getMuscleGroups()).length, 20);
+
+  const otherExercises = (await storage.getExercises()).filter((exercise) => exercise.id !== bench.id);
+  assert.ok(otherExercises.length >= 2);
+  await storage.createSet({
+    workoutId: workout.id,
+    exerciseId: bench.id,
+    setNumber: 1,
+    weight: 135,
+    reps: 8,
+    durationSeconds: null,
+    rir: 2,
+    isWarmup: false,
+  });
+  await storage.createSet({
+    workoutId: workout.id,
+    exerciseId: otherExercises[0].id,
+    setNumber: 1,
+    weight: 45,
+    reps: 10,
+    durationSeconds: null,
+    rir: null,
+    isWarmup: true,
+  });
+  const otherUserWorkout = await storage.createWorkout({
+    userId: users[0].id,
+    date: "2026-08-15",
+    name: "Other User Workout",
+    workoutTemplateId: null,
+  });
+  await storage.createSet({
+    workoutId: otherUserWorkout.id,
+    exerciseId: otherExercises[1].id,
+    setNumber: 1,
+    weight: 50,
+    reps: 10,
+    durationSeconds: null,
+    rir: null,
+    isWarmup: false,
+  });
+  assert.deepEqual(await storage.getTrackedExerciseIds(newUser.id), [bench.id]);
 });

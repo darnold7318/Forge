@@ -566,6 +566,12 @@ export async function registerRoutes(
     res.json(await buildExerciseViews(userId));
   });
 
+  app.get("/api/progress/tracked-exercises", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    res.json({ exerciseIds: await storage.getTrackedExerciseIds(userId) });
+  });
+
   app.post("/api/exercises", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
