@@ -21,6 +21,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { invalidateTrainingHistoryQueries } from "@/lib/training-history-cache";
 import { useActiveUser } from "@/lib/user-context";
 import { useRestTimer } from "@/lib/rest-timer-context";
 import { useToast } from "@/hooks/use-toast";
@@ -455,13 +456,12 @@ export default function GuidedWorkout() {
       const response = await apiRequest("POST", `/api/workout-sessions/${session.id}/complete`);
       return response.json() as Promise<GuidedWorkoutRecord>;
     },
-    onSuccess: (completed) => {
+    onSuccess: async (completed) => {
       setFinishedSession(completed);
       setFinishOpen(false);
       queryClient.setQueryData(["/api/workout-sessions/active", activeUserId], null);
-      for (const key of ["/api/workouts", "/api/dashboard", "/api/recovery", "/api/volume-tracker", "/api/coach/suggestions", "/api/schedule"]) {
-        queryClient.invalidateQueries({ queryKey: [key] });
-      }
+      await invalidateTrainingHistoryQueries(queryClient);
+      queryClient.invalidateQueries({ queryKey: ["/api/schedule"] });
       toast({ title: "Workout complete", description: `${completed.sets.length} sets saved.` });
     },
     onError: (error: Error) => toast({ title: "Couldn't finish workout", description: error.message, variant: "destructive" }),

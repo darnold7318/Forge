@@ -19,6 +19,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { invalidateTrainingHistoryQueries } from "@/lib/training-history-cache";
 import { useToast } from "@/hooks/use-toast";
 
 interface Exercise {
@@ -107,8 +108,7 @@ export default function WorkoutEdit() {
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/workouts", String(workoutId)] });
-    queryClient.invalidateQueries({ queryKey: ["/api/workouts"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/dashboard/volume"] });
+    void invalidateTrainingHistoryQueries(queryClient);
   };
 
   const patchWorkoutMutation = useMutation({
@@ -159,9 +159,8 @@ export default function WorkoutEdit() {
     mutationFn: async () => {
       await apiRequest("DELETE", `/api/workouts/${workoutId}`);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/workouts"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/volume"] });
+    onSuccess: async () => {
+      await invalidateTrainingHistoryQueries(queryClient);
       toast({ title: "Workout deleted" });
       navigate("/history");
     },

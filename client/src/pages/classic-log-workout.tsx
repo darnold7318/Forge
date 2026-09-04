@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronDown, ChevronsUpDown, Plus, Trash2, X, ClipboardList, Trophy, Flame, TimerIcon, Calculator, Sparkles } from "lucide-react";
 import { apiRequest, queryClient as qc } from "@/lib/queryClient";
+import { invalidateTrainingHistoryQueries } from "@/lib/training-history-cache";
 import { useActiveUser } from "@/lib/user-context";
 import { useRestTimer } from "@/lib/rest-timer-context";
 import { WarmupCalculator } from "@/components/warmup-calculator";
@@ -752,12 +753,7 @@ export default function ClassicLogWorkout() {
   );
 
   const invalidateWorkoutQueries = () => {
-    qc.invalidateQueries({ queryKey: ["/api/workouts"] });
-    qc.invalidateQueries({ queryKey: ["/api/dashboard/volume"] });
-    qc.invalidateQueries({ queryKey: ["/api/volume-tracker"] });
-    qc.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
-    qc.invalidateQueries({ queryKey: ["/api/recovery"] });
-    qc.invalidateQueries({ queryKey: ["/api/dashboard"] });
+    void invalidateTrainingHistoryQueries(qc);
   };
 
   /** Create the workout row on first individual set-log, and reuse afterward. */

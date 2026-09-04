@@ -16,6 +16,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { invalidateTrainingHistoryQueries } from "@/lib/training-history-cache";
 import { useToast } from "@/hooks/use-toast";
 
 interface Exercise {
@@ -146,9 +147,8 @@ export default function WorkoutHistory() {
     mutationFn: async (id: number) => {
       await apiRequest("DELETE", `/api/workouts/${id}`);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/workouts"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/volume"] });
+    onSuccess: async () => {
+      await invalidateTrainingHistoryQueries(queryClient);
       toast({ title: "Workout deleted" });
     },
     onError: () => toast({ title: "Couldn't delete workout", variant: "destructive" }),
