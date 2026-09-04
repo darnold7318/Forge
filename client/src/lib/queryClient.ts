@@ -40,6 +40,7 @@ export async function apiRequest(
 ): Promise<Response> {
   const res = await fetch(`${API_BASE}${url}`, {
     method,
+    cache: "no-store",
     headers: {
       ...(data ? { "Content-Type": "application/json" } : {}),
       ...authHeaders(),
@@ -66,6 +67,7 @@ export const getQueryFn: <T>(options: {
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
     const res = await fetch(`${API_BASE}${queryKey.join("/")}`, {
+      cache: "no-store",
       // See apiRequest() above — credentials must not be "include".
       headers: { ...authHeaders(), ...timezoneHeaders() },
     });

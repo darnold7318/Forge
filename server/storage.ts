@@ -1706,9 +1706,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteWorkout(id: number): Promise<void> {
-    db.delete(workoutExerciseSnapshots).where(eq(workoutExerciseSnapshots.workoutId, id)).run();
-    db.delete(sets).where(eq(sets.workoutId, id)).run();
-    db.delete(workouts).where(eq(workouts.id, id)).run();
+    sqlite.transaction(() => {
+      db.delete(workoutExerciseSnapshots).where(eq(workoutExerciseSnapshots.workoutId, id)).run();
+      db.delete(sets).where(eq(sets.workoutId, id)).run();
+      db.delete(workouts).where(eq(workouts.id, id)).run();
+    })();
   }
 
   // ---------------- Sets ----------------
@@ -1760,7 +1762,7 @@ export class DatabaseStorage implements IStorage {
       .from(sets)
       .innerJoin(exercises, eq(sets.exerciseId, exercises.id))
       .innerJoin(workouts, eq(sets.workoutId, workouts.id))
-      .where(eq(workouts.userId, userId))
+      .where(and(eq(workouts.userId, userId), eq(workouts.status, "completed")))
       .all();
     return rows.map((r) => ({ ...r.sets, exercise: r.exercises }));
   }

@@ -33,6 +33,16 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
+// Training calculations change immediately after workout/set mutations. Do
+// not let a browser, reverse proxy, or deployment edge reuse an older JSON
+// response after React Query explicitly requests fresh derived data.
+app.use("/api", (_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  next();
+});
+
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
     hour: "numeric",

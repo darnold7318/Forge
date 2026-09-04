@@ -132,10 +132,16 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   const retriedGuidedSet = await storage.createSet(guidedSetInput);
   assert.equal(retriedGuidedSet.id, firstGuidedSet.id);
   assert.equal((await storage.getSetsForWorkout(guidedWorkout.id)).length, 1);
+  assert.equal((await storage.getAllSets(newUser.id)).some((set) => set.id === firstGuidedSet.id), false);
   assert.ok(await storage.completeWorkout(guidedWorkout.id, "2026-08-15T18:45:00.000Z"));
   assert.equal(await storage.completeWorkout(guidedWorkout.id, "2026-08-15T18:46:00.000Z"), undefined);
   assert.equal((await storage.getActiveWorkoutWithSets(newUser.id)), undefined);
   assert.equal((await storage.getWorkouts(newUser.id)).some((row) => row.id === guidedWorkout.id), true);
+  assert.equal((await storage.getAllSets(newUser.id)).some((set) => set.id === firstGuidedSet.id), true);
+  await storage.deleteWorkout(guidedWorkout.id);
+  assert.equal((await storage.getWorkouts(newUser.id)).some((row) => row.id === guidedWorkout.id), false);
+  assert.equal((await storage.getAllSets(newUser.id)).some((set) => set.id === firstGuidedSet.id), false);
+  assert.equal(await storage.getSet(firstGuidedSet.id), undefined);
   await storage.setLearnedVolumeRanges(newUser.id, [{
     muscleGroupId: bench.primaryMuscleGroupId,
     productiveLow: 10,
