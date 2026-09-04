@@ -41,6 +41,16 @@ export interface SeedExercise {
   isUnilateral: boolean;
 }
 
+// Curated stimulus corrections for exercises that may already exist in an
+// upgraded user catalog but are not added to a new starter catalog. A
+// high-to-low fly can recruit the triceps long head minimally as a shoulder
+// extensor/adductor, but activation is not evidence for crediting it with the
+// legacy default of half an effective set. Preserve the existing lat profile;
+// this correction is intentionally scoped to the reviewed triceps evidence.
+export const CATALOG_EXERCISE_STIMULUS_DEFAULTS = [
+  { name: "High-Low Cable Fly", stimulus: { MidLowerChest: 1, Lats: 0.5, Triceps: 0.1 } },
+] satisfies { name: string; stimulus: Partial<Record<MuscleGroupName, number>> }[];
+
 export const EXERCISES: SeedExercise[] = [
   // Chest
   { name: "Barbell Bench Press", stimulus: { MidLowerChest: 1, UpperChest: 0.35, FrontDelts: 0.4, Triceps: 0.35 }, equipment: "Barbell", movementPattern: "Horizontal Push", isCompound: true, isUnilateral: false },

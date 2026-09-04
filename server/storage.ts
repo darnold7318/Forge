@@ -81,7 +81,7 @@ import {
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq, desc, and, gte } from "drizzle-orm";
-import { MUSCLE_GROUPS, EXERCISES, WORKOUT_TEMPLATES } from "./seed-data";
+import { CATALOG_EXERCISE_STIMULUS_DEFAULTS, MUSCLE_GROUPS, EXERCISES, WORKOUT_TEMPLATES } from "./seed-data";
 import { addCivilDays } from "@shared/timezone";
 
 const DB_PATH = process.env.DATABASE_PATH || "data.db";
@@ -763,7 +763,7 @@ function seedExerciseStimulusDefaults() {
     );
 
     // Curated built-in rows are deterministic and centrally defined.
-    for (const seedExercise of EXERCISES) {
+    for (const seedExercise of [...EXERCISES, ...CATALOG_EXERCISE_STIMULUS_DEFAULTS]) {
       const exercise = firstExerciseByName.get(seedExercise.name);
       if (!exercise) continue;
       const expectedMuscleIds = new Set(

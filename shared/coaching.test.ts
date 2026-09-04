@@ -35,6 +35,7 @@ import {
   evaluateGuidedSetAdjustment,
   type GuidedPlanExerciseInput,
 } from "./guided-workout";
+import { CATALOG_EXERCISE_STIMULUS_DEFAULTS } from "../server/seed-data";
 
 function guidedExercise(overrides: Partial<GuidedPlanExerciseInput> = {}): GuidedPlanExerciseInput {
   return {
@@ -901,4 +902,12 @@ test("guided set response protects against forcing another failed set", () => {
   assert.equal(adjustment.suggestTrimRemainingSet, true);
   assert.ok(adjustment.nextRestSeconds > exercise.restSeconds);
   assert.ok(adjustment.suggestedWeight < 185);
+});
+
+test("high-low cable fly receives only conservative ancillary triceps credit", () => {
+  const fly = CATALOG_EXERCISE_STIMULUS_DEFAULTS.find((exercise) => exercise.name === "High-Low Cable Fly");
+  assert.ok(fly);
+  assert.equal(fly.stimulus.MidLowerChest, 1);
+  assert.equal(fly.stimulus.Triceps, 0.1);
+  assert.equal(fly.stimulus.Lats, 0.5);
 });
