@@ -333,6 +333,21 @@ export default function GuidedWorkout() {
     onError: (error: Error) => toast({ title: "Couldn't start workout", description: error.message, variant: "destructive" }),
   });
 
+  const switchToClassicMutation = useMutation({
+    mutationFn: async () => {
+      if (activeUserId == null) throw new Error("No active user");
+      const response = await apiRequest("PATCH", `/api/users/${activeUserId}/preferences`, {
+        workoutLoggingMode: "classic",
+      });
+      return response.json();
+    },
+    onSuccess: (updatedUser) => {
+      queryClient.setQueryData(["/api/auth/me"], updatedUser);
+      toast({ title: "Classic logging selected", description: "Your Guided session remains saved and can be resumed after switching back." });
+    },
+    onError: (error: Error) => toast({ title: "Couldn't switch logging mode", description: error.message, variant: "destructive" }),
+  });
+
   const session = activeSession;
   const activeExercise = session ? nextExerciseFor(session) : undefined;
   const activeCompletedSets = session && activeExercise ? completedSetsFor(session, activeExercise.exerciseId) : [];
@@ -391,10 +406,13 @@ export default function GuidedWorkout() {
     },
     onSuccess: async ({ created, nextAdjustment }) => {
       setAdjustment(nextAdjustment);
-      const refreshed = await queryClient.fetchQuery<GuidedWorkoutRecord | null>({
-        queryKey: ["/api/workout-sessions/active", activeUserId],
-        queryFn: async () => (await apiRequest("GET", "/api/workout-sessions/active")).json(),
-      });
+      // Queries are intentionally cached forever across the app. fetchQuery()
+      // would therefore return the pre-set session without contacting the
+      // server, leaving the progress count and active set unchanged even
+      // though the set had saved successfully. Read the updated session
+      // directly, then replace the cache so the UI advances immediately.
+      const refreshed = await (await apiRequest("GET", "/api/workout-sessions/active")).json() as GuidedWorkoutRecord | null;
+      queryClient.setQueryData(["/api/workout-sessions/active", activeUserId], refreshed);
       const remaining = refreshed?.sessionPlan
         ? totalPlannedSets(refreshed.sessionPlan) - refreshed.sets.length
         : 0;
@@ -510,11 +528,11 @@ export default function GuidedWorkout() {
             <div className="flex items-center gap-2"><Sparkles className="h-5 w-5 text-primary" /><h1 className="text-xl font-display font-bold">Guided Workout</h1></div>
             <p className="text-sm text-muted-foreground">Fit quality training to your recovery and available time</p>
           </div>
-          <Link href="/log?logger=classic"><Button variant="outline" size="sm">Use Classic</Button></Link>
+          <Button variant="outline" size="sm" disabled={switchToClassicMutation.isPending} onClick={() => switchToClassicMutation.mutate()}>Use Classic</Button>
         </div>
 
         {!templates?.length ? (
-          <Card><CardContent className="space-y-3 p-6 text-center"><p className="font-medium">Create a workout template to use Guided mode.</p><p className="text-sm text-muted-foreground">Guided mode uses template prescriptions as a safe baseline. Classic remains available for free-form logging.</p><div className="flex justify-center gap-2"><Link href="/templates"><Button>Create template</Button></Link><Link href="/log?logger=classic"><Button variant="outline">Use Classic</Button></Link></div></CardContent></Card>
+          <Card><CardContent className="space-y-3 p-6 text-center"><p className="font-medium">Create a workout template to use Guided mode.</p><p className="text-sm text-muted-foreground">Guided mode uses template prescriptions as a safe baseline. Classic remains available for free-form logging.</p><div className="flex justify-center gap-2"><Link href="/templates"><Button>Create template</Button></Link><Button variant="outline" disabled={switchToClassicMutation.isPending} onClick={() => switchToClassicMutation.mutate()}>Use Classic</Button></div></CardContent></Card>
         ) : (
           <>
             <Card>

@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useLocation } from "wouter";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useActiveUser } from "@/lib/user-context";
@@ -7,6 +8,18 @@ import GuidedWorkout from "@/pages/guided-workout";
 export default function LogWorkout() {
   const { activeUser, isLoading } = useActiveUser();
   const [location] = useLocation();
+
+  // Older Guided builds used ?logger=classic as a temporary override. Under
+  // the hash router that query lives on the real URL and survives unrelated
+  // navigation, so it could permanently mask a later Guided preference.
+  // Remove the obsolete parameter while preserving other query values (such
+  // as a requested template); the saved per-user preference is authoritative.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("logger")) return;
+    url.searchParams.delete("logger");
+    window.history.replaceState(window.history.state, "", url);
+  }, [location]);
 
   if (isLoading || !activeUser) {
     return (
@@ -18,17 +31,6 @@ export default function LogWorkout() {
     );
   }
 
-  const hashQuery = window.location.hash.includes("?")
-    ? window.location.hash.slice(window.location.hash.indexOf("?"))
-    : "";
-  const params = new URLSearchParams(window.location.search || hashQuery);
-  const override = params.get("logger");
-  const mode = override === "classic" || override === "guided"
-    ? override
-    : activeUser.workoutLoggingMode ?? "classic";
-
-  // Reading location keeps the dispatcher responsive to same-route query
-  // switches under wouter's hash location implementation.
-  void location;
+  const mode = activeUser.workoutLoggingMode ?? "classic";
   return mode === "guided" ? <GuidedWorkout /> : <ClassicLogWorkout />;
 }
