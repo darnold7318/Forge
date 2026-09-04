@@ -30,6 +30,40 @@ import {
 } from "./coaching";
 import { primaryStimulusMuscle, resolveEquipmentProfile } from "./schema";
 import { DEFAULT_COACH_SETTINGS } from "./schema";
+import {
+  buildGuidedSessionPlan,
+  evaluateGuidedSetAdjustment,
+  type GuidedPlanExerciseInput,
+} from "./guided-workout";
+
+function guidedExercise(overrides: Partial<GuidedPlanExerciseInput> = {}): GuidedPlanExerciseInput {
+  return {
+    exerciseId: 1,
+    exerciseName: "Bench Press",
+    exerciseOrder: 1,
+    exerciseRole: "Primary Compound",
+    trackingMode: "reps",
+    equipment: "Barbell",
+    isCompound: true,
+    primaryMuscleGroupId: 1,
+    warmupSets: 1,
+    workingSets: 3,
+    templateWorkingSets: 3,
+    targetWeight: 185,
+    targetRepsMin: 6,
+    targetRepsMax: 10,
+    targetDurationMinSeconds: null,
+    targetDurationMaxSeconds: null,
+    targetRirMin: 1,
+    targetRirMax: 3,
+    restSeconds: 150,
+    recommendation: "Hold Progression",
+    recommendationReason: "Repeat the target with quality reps.",
+    recoveryPercent: 85,
+    fatiguePercent: 15,
+    ...overrides,
+  };
+}
 
 test("dashboard distinguishes today's logged workout from a different scheduled template", () => {
   const templates: DashboardTemplateInput[] = [
@@ -809,4 +843,62 @@ test("learned volume range favors productive completed weeks and rejects a decli
   assert.equal(learned.productiveLow, 10);
   assert.equal(learned.productiveHigh, 16);
   assert.match(learned.explanation, /10-16 effective sets/);
+});
+
+test("guided time budgets trim lower-priority sets without shortening recovery", () => {
+  const plan = buildGuidedSessionPlan({
+    workoutTemplateId: 1,
+    workoutName: "Upper",
+    timeBudgetMinutes: 15,
+    exercises: [
+      guidedExercise(),
+      guidedExercise({ exerciseId: 2, exerciseName: "Cable Row", exerciseOrder: 2, workingSets: 4, templateWorkingSets: 4 }),
+      guidedExercise({ exerciseId: 3, exerciseName: "Lateral Raise", exerciseOrder: 3, isCompound: false, workingSets: 4, templateWorkingSets: 4, restSeconds: 75 }),
+    ],
+    now: new Date("2026-09-01T12:00:00.000Z"),
+  });
+
+  assert.equal(plan.exercises[0].restSeconds, 150);
+  assert.equal(plan.exercises[1].restSeconds, 150);
+  assert.equal(plan.exercises[2].restSeconds, 75);
+  assert.equal(plan.exercises[0].workingSets, 1);
+  assert.equal(plan.exercises[2].workingSets, 1);
+  assert.ok(plan.warnings.some((warning) => /trims lower-priority/i.test(warning)));
+});
+
+test("guided smart pairs exclude compounds and pair non-competing accessories", () => {
+  const plan = buildGuidedSessionPlan({
+    workoutTemplateId: 1,
+    workoutName: "Upper",
+    timeBudgetMinutes: null,
+    timeStrategy: "smart_pairs",
+    exercises: [
+      guidedExercise(),
+      guidedExercise({ exerciseId: 2, exerciseName: "Curl", exerciseOrder: 2, isCompound: false, primaryMuscleGroupId: 10, warmupSets: 0 }),
+      guidedExercise({ exerciseId: 3, exerciseName: "Pressdown", exerciseOrder: 3, isCompound: false, primaryMuscleGroupId: 11, warmupSets: 0 }),
+    ],
+  });
+
+  assert.equal(plan.exercises[0].pairGroup, null);
+  assert.equal(plan.exercises[1].pairGroup, 1);
+  assert.equal(plan.exercises[2].pairGroup, 1);
+});
+
+test("guided set response protects against forcing another failed set", () => {
+  const exercise = buildGuidedSessionPlan({
+    workoutTemplateId: 1,
+    workoutName: "Upper",
+    timeBudgetMinutes: null,
+    exercises: [guidedExercise()],
+  }).exercises[0];
+  const adjustment = evaluateGuidedSetAdjustment({
+    exercise,
+    current: { weight: 185, reps: 4, rir: 0, isWarmup: false },
+    weightIncrement: 5,
+  });
+
+  assert.equal(adjustment.status, "consider_stopping");
+  assert.equal(adjustment.suggestTrimRemainingSet, true);
+  assert.ok(adjustment.nextRestSeconds > exercise.restSeconds);
+  assert.ok(adjustment.suggestedWeight < 185);
 });

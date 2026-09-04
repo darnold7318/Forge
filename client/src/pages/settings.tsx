@@ -56,12 +56,15 @@ import {
   trainingLevelIds,
   trainingLevelLabels,
   trainingGoalIds,
+  workoutLoggingModeIds,
+  workoutLoggingModeLabels,
   timezoneModeIds,
   timezoneModeLabels,
   type ThemeColorId,
   type WorkoutSplitId,
   type TrainingLevelId,
   type TrainingGoalId,
+  type WorkoutLoggingModeId,
   type TimezoneModeId,
   type CustomWeeklySlot,
   type User,
@@ -1299,6 +1302,48 @@ export default function Settings() {
           </Select>
           <p className="text-xs text-muted-foreground">{TRAINING_GOAL_CHOICES[activeUser.trainingGoal as TrainingGoalId]?.description ?? TRAINING_GOAL_CHOICES.hypertrophy.description}</p>
           <p className="text-xs text-muted-foreground">Coach may adjust next-session targets that do not match this goal, but it will never rewrite your saved templates automatically.</p>
+        </CardContent>
+      </Card>
+
+      <Card data-testid="card-workout-logging-mode">
+        <CardHeader>
+          <CardTitle className="text-base">Workout Logging</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <RadioGroup
+            value={(activeUser.workoutLoggingMode as WorkoutLoggingModeId) ?? "classic"}
+            onValueChange={(value) => updatePreferences.mutate({ workoutLoggingMode: value })}
+            disabled={updatePreferences.isPending}
+            data-testid="radio-group-workout-logging-mode"
+          >
+            {workoutLoggingModeIds.map((mode) => (
+              <label
+                key={mode}
+                htmlFor={`workout-logging-${mode}`}
+                className="flex items-start gap-3 rounded-md border p-3 cursor-pointer hover-elevate"
+              >
+                <RadioGroupItem
+                  id={`workout-logging-${mode}`}
+                  value={mode}
+                  className="mt-0.5"
+                  data-testid={`radio-workout-logging-${mode}`}
+                />
+                <div className="space-y-0.5">
+                  <Label htmlFor={`workout-logging-${mode}`} className="cursor-pointer">
+                    {workoutLoggingModeLabels[mode]}
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {mode === "classic"
+                      ? "The original full-page logger with optional per-set timers and a final Save Workout action."
+                      : "A resumable, focused session with Coach-adjusted sets, adaptive rest, time budgets, and automatic set saving."}
+                  </p>
+                </div>
+              </label>
+            ))}
+          </RadioGroup>
+          <p className="text-xs text-muted-foreground">
+            This preference applies to new sessions. Guided never rewrites your saved templates.
+          </p>
         </CardContent>
       </Card>
 

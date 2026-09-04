@@ -52,7 +52,7 @@ export default function Dashboard() {
           </h1>
           <p className="text-sm text-muted-foreground">Today's training at a glance</p>
         </div>
-        <Link href="/log">
+        <Link href={snapshot?.todayWorkoutTemplateId ? `/log?template=${snapshot.todayWorkoutTemplateId}` : "/log"}>
           <Button data-testid="button-start-workout">
             <Plus className="h-4 w-4" />
             Start Workout

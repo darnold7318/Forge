@@ -101,6 +101,7 @@ import {
   RECOVERY_HALF_LIFE_HOURS,
   type MuscleTrainingContext,
 } from "@shared/coaching";
+import { guidedSessionPlanSchema, type GuidedSessionPlan } from "@shared/guided-workout";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -966,6 +967,12 @@ export async function registerRoutes(
       date: civilDate,
       startedAt: startedAt.toISOString(),
       tz: zone,
+      status: "completed",
+      completedAt: startedAt.toISOString(),
+      loggingMode: "classic",
+      timeBudgetMinutes: null,
+      plannedDurationMinutes: null,
+      sessionPlan: null,
     });
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
@@ -977,6 +984,140 @@ export async function registerRoutes(
     res.status(201).json(created);
   });
 
+  const guidedSessionStartSchema = z.object({
+    date: z.string().min(10).max(10).optional(),
+    workoutTemplateId: z.number().int().positive().nullable(),
+    name: z.string().trim().min(1).max(120),
+    timeBudgetMinutes: z.number().int().min(15).max(240).nullable(),
+    sessionPlan: guidedSessionPlanSchema,
+  });
+
+  const guidedSessionPlanPatchSchema = z.object({ sessionPlan: guidedSessionPlanSchema });
+
+  const guidedSessionResponse = (workout: Awaited<ReturnType<typeof storage.getWorkoutWithSets>>) => {
+    if (!workout) return null;
+    let sessionPlan: GuidedSessionPlan | null = null;
+    if (workout.sessionPlan) {
+      try {
+        const parsed = guidedSessionPlanSchema.safeParse(JSON.parse(workout.sessionPlan));
+        if (parsed.success) sessionPlan = parsed.data;
+      } catch {
+        sessionPlan = null;
+      }
+    }
+    return { ...workout, sessionPlan };
+  };
+
+  app.get("/api/workout-sessions/active", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const workout = await storage.getActiveWorkoutWithSets(userId);
+    res.json(guidedSessionResponse(workout));
+  });
+
+  app.post("/api/workout-sessions", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const body = guidedSessionStartSchema.safeParse(req.body);
+    if (!body.success) return res.status(400).json({ message: body.error.issues[0]?.message ?? "Invalid Guided workout plan" });
+    if (body.data.sessionPlan.workoutTemplateId !== body.data.workoutTemplateId) {
+      return res.status(400).json({ message: "Workout plan does not match the selected template" });
+    }
+    const active = await storage.getActiveWorkoutWithSets(userId);
+    if (active) return res.status(409).json({ message: "Resume or finish the active workout first", workout: guidedSessionResponse(active) });
+
+    if (body.data.workoutTemplateId != null) {
+      const template = await storage.getWorkoutTemplate(body.data.workoutTemplateId);
+      if (!template) return res.status(404).json({ message: "Template not found" });
+      if (template.userId !== userId) return res.status(403).json({ message: "You do not own this template" });
+    }
+    const knownExercises = new Set((await storage.getExercises()).map((exercise) => exercise.id));
+    if (body.data.sessionPlan.exercises.some((exercise) => !knownExercises.has(exercise.exerciseId))) {
+      return res.status(400).json({ message: "Workout plan contains an unknown exercise" });
+    }
+
+    const zone = zoneOf(req);
+    const now = new Date();
+    const todayCivil = civilDateInZone(now, zone);
+    const civilDate = body.data.date ?? todayCivil;
+    const startedAt = civilDate === todayCivil ? now : legacyInstantForCivilDate(civilDate, zone);
+    const created = await storage.createWorkout({
+      userId,
+      date: civilDate,
+      startedAt: startedAt.toISOString(),
+      tz: zone,
+      name: body.data.name,
+      notes: null,
+      workoutTemplateId: body.data.workoutTemplateId,
+      status: "in_progress",
+      completedAt: null,
+      loggingMode: "guided",
+      timeBudgetMinutes: body.data.timeBudgetMinutes,
+      plannedDurationMinutes: body.data.sessionPlan.estimatedMinutes,
+      sessionPlan: JSON.stringify(body.data.sessionPlan),
+    });
+    res.status(201).json(guidedSessionResponse(await storage.getWorkoutWithSets(created.id)));
+  });
+
+  app.patch("/api/workout-sessions/:id/plan", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const id = Number(req.params.id);
+    const workout = await storage.getWorkout(id);
+    if (!workout) return res.status(404).json({ message: "Workout not found" });
+    if (workout.userId !== userId) return res.status(403).json({ message: "Workout does not belong to the active user" });
+    if (workout.status !== "in_progress") return res.status(409).json({ message: "Only an active workout plan can be changed" });
+    const body = guidedSessionPlanPatchSchema.safeParse(req.body);
+    if (!body.success) return res.status(400).json({ message: body.error.issues[0]?.message ?? "Invalid workout plan" });
+    if (body.data.sessionPlan.workoutTemplateId !== workout.workoutTemplateId) {
+      return res.status(400).json({ message: "An active workout cannot be moved to a different template" });
+    }
+    const knownExercises = new Set((await storage.getExercises()).map((exercise) => exercise.id));
+    if (body.data.sessionPlan.exercises.some((exercise) => !knownExercises.has(exercise.exerciseId))) {
+      return res.status(400).json({ message: "Workout plan contains an unknown exercise" });
+    }
+    await storage.updateWorkout(id, {
+      sessionPlan: JSON.stringify(body.data.sessionPlan),
+      plannedDurationMinutes: body.data.sessionPlan.estimatedMinutes,
+      timeBudgetMinutes: body.data.sessionPlan.timeBudgetMinutes,
+    });
+    res.json(guidedSessionResponse(await storage.getWorkoutWithSets(id)));
+  });
+
+  app.post("/api/workout-sessions/:id/complete", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const id = Number(req.params.id);
+    const workout = await storage.getWorkoutWithSets(id);
+    if (!workout) return res.status(404).json({ message: "Workout not found" });
+    if (workout.userId !== userId) return res.status(403).json({ message: "Workout does not belong to the active user" });
+    if (workout.status === "completed") return res.json(guidedSessionResponse(workout));
+    if (workout.sets.length === 0) return res.status(400).json({ message: "Log at least one set before finishing" });
+    // Conditional completion makes retries safe: exactly one request advances
+    // the schedule even if the client repeats the finish call.
+    const updated = await storage.completeWorkout(id, new Date().toISOString());
+    if (!updated) {
+      const alreadyCompleted = await storage.getWorkoutWithSets(id);
+      return res.json(guidedSessionResponse(alreadyCompleted));
+    }
+    if (updated?.workoutTemplateId != null) {
+      await storage.advanceRotation(userId, updated.workoutTemplateId, updated.date);
+    }
+    res.json(guidedSessionResponse(await storage.getWorkoutWithSets(id)));
+  });
+
+  app.delete("/api/workout-sessions/:id", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const id = Number(req.params.id);
+    const workout = await storage.getWorkout(id);
+    if (!workout) return res.status(404).json({ message: "Workout not found" });
+    if (workout.userId !== userId) return res.status(403).json({ message: "Workout does not belong to the active user" });
+    if (workout.status !== "in_progress") return res.status(409).json({ message: "Completed workouts must be deleted from Workout History" });
+    await storage.deleteWorkout(id);
+    res.status(204).end();
+  });
+
   app.patch("/api/workouts/:id", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
@@ -986,7 +1127,10 @@ export async function registerRoutes(
     if (existing.userId !== userId) {
       return res.status(403).json({ message: "Workout does not belong to the active user" });
     }
-    const parsed = insertWorkoutSchema.partial().safeParse(req.body);
+    const parsed = insertWorkoutSchema
+      .pick({ name: true, date: true, notes: true })
+      .partial()
+      .safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
@@ -1012,7 +1156,7 @@ export async function registerRoutes(
   app.post("/api/sets", async (req, res) => {
     const userId = getUserId(req, res);
     if (userId == null) return;
-    const parsed = insertSetSchema.safeParse(req.body);
+    const parsed = insertSetSchema.safeParse({ ...req.body, loggedAt: new Date().toISOString() });
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }
@@ -1033,6 +1177,9 @@ export async function registerRoutes(
     if (!parentWorkout) return res.status(404).json({ message: "Workout not found" });
     if (parentWorkout.userId !== userId) {
       return res.status(403).json({ message: "Workout does not belong to the active user" });
+    }
+    if (parentWorkout.loggingMode === "guided" && parentWorkout.status !== "in_progress") {
+      return res.status(409).json({ message: "This Guided workout is already complete" });
     }
     const setData = isDuration
       ? { ...parsed.data, reps: 0, durationSeconds: parsed.data.durationSeconds }
@@ -1081,7 +1228,15 @@ export async function registerRoutes(
     if (!parentWorkout || parentWorkout.userId !== userId) {
       return res.status(403).json({ message: "Set does not belong to the active user" });
     }
-    const parsed = insertSetSchema.partial().safeParse(req.body);
+    // Set edits may change performance data only. In particular, never allow a
+    // client to move an existing set to a different workout or exercise.
+    const parsed = insertSetSchema.pick({
+      weight: true,
+      reps: true,
+      durationSeconds: true,
+      rir: true,
+      isWarmup: true,
+    }).partial().safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.message });
     }

@@ -30,6 +30,9 @@ export const users = sqliteTable("users", {
   // Controls which outcome the coaching engine prioritizes. This is separate
   // from training level, which only controls UI detail and advanced tuning.
   trainingGoal: text("training_goal").notNull().default("hypertrophy"),
+  // Selects the workout-entry experience. Existing accounts default to the
+  // original logger so upgrades never change their established workflow.
+  workoutLoggingMode: text("workout_logging_mode").notNull().default("classic"),
   // Timezone handling. "home" (default) anchors all calendar dates to
   // homeTimezone so training weeks stay stable while travelling. "auto"
   // follows whatever timezone the device reports on each request.
@@ -94,6 +97,14 @@ export const trainingGoalLabels: Record<TrainingGoalId, string> = {
   muscular_endurance: "Muscular Endurance",
 };
 
+export const workoutLoggingModeIds = ["classic", "guided"] as const;
+export type WorkoutLoggingModeId = (typeof workoutLoggingModeIds)[number];
+
+export const workoutLoggingModeLabels: Record<WorkoutLoggingModeId, string> = {
+  classic: "Classic",
+  guided: "Guided",
+};
+
 export const timezoneModeIds = ["home", "auto"] as const;
 export type TimezoneModeId = (typeof timezoneModeIds)[number];
 
@@ -121,7 +132,14 @@ export function isValidTimezone(tz: string): boolean {
 }
 
 export const updateUserPreferencesSchema = createInsertSchema(users)
-  .pick({ themeColor: true, themeMode: true, workoutSplit: true, trainingLevel: true, trainingGoal: true })
+  .pick({
+    themeColor: true,
+    themeMode: true,
+    workoutSplit: true,
+    trainingLevel: true,
+    trainingGoal: true,
+    workoutLoggingMode: true,
+  })
   .partial()
   .extend({
     themeColor: z.enum(themeColorIds).optional(),
@@ -129,6 +147,7 @@ export const updateUserPreferencesSchema = createInsertSchema(users)
     workoutSplit: z.enum(workoutSplitIds).optional(),
     trainingLevel: z.enum(trainingLevelIds).optional(),
     trainingGoal: z.enum(trainingGoalIds).optional(),
+    workoutLoggingMode: z.enum(workoutLoggingModeIds).optional(),
     timezoneMode: z.enum(timezoneModeIds).optional(),
     homeTimezone: z
       .string()
@@ -659,7 +678,16 @@ export const workouts = sqliteTable("workouts", {
   workoutTemplateId: integer("workout_template_id").references(
     () => workoutTemplates.id,
   ),
+  status: text("status").notNull().default("completed"),
+  completedAt: text("completed_at"),
+  loggingMode: text("logging_mode").notNull().default("classic"),
+  timeBudgetMinutes: integer("time_budget_minutes"),
+  plannedDurationMinutes: integer("planned_duration_minutes"),
+  sessionPlan: text("session_plan"),
 });
+
+export const workoutStatusIds = ["in_progress", "completed"] as const;
+export type WorkoutStatusId = (typeof workoutStatusIds)[number];
 
 // Immutable per-workout copies of the prescription used when the workout was
 // created. Template edits/deletes must not rewrite the meaning of history.
@@ -720,21 +748,27 @@ export type Workout = typeof workouts.$inferSelect;
 // ---------------------------------------------------------------------------
 // Sets
 // ---------------------------------------------------------------------------
-export const sets = sqliteTable("sets", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  workoutId: integer("workout_id")
-    .notNull()
-    .references(() => workouts.id),
-  exerciseId: integer("exercise_id")
-    .notNull()
-    .references(() => exercises.id),
-  setNumber: integer("set_number").notNull(),
-  weight: real("weight").notNull(),
-  reps: integer("reps").notNull(),
-  durationSeconds: integer("duration_seconds"),
-  rir: real("rir"), // nullable, Reps In Reserve (0-4+)
-  isWarmup: integer("is_warmup", { mode: "boolean" }).notNull().default(false),
-});
+export const sets = sqliteTable(
+  "sets",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    workoutId: integer("workout_id")
+      .notNull()
+      .references(() => workouts.id),
+    exerciseId: integer("exercise_id")
+      .notNull()
+      .references(() => exercises.id),
+    setNumber: integer("set_number").notNull(),
+    weight: real("weight").notNull(),
+    reps: integer("reps").notNull(),
+    durationSeconds: integer("duration_seconds"),
+    rir: real("rir"),
+    isWarmup: integer("is_warmup", { mode: "boolean" }).notNull().default(false),
+    loggedAt: text("logged_at"),
+    clientRequestId: text("client_request_id"),
+  },
+  (table) => [uniqueIndex("idx_sets_workout_client_request_unique").on(table.workoutId, table.clientRequestId)],
+);
 
 export const insertSetSchema = createInsertSchema(sets).omit({ id: true });
 

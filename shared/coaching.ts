@@ -2204,6 +2204,15 @@ export interface WorkoutExerciseSuggestion {
   learningText?: string | null;
   templateAdjustmentNote?: string | null;
   restGuidance?: string;
+  suggestedWeight?: number;
+  targetRepsMin?: number;
+  targetRepsMax?: number;
+  targetDurationMinSeconds?: number;
+  targetDurationMaxSeconds?: number;
+  targetRirMin?: number;
+  targetRirMax?: number;
+  recommendedWorkingSets?: number;
+  recommendedRestSeconds?: number;
 }
 
 export function buildWorkoutSuggestion(
@@ -2346,6 +2355,15 @@ export function buildGoalAwareWorkoutSuggestion(
     learningText: progression.learningText,
     templateAdjustmentNote: prescription.adjustmentNote,
     restGuidance,
+    suggestedWeight: progression.suggestedWeight,
+    targetRepsMin: prescription.targetRepsMin,
+    targetRepsMax: prescription.targetRepsMax,
+    targetDurationMinSeconds: prescription.targetDurationMinSeconds,
+    targetDurationMaxSeconds: prescription.targetDurationMaxSeconds,
+    targetRirMin: progression.prescribedRirMin,
+    targetRirMax: progression.prescribedRirMax,
+    recommendedWorkingSets: progression.prescribedSets,
+    recommendedRestSeconds: prescription.restSeconds,
   };
 }
 
@@ -2512,6 +2530,7 @@ export interface MuscleFatigueMapEntry {
 
 export interface DashboardSnapshot {
   todaysWorkoutName: string;
+  todayWorkoutTemplateId: number | null;
   todayScheduledWorkoutName: string | null;
   loggedWorkoutTodayName: string | null;
   isOffScheduleWorkoutToday: boolean;
@@ -2740,6 +2759,7 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
   if (isRestDay) {
     return {
       todaysWorkoutName: "Rest Day",
+      todayWorkoutTemplateId: null,
       todayScheduledWorkoutName,
       loggedWorkoutTodayName,
       isOffScheduleWorkoutToday,
@@ -2769,6 +2789,7 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
   if (!selectedTemplate) {
     return {
       todaysWorkoutName: "Create a workout template",
+      todayWorkoutTemplateId: null,
       todayScheduledWorkoutName,
       loggedWorkoutTodayName,
       isOffScheduleWorkoutToday,
@@ -2795,6 +2816,7 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
 
   const snapshot: DashboardSnapshot = {
     todaysWorkoutName: selectedTemplate.name,
+    todayWorkoutTemplateId: selectedTemplate.id,
     todayScheduledWorkoutName,
     loggedWorkoutTodayName,
     isOffScheduleWorkoutToday,

@@ -18,6 +18,8 @@ interface RestTimerContextValue {
   timers: RestTimer[];
   /** Add a new rest timer without replacing timers that are already counting down. */
   start: (seconds: number, label?: string) => void;
+  /** Replace every timer with the current Guided-session recovery interval. */
+  startFocused: (seconds: number, label?: string) => void;
   pause: (id: string) => void;
   resume: (id: string) => void;
   /** Add/subtract seconds from one running or paused timer (e.g. +/-15s). */
@@ -90,6 +92,20 @@ export function RestTimerProvider({ children }: { children: ReactNode }) {
         endsAt: duration > 0 ? Date.now() + duration * 1000 : null,
       },
     ]);
+  };
+
+  const startFocused = (seconds: number, newLabel: string = "") => {
+    const duration = Math.max(0, Math.floor(seconds));
+    const id = `rest-timer-${Date.now()}-${nextId.current++}`;
+    completedTimerIds.current.clear();
+    setTimers([{
+      id,
+      secondsLeft: duration,
+      totalSeconds: duration,
+      isRunning: duration > 0,
+      label: newLabel.trim(),
+      endsAt: duration > 0 ? Date.now() + duration * 1000 : null,
+    }]);
   };
 
   const pause = (id: string) => {
@@ -179,7 +195,7 @@ export function RestTimerProvider({ children }: { children: ReactNode }) {
   }, [timers]);
 
   return (
-    <RestTimerContext.Provider value={{ timers, start, pause, resume, adjust, dismiss }}>
+    <RestTimerContext.Provider value={{ timers, start, startFocused, pause, resume, adjust, dismiss }}>
       {children}
     </RestTimerContext.Provider>
   );

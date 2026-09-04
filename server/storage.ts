@@ -111,7 +111,8 @@ function ensureTables() {
       theme_mode TEXT NOT NULL DEFAULT 'dark',
       workout_split TEXT NOT NULL DEFAULT 'ppl',
       training_level TEXT NOT NULL DEFAULT 'beginner',
-      training_goal TEXT NOT NULL DEFAULT 'hypertrophy'
+      training_goal TEXT NOT NULL DEFAULT 'hypertrophy',
+      workout_logging_mode TEXT NOT NULL DEFAULT 'classic'
     );
 
     CREATE TABLE IF NOT EXISTS muscle_groups (
@@ -242,7 +243,13 @@ function ensureTables() {
       tz TEXT,
       name TEXT,
       notes TEXT,
-      workout_template_id INTEGER REFERENCES workout_templates(id)
+      workout_template_id INTEGER REFERENCES workout_templates(id),
+      status TEXT NOT NULL DEFAULT 'completed',
+      completed_at TEXT,
+      logging_mode TEXT NOT NULL DEFAULT 'classic',
+      time_budget_minutes INTEGER,
+      planned_duration_minutes INTEGER,
+      session_plan TEXT
     );
 
     CREATE TABLE IF NOT EXISTS workout_exercise_snapshots (
@@ -274,7 +281,9 @@ function ensureTables() {
       reps INTEGER NOT NULL,
       duration_seconds INTEGER,
       rir REAL,
-      is_warmup INTEGER NOT NULL DEFAULT 0
+      is_warmup INTEGER NOT NULL DEFAULT 0,
+      logged_at TEXT,
+      client_request_id TEXT
     );
 
     CREATE TABLE IF NOT EXISTS bodyweight_logs (
@@ -391,6 +400,7 @@ function ensureTables() {
     { column: "home_timezone", ddl: "ALTER TABLE users ADD COLUMN home_timezone TEXT" },
     { column: "training_level", ddl: "ALTER TABLE users ADD COLUMN training_level TEXT NOT NULL DEFAULT 'beginner'" },
     { column: "training_goal", ddl: "ALTER TABLE users ADD COLUMN training_goal TEXT NOT NULL DEFAULT 'hypertrophy'" },
+    { column: "workout_logging_mode", ddl: "ALTER TABLE users ADD COLUMN workout_logging_mode TEXT NOT NULL DEFAULT 'classic'" },
   ];
   for (const { column, ddl } of migrations) {
     if (!existingColumns.has(column)) {
@@ -430,6 +440,8 @@ function ensureTables() {
       column: "duration_seconds",
       ddl: "ALTER TABLE sets ADD COLUMN duration_seconds INTEGER",
     },
+    { table: "sets", column: "logged_at", ddl: "ALTER TABLE sets ADD COLUMN logged_at TEXT" },
+    { table: "sets", column: "client_request_id", ddl: "ALTER TABLE sets ADD COLUMN client_request_id TEXT" },
   ] as const) {
     const columns = new Set(
       (sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name),
@@ -462,6 +474,12 @@ function ensureTables() {
   for (const [column, ddl] of [
     ["started_at", "ALTER TABLE workouts ADD COLUMN started_at TEXT"],
     ["tz", "ALTER TABLE workouts ADD COLUMN tz TEXT"],
+    ["status", "ALTER TABLE workouts ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"],
+    ["completed_at", "ALTER TABLE workouts ADD COLUMN completed_at TEXT"],
+    ["logging_mode", "ALTER TABLE workouts ADD COLUMN logging_mode TEXT NOT NULL DEFAULT 'classic'"],
+    ["time_budget_minutes", "ALTER TABLE workouts ADD COLUMN time_budget_minutes INTEGER"],
+    ["planned_duration_minutes", "ALTER TABLE workouts ADD COLUMN planned_duration_minutes INTEGER"],
+    ["session_plan", "ALTER TABLE workouts ADD COLUMN session_plan TEXT"],
   ] as const) {
     if (!workoutColumns.has(column)) {
       try {
@@ -471,6 +489,10 @@ function ensureTables() {
       }
     }
   }
+
+  sqlite.exec(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_sets_workout_client_request_unique ON sets(workout_id, client_request_id)",
+  );
 
   // Backfill legacy rows that have a civil date but no instant. We can't know
   // the real clock time retroactively, so anchor to 12:00 UTC: a neutral
@@ -854,7 +876,7 @@ export interface IStorage {
   renameUser(id: number, name: string): Promise<UserRecord | undefined>;
   updateUserPreferences(
     id: number,
-    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "trainingLevel" | "trainingGoal" | "timezoneMode" | "homeTimezone">>,
+    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "trainingLevel" | "trainingGoal" | "workoutLoggingMode" | "timezoneMode" | "homeTimezone">>,
   ): Promise<UserRecord | undefined>;
   getRecoverySettings(userId: number): Promise<RecoverySettings>;
   setRecoverySettings(userId: number, settings: RecoverySettings): Promise<RecoverySettings>;
@@ -920,9 +942,11 @@ export interface IStorage {
   getWorkoutsWithSets(userId: number): Promise<WorkoutWithSets[]>;
   getWorkout(id: number): Promise<Workout | undefined>;
   getWorkoutWithSets(id: number): Promise<WorkoutWithSets | undefined>;
+  getActiveWorkoutWithSets(userId: number): Promise<WorkoutWithSets | undefined>;
   createWorkout(workout: InsertWorkout): Promise<Workout>;
   getWorkoutExerciseSnapshots(userId: number): Promise<WorkoutExerciseSnapshot[]>;
   updateWorkout(id: number, workout: Partial<InsertWorkout>): Promise<Workout | undefined>;
+  completeWorkout(id: number, completedAt: string): Promise<Workout | undefined>;
   deleteWorkout(id: number): Promise<void>;
 
   // Sets (scope inherited via workoutId -> workouts.userId)
@@ -974,7 +998,7 @@ export class DatabaseStorage implements IStorage {
 
   async updateUserPreferences(
     id: number,
-    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "trainingLevel" | "trainingGoal" | "timezoneMode" | "homeTimezone">>,
+    prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "trainingLevel" | "trainingGoal" | "workoutLoggingMode" | "timezoneMode" | "homeTimezone">>,
   ): Promise<UserRecord | undefined> {
     return db.update(users).set(prefs).where(eq(users.id, id)).returning().get();
   }
@@ -1592,7 +1616,7 @@ export class DatabaseStorage implements IStorage {
     return db
       .select()
       .from(workouts)
-      .where(eq(workouts.userId, userId))
+      .where(and(eq(workouts.userId, userId), eq(workouts.status, "completed")))
       .orderBy(desc(workouts.date), desc(workouts.id))
       .all();
   }
@@ -1672,6 +1696,15 @@ export class DatabaseStorage implements IStorage {
     return db.update(workouts).set(workout).where(eq(workouts.id, id)).returning().get();
   }
 
+  async completeWorkout(id: number, completedAt: string): Promise<Workout | undefined> {
+    return db
+      .update(workouts)
+      .set({ status: "completed", completedAt })
+      .where(and(eq(workouts.id, id), eq(workouts.status, "in_progress")))
+      .returning()
+      .get();
+  }
+
   async deleteWorkout(id: number): Promise<void> {
     db.delete(workoutExerciseSnapshots).where(eq(workoutExerciseSnapshots.workoutId, id)).run();
     db.delete(sets).where(eq(sets.workoutId, id)).run();
@@ -1700,6 +1733,17 @@ export class DatabaseStorage implements IStorage {
     return rows.map((r) => ({ ...r.sets, exercise: r.exercises }));
   }
 
+  async getActiveWorkoutWithSets(userId: number): Promise<WorkoutWithSets | undefined> {
+    const workout = db
+      .select()
+      .from(workouts)
+      .where(and(eq(workouts.userId, userId), eq(workouts.status, "in_progress")))
+      .orderBy(desc(workouts.id))
+      .get();
+    if (!workout) return undefined;
+    return { ...workout, sets: await this.getSetsForWorkout(workout.id) };
+  }
+
   async getTrackedExerciseIds(userId: number): Promise<number[]> {
     const rows = db
       .selectDistinct({ exerciseId: sets.exerciseId })
@@ -1726,7 +1770,30 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createSet(set: InsertSet): Promise<Set> {
-    return db.insert(sets).values(set).returning().get();
+    if (set.clientRequestId) {
+      const existing = db
+        .select()
+        .from(sets)
+        .where(and(eq(sets.workoutId, set.workoutId), eq(sets.clientRequestId, set.clientRequestId)))
+        .get();
+      if (existing) return existing;
+    }
+    try {
+      return db.insert(sets).values(set).returning().get();
+    } catch (error) {
+      // A retry can race the first request between the lookup and insert. The
+      // unique index decides the winner; return it so both callers receive the
+      // same saved set instead of creating a duplicate or surfacing an error.
+      if (set.clientRequestId) {
+        const existing = db
+          .select()
+          .from(sets)
+          .where(and(eq(sets.workoutId, set.workoutId), eq(sets.clientRequestId, set.clientRequestId)))
+          .get();
+        if (existing) return existing;
+      }
+      throw error;
+    }
   }
 
   async updateSet(id: number, set: Partial<InsertSet>): Promise<Set | undefined> {

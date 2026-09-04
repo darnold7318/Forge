@@ -29,6 +29,12 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   assert.ok(columns("workout_template_exercises").has("target_duration_max_seconds"));
   assert.ok(columns("sets").has("duration_seconds"));
   assert.ok(columns("users").has("training_goal"));
+  assert.ok(columns("users").has("workout_logging_mode"));
+  assert.ok(columns("workouts").has("status"));
+  assert.ok(columns("workouts").has("completed_at"));
+  assert.ok(columns("workouts").has("session_plan"));
+  assert.ok(columns("sets").has("logged_at"));
+  assert.ok(columns("sets").has("client_request_id"));
   assert.ok(columns("user_coach_settings").has("progression_style"));
   assert.ok(columns("user_muscle_coach_overrides").has("recovery_half_life_hours"));
   assert.ok(columns("user_exercise_coach_overrides").has("fatigue_cost"));
@@ -41,9 +47,11 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   assert.equal(users[0].trainingLevel, "beginner");
   assert.equal(users[1].trainingLevel, "advanced");
   assert.equal(users[0].trainingGoal, "hypertrophy");
+  assert.equal(users[0].workoutLoggingMode, "classic");
   const newUser = await storage.createUser({ name: "New user", passwordHash: "test:test" });
   assert.equal(newUser.trainingLevel, "beginner");
   assert.equal(newUser.trainingGoal, "hypertrophy");
+  assert.equal(newUser.workoutLoggingMode, "classic");
   const updatedUser = await storage.updateUserPreferences(newUser.id, { trainingLevel: "intermediate" });
   assert.equal(updatedUser?.trainingLevel, "intermediate");
   assert.deepEqual(await storage.getRecoverySettings(newUser.id), {
@@ -90,6 +98,44 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   const snapshot = (await storage.getWorkoutExerciseSnapshots(newUser.id)).find((row) => row.workoutId === workout.id && row.exerciseId === bench.id);
   assert.equal(snapshot?.failureTarget, "Last Set");
   assert.equal(snapshot?.intensityTechnique, "Rest Pause");
+
+  const guidedWorkout = await storage.createWorkout({
+    userId: newUser.id,
+    date: "2026-08-15",
+    startedAt: "2026-08-15T18:00:00.000Z",
+    tz: "UTC",
+    name: "Guided Test",
+    notes: null,
+    workoutTemplateId: null,
+    status: "in_progress",
+    completedAt: null,
+    loggingMode: "guided",
+    timeBudgetMinutes: 45,
+    plannedDurationMinutes: 40,
+    sessionPlan: "{}",
+  });
+  assert.equal((await storage.getActiveWorkoutWithSets(newUser.id))?.id, guidedWorkout.id);
+  assert.equal((await storage.getWorkouts(newUser.id)).some((row) => row.id === guidedWorkout.id), false);
+  const guidedSetInput = {
+    workoutId: guidedWorkout.id,
+    exerciseId: bench.id,
+    setNumber: 1,
+    weight: 135,
+    reps: 10,
+    durationSeconds: null,
+    rir: 2,
+    isWarmup: false,
+    loggedAt: "2026-08-15T18:05:00.000Z",
+    clientRequestId: "same-guided-request",
+  };
+  const firstGuidedSet = await storage.createSet(guidedSetInput);
+  const retriedGuidedSet = await storage.createSet(guidedSetInput);
+  assert.equal(retriedGuidedSet.id, firstGuidedSet.id);
+  assert.equal((await storage.getSetsForWorkout(guidedWorkout.id)).length, 1);
+  assert.ok(await storage.completeWorkout(guidedWorkout.id, "2026-08-15T18:45:00.000Z"));
+  assert.equal(await storage.completeWorkout(guidedWorkout.id, "2026-08-15T18:46:00.000Z"), undefined);
+  assert.equal((await storage.getActiveWorkoutWithSets(newUser.id)), undefined);
+  assert.equal((await storage.getWorkouts(newUser.id)).some((row) => row.id === guidedWorkout.id), true);
   await storage.setLearnedVolumeRanges(newUser.id, [{
     muscleGroupId: bench.primaryMuscleGroupId,
     productiveLow: 10,
