@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronDown, ChevronsUpDown, Plus, Trash2, X, ClipboardList, Trophy, Flame, TimerIcon, Calculator, Sparkles } from "lucide-react";
+import { Check, ChevronDown, ChevronsUpDown, Plus, Trash2, X, Trophy, Flame, TimerIcon, Calculator, Sparkles } from "lucide-react";
+import { WorkoutNamePicker } from "@/components/workout-name-picker";
 import { apiRequest, queryClient as qc } from "@/lib/queryClient";
 import { invalidateTrainingHistoryQueries } from "@/lib/training-history-cache";
 import { useActiveUser } from "@/lib/user-context";
@@ -543,52 +544,6 @@ function CreateExerciseDialog({
   );
 }
 
-function TemplateStartPicker({
-  templates,
-  onStart,
-}: {
-  templates: WorkoutTemplateLite[];
-  onStart: (t: WorkoutTemplateLite) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  if (templates.length === 0) return null;
-
-  return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent data-testid="dialog-start-template" className="max-h-[85vh] flex flex-col gap-4">
-        <DialogHeader>
-          <DialogTitle>Start from a template</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-2 overflow-y-auto pr-1 -mr-1">
-          {templates.map((t) => (
-            <button
-              key={t.id}
-              className="w-full text-left p-3 rounded-md border hover-elevate active-elevate-2"
-              onClick={() => {
-                onStart(t);
-                setOpen(false);
-              }}
-              data-testid={`button-select-template-${t.id}`}
-            >
-              <p className="font-medium text-sm">{t.name}</p>
-              <p className="text-xs text-muted-foreground">{t.exercises.length} exercises</p>
-            </button>
-          ))}
-        </div>
-      </DialogContent>
-      <Button
-        variant="outline"
-        className="w-full"
-        onClick={() => setOpen(true)}
-        data-testid="button-open-template-picker"
-      >
-        <ClipboardList className="h-4 w-4" />
-        Start from template
-      </Button>
-    </Dialog>
-  );
-}
-
 export default function ClassicLogWorkout() {
   const { toast } = useToast();
   const restTimer = useRestTimer();
@@ -600,6 +555,9 @@ export default function ClassicLogWorkout() {
   const [newExerciseName, setNewExerciseName] = useState("");
   const [saved, setSaved] = useState(false);
   const [activeTemplateId, setActiveTemplateId] = useState<number | null>(null);
+  // Sticky until save: clearing an entered value must not allow a session switch.
+  // Track edits rather than defaults (bodyweight exercises start with weight 0).
+  const [sessionStarted, setSessionStarted] = useState(false);
   // Lazily-created workout id, set the first time any individual set is
   // logged mid-session (via "Log set"). Reused for subsequent per-set logs
   // and for the final batch save, so we never create duplicate workouts.
@@ -678,7 +636,31 @@ export default function ClassicLogWorkout() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templates, exercisesLoading, location]);
 
+  const clearTemplateLink = () => {
+    // Wouter retains the outer query between hash routes. Consume the template
+    // link so refetching templates cannot reopen it after a custom name/reset.
+    const url = new URL(window.location.href);
+    url.searchParams.delete("template");
+    const queryIndex = url.hash.indexOf("?");
+    if (queryIndex !== -1) {
+      const params = new URLSearchParams(url.hash.slice(queryIndex + 1));
+      params.delete("template");
+      url.hash = url.hash.slice(0, queryIndex) + (params.size ? `?${params}` : "");
+    }
+    window.history.replaceState(window.history.state, "", url);
+  };
+
+  const resetSessionDraft = () => {
+    clearTemplateLink();
+    setLiveWorkoutId(null);
+    setSaved(false);
+    setWarmupDialogFor(null);
+    setRepCalculatorFor(null);
+  };
+
   const startFromTemplate = (template: WorkoutTemplateLite) => {
+    if (sessionStarted || liveWorkoutId != null) return;
+    resetSessionDraft();
     const sorted = [...template.exercises].sort((a, b) => a.exerciseOrder - b.exerciseOrder);
     const newDrafts: DraftExercise[] = [];
     for (const te of sorted) {
@@ -699,8 +681,15 @@ export default function ClassicLogWorkout() {
     setDraftExercises(newDrafts);
     setWorkoutName(template.name);
     setActiveTemplateId(template.id);
-    setLiveWorkoutId(null);
     toast({ title: `Started ${template.name}`, description: `${newDrafts.length} exercises loaded.` });
+  };
+
+  const startCustomWorkout = (name: string) => {
+    if (sessionStarted || liveWorkoutId != null) return;
+    resetSessionDraft();
+    setWorkoutName(name);
+    setActiveTemplateId(null);
+    setDraftExercises([]);
   };
 
   const addExercise = (ex: Exercise) => {
@@ -729,6 +718,10 @@ export default function ClassicLogWorkout() {
   };
 
   const updateSet = (exKey: string, setKey: string, patch: Partial<DraftSet>) => {
+    if (patch.loggedSetId != null || patch.isWarmup != null ||
+      [patch.weight, patch.reps, patch.durationSeconds, patch.rir].some((value) => value != null && value !== "")) {
+      setSessionStarted(true);
+    }
     setDraftExercises((prev) =>
       prev.map((d) =>
         d.key === exKey
@@ -813,8 +806,8 @@ export default function ClassicLogWorkout() {
         });
       }
     },
-    onError: () => {
-      toast({ title: "Failed to log set", variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Failed to log set", description: error.message, variant: "destructive" });
     },
   });
 
@@ -849,11 +842,12 @@ export default function ClassicLogWorkout() {
       setDate(todayIso());
       setActiveTemplateId(null);
       setLiveWorkoutId(null);
+      setSessionStarted(false);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     },
-    onError: () => {
-      toast({ title: "Failed to save workout", variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Failed to save workout", description: error.message, variant: "destructive" });
     },
   });
 
@@ -866,22 +860,27 @@ export default function ClassicLogWorkout() {
         <p className="text-sm text-muted-foreground">Record today's session</p>
       </div>
 
-      {draftExercises.length === 0 && (
-        <TemplateStartPicker templates={templates ?? []} onStart={startFromTemplate} />
-      )}
-
       <Card>
         <CardContent className="p-4 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <Label htmlFor="workout-name">Workout name (optional)</Label>
-              <Input
-                id="workout-name"
-                placeholder="e.g. Push Day"
+              <WorkoutNamePicker
                 value={workoutName}
-                onChange={(e) => setWorkoutName(e.target.value)}
-                data-testid="input-workout-name"
+                templates={templates ?? []}
+                selectedTemplateId={activeTemplateId}
+                disabled={exercisesLoading || sessionStarted || liveWorkoutId != null || logSetMutation.isPending || saveMutation.isPending}
+                onTemplate={(id) => {
+                  const template = templates?.find((item) => item.id === id);
+                  if (template) startFromTemplate(template);
+                }}
+                onCustomName={startCustomWorkout}
               />
+              <p id="workout-name-help" className="text-xs text-muted-foreground">
+                {sessionStarted || liveWorkoutId != null
+                  ? "Workout name and template are locked because set data has been entered. Save this workout to start another."
+                  : "Choose a template or enter a new name for an empty manual workout. The name locks when you enter set data."}
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="workout-date">Date</Label>
