@@ -97,12 +97,13 @@ export const trainingGoalLabels: Record<TrainingGoalId, string> = {
   muscular_endurance: "Muscular Endurance",
 };
 
-export const workoutLoggingModeIds = ["classic", "guided"] as const;
+export const workoutLoggingModeIds = ["classic", "guided", "advanced_guided"] as const;
 export type WorkoutLoggingModeId = (typeof workoutLoggingModeIds)[number];
 
 export const workoutLoggingModeLabels: Record<WorkoutLoggingModeId, string> = {
   classic: "Classic",
   guided: "Guided",
+  advanced_guided: "Advanced Guided Trainer",
 };
 
 export const timezoneModeIds = ["home", "auto"] as const;
@@ -377,6 +378,59 @@ export const equipmentWeightSettingsSchema = z.object({
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Maximum weight must be at least the minimum weight" });
   }
 });
+
+// Advanced Guided Trainer settings are intentionally separate from the
+// reactive Coach settings. Each mesocycle snapshots these values so changing
+// next-cycle preferences cannot silently rewrite a cycle already in progress.
+export const advancedTrainerSettingsSchema = z.object({
+  accumulationWeeks: z.number().int().min(3).max(8),
+  startRir: z.number().int().min(2).max(4),
+  endRir: z.number().int().min(0).max(2),
+  maxSetsPerExercise: z.number().int().min(3).max(6),
+  maxSetsPerMuscleSession: z.number().int().min(6).max(14),
+  deloadSetPercent: z.number().int().min(25).max(75),
+  deloadLoadPercent: z.number().int().min(40).max(80),
+}).superRefine((value, ctx) => {
+  if (value.endRir >= value.startRir) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "End RIR must be lower than start RIR" });
+  }
+});
+
+export type AdvancedTrainerSettings = z.infer<typeof advancedTrainerSettingsSchema>;
+
+export const DEFAULT_ADVANCED_TRAINER_SETTINGS: AdvancedTrainerSettings = {
+  accumulationWeeks: 4,
+  startRir: 3,
+  endRir: 1,
+  maxSetsPerExercise: 5,
+  maxSetsPerMuscleSession: 10,
+  deloadSetPercent: 50,
+  deloadLoadPercent: 60,
+};
+
+export const userAdvancedTrainerSettings = sqliteTable("user_advanced_trainer_settings", {
+  userId: integer("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  accumulationWeeks: integer("accumulation_weeks").notNull().default(4),
+  startRir: integer("start_rir").notNull().default(3),
+  endRir: integer("end_rir").notNull().default(1),
+  maxSetsPerExercise: integer("max_sets_per_exercise").notNull().default(5),
+  maxSetsPerMuscleSession: integer("max_sets_per_muscle_session").notNull().default(10),
+  deloadSetPercent: integer("deload_set_percent").notNull().default(50),
+  deloadLoadPercent: integer("deload_load_percent").notNull().default(60),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const advancedTrainerCycles = sqliteTable("advanced_trainer_cycles", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  startedOn: text("started_on").notNull(),
+  status: text("status").notNull().default("active"),
+  settingsSnapshot: text("settings_snapshot").notNull(),
+  completedAt: text("completed_at"),
+  reviewNotes: text("review_notes"),
+});
+
+export type AdvancedTrainerCycle = typeof advancedTrainerCycles.$inferSelect;
 
 export type EquipmentWeightSettings = z.infer<typeof equipmentWeightSettingsSchema>;
 export type UserEquipmentSettingsRow = typeof userEquipmentSettings.$inferSelect;

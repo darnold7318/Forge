@@ -42,13 +42,17 @@ export interface SeedExercise {
 }
 
 // Curated stimulus corrections for exercises that may already exist in an
-// upgraded user catalog but are not added to a new starter catalog. A
-// high-to-low fly can recruit the triceps long head minimally as a shoulder
-// extensor/adductor, but activation is not evidence for crediting it with the
-// legacy default of half an effective set. Preserve the existing lat profile;
-// this correction is intentionally scoped to the reviewed triceps evidence.
+// upgraded user catalog but are not added to a new starter catalog. These
+// values distinguish the prime mover (1.0) from secondary stimulus so the
+// Advanced Guided Trainer can count direct volume separately from fatigue.
 export const CATALOG_EXERCISE_STIMULUS_DEFAULTS = [
-  { name: "High-Low Cable Fly", stimulus: { MidLowerChest: 1, Lats: 0.5, Triceps: 0.1 } },
+  { name: "High-Low Cable Fly", stimulus: { MidLowerChest: 1, Triceps: 0.1 } },
+  { name: "Low-High Cable Fly", stimulus: { UpperChest: 1, MidLowerChest: 0.35, FrontDelts: 0.15 } },
+  { name: "Dumbbell Shoulder Press", stimulus: { SideDelts: 1, FrontDelts: 0.65, Triceps: 0.45, UpperChest: 0.15 } },
+  { name: "Pallof Press", stimulus: { Obliques: 1, Abs: 0.35, Glutes: 0.1 } },
+  { name: "Side Plank", stimulus: { Obliques: 1, Abs: 0.35, Abductors: 0.3, Glutes: 0.1 } },
+  { name: "Dumbbell Romanian Deadlift", stimulus: { Glutes: 1, Hamstrings: 0.5, SpinalErectors: 0.3, Forearms: 0.15 } },
+  { name: "Dumbbell RDL", stimulus: { Glutes: 1, Hamstrings: 0.5, SpinalErectors: 0.3, Forearms: 0.15 } },
 ] satisfies { name: string; stimulus: Partial<Record<MuscleGroupName, number>> }[];
 
 export const EXERCISES: SeedExercise[] = [

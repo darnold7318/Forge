@@ -2,6 +2,8 @@ import {
   users,
   userRecoverySettings,
   userCoachSettings,
+  userAdvancedTrainerSettings,
+  advancedTrainerCycles,
   userMuscleCoachOverrides,
   userExerciseCoachOverrides,
   userEquipmentSettings,
@@ -26,6 +28,8 @@ import {
   DEFAULT_RECOVERY_SETTINGS,
   DEFAULT_COACH_SETTINGS,
   coachSettingsSchema,
+  advancedTrainerSettingsSchema,
+  DEFAULT_ADVANCED_TRAINER_SETTINGS,
   equipmentTypes,
   DEFAULT_EQUIPMENT_WEIGHT_SETTINGS,
 } from "@shared/schema";
@@ -62,6 +66,8 @@ import type {
   MuscleGroupName,
   RecoverySettings,
   CoachSettings,
+  AdvancedTrainerSettings,
+  AdvancedTrainerCycle,
   MuscleCoachOverride,
   ExerciseCoachOverride,
   WorkoutExerciseSnapshot,
@@ -194,6 +200,33 @@ function ensureTables() {
       max_weight REAL NOT NULL DEFAULT 1000,
       weight_increment REAL NOT NULL DEFAULT 5
     );
+
+    CREATE TABLE IF NOT EXISTS user_advanced_trainer_settings (
+      user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      accumulation_weeks INTEGER NOT NULL DEFAULT 4,
+      start_rir INTEGER NOT NULL DEFAULT 3,
+      end_rir INTEGER NOT NULL DEFAULT 1,
+      max_sets_per_exercise INTEGER NOT NULL DEFAULT 5,
+      max_sets_per_muscle_session INTEGER NOT NULL DEFAULT 10,
+      deload_set_percent INTEGER NOT NULL DEFAULT 50,
+      deload_load_percent INTEGER NOT NULL DEFAULT 60,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS advanced_trainer_cycles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      started_on TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      settings_snapshot TEXT NOT NULL,
+      completed_at TEXT,
+      review_notes TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_advanced_trainer_cycles_user_status
+      ON advanced_trainer_cycles(user_id, status, id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_advanced_trainer_cycles_one_active
+      ON advanced_trainer_cycles(user_id) WHERE status = 'active';
 
     CREATE TABLE IF NOT EXISTS user_exercise_equipment_profiles (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -883,6 +916,11 @@ export interface IStorage {
   getCoachSettings(userId: number): Promise<CoachSettings>;
   setCoachSettings(userId: number, settings: CoachSettings): Promise<CoachSettings>;
   resetCoachSettings(userId: number): Promise<CoachSettings>;
+  getAdvancedTrainerSettings(userId: number): Promise<AdvancedTrainerSettings>;
+  setAdvancedTrainerSettings(userId: number, settings: AdvancedTrainerSettings): Promise<AdvancedTrainerSettings>;
+  getActiveAdvancedTrainerCycle(userId: number): Promise<AdvancedTrainerCycle | undefined>;
+  createAdvancedTrainerCycle(userId: number, startedOn: string, settings: AdvancedTrainerSettings): Promise<AdvancedTrainerCycle>;
+  completeAdvancedTrainerCycle(userId: number, cycleId: number, completedAt: string, reviewNotes?: string | null): Promise<AdvancedTrainerCycle | undefined>;
   getMuscleCoachOverrides(userId: number): Promise<MuscleCoachOverride[]>;
   setMuscleCoachOverride(userId: number, value: MuscleCoachOverride): Promise<MuscleCoachOverride>;
   deleteMuscleCoachOverride(userId: number, muscleGroupId: number): Promise<void>;
@@ -1121,6 +1159,65 @@ export class DatabaseStorage implements IStorage {
       eq(userExerciseCoachOverrides.userId, userId),
       eq(userExerciseCoachOverrides.exerciseId, exerciseId),
     )).run();
+  }
+
+  async getAdvancedTrainerSettings(userId: number): Promise<AdvancedTrainerSettings> {
+    const row = db.select().from(userAdvancedTrainerSettings)
+      .where(eq(userAdvancedTrainerSettings.userId, userId)).get();
+    if (!row) return { ...DEFAULT_ADVANCED_TRAINER_SETTINGS };
+    const parsed = advancedTrainerSettingsSchema.safeParse(row);
+    return parsed.success ? parsed.data : { ...DEFAULT_ADVANCED_TRAINER_SETTINGS };
+  }
+
+  async setAdvancedTrainerSettings(userId: number, settings: AdvancedTrainerSettings): Promise<AdvancedTrainerSettings> {
+    const updatedAt = new Date().toISOString();
+    db.insert(userAdvancedTrainerSettings)
+      .values({ userId, ...settings, updatedAt })
+      .onConflictDoUpdate({
+        target: userAdvancedTrainerSettings.userId,
+        set: { ...settings, updatedAt },
+      })
+      .run();
+    return settings;
+  }
+
+  async getActiveAdvancedTrainerCycle(userId: number): Promise<AdvancedTrainerCycle | undefined> {
+    return db.select().from(advancedTrainerCycles)
+      .where(and(eq(advancedTrainerCycles.userId, userId), eq(advancedTrainerCycles.status, "active")))
+      .orderBy(desc(advancedTrainerCycles.id)).get();
+  }
+
+  async createAdvancedTrainerCycle(
+    userId: number,
+    startedOn: string,
+    settings: AdvancedTrainerSettings,
+  ): Promise<AdvancedTrainerCycle> {
+    const existing = await this.getActiveAdvancedTrainerCycle(userId);
+    if (existing) return existing;
+    return db.insert(advancedTrainerCycles).values({
+      userId,
+      startedOn,
+      status: "active",
+      settingsSnapshot: JSON.stringify(settings),
+      completedAt: null,
+      reviewNotes: null,
+    }).returning().get();
+  }
+
+  async completeAdvancedTrainerCycle(
+    userId: number,
+    cycleId: number,
+    completedAt: string,
+    reviewNotes: string | null = null,
+  ): Promise<AdvancedTrainerCycle | undefined> {
+    return db.update(advancedTrainerCycles)
+      .set({ status: "completed", completedAt, reviewNotes })
+      .where(and(
+        eq(advancedTrainerCycles.id, cycleId),
+        eq(advancedTrainerCycles.userId, userId),
+        eq(advancedTrainerCycles.status, "active"),
+      ))
+      .returning().get();
   }
 
   private ensureEquipmentProfiles(userId: number): void {

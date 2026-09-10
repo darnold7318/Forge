@@ -21,6 +21,8 @@ import {
   exerciseMuscleStimulus as exerciseMuscleStimulusTable,
   userExerciseMuscleStimulusOverrides as userExerciseMuscleStimulusOverridesTable,
   userCoachSettings as userCoachSettingsTable,
+  userAdvancedTrainerSettings as userAdvancedTrainerSettingsTable,
+  advancedTrainerCycles as advancedTrainerCyclesTable,
   userMuscleCoachOverrides as userMuscleCoachOverridesTable,
   userExerciseCoachOverrides as userExerciseCoachOverridesTable,
   userEquipmentSettings as userEquipmentSettingsTable,
@@ -52,6 +54,7 @@ import {
   updateUserPreferencesSchema,
   recoverySettingsSchema,
   coachSettingsSchema,
+  advancedTrainerSettingsSchema,
   muscleCoachOverrideSchema,
   exerciseCoachOverrideSchema,
   equipmentProfileInputSchema,
@@ -102,6 +105,7 @@ import {
   type MuscleTrainingContext,
 } from "@shared/coaching";
 import { guidedSessionPlanSchema, type GuidedSessionPlan } from "@shared/guided-workout";
+import { resolveAdvancedTrainerTiming, type AdvancedTrainerState } from "@shared/advanced-trainer";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -228,6 +232,27 @@ async function buildExerciseViews(userId: number) {
       })
       .sort((a, b) => b.stimulusRatio - a.stimulusRatio || a.displayName.localeCompare(b.displayName)),
   }));
+}
+
+async function getAdvancedTrainerState(userId: number, today: string): Promise<AdvancedTrainerState> {
+  const configuredSettings = await storage.getAdvancedTrainerSettings(userId);
+  let cycle = await storage.getActiveAdvancedTrainerCycle(userId);
+  if (!cycle) cycle = await storage.createAdvancedTrainerCycle(userId, today, configuredSettings);
+  let rawSnapshot: unknown = null;
+  try {
+    rawSnapshot = JSON.parse(cycle.settingsSnapshot);
+  } catch {
+    rawSnapshot = null;
+  }
+  const snapshot = advancedTrainerSettingsSchema.safeParse(rawSnapshot);
+  const settings = snapshot.success ? snapshot.data : configuredSettings;
+  return {
+    cycleId: cycle.id,
+    startedOn: cycle.startedOn,
+    settings,
+    configuredSettings,
+    ...resolveAdvancedTrainerTiming({ startedOn: cycle.startedOn, today, settings }),
+  };
 }
 
 function toHistorySet(s: SetWithExercise): HistorySetInput {
@@ -923,6 +948,55 @@ export async function registerRoutes(
     res.json(updated);
   });
 
+  // ---------------- Advanced Guided Trainer ----------------
+  app.get("/api/advanced-trainer/settings", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    res.json(await storage.getAdvancedTrainerSettings(userId));
+  });
+
+  app.put("/api/advanced-trainer/settings", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = advancedTrainerSettingsSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message ?? "Invalid trainer settings" });
+    res.json(await storage.setAdvancedTrainerSettings(userId, parsed.data));
+  });
+
+  app.get("/api/advanced-trainer/state", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    res.json(await getAdvancedTrainerState(userId, todayFor(req)));
+  });
+
+  const advancedTrainerReviewSchema = z.object({
+    settings: advancedTrainerSettingsSchema,
+    reviewNotes: z.string().trim().max(1000).nullable().optional(),
+    startNextCycle: z.boolean().default(true),
+  });
+
+  app.post("/api/advanced-trainer/cycles/:id/review", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const cycleId = Number(req.params.id);
+    const body = advancedTrainerReviewSchema.safeParse(req.body);
+    if (!body.success) return res.status(400).json({ message: body.error.issues[0]?.message ?? "Invalid cycle review" });
+    const state = await getAdvancedTrainerState(userId, todayFor(req));
+    if (state.cycleId !== cycleId) return res.status(404).json({ message: "Active mesocycle not found" });
+    if (state.phase !== "review") return res.status(409).json({ message: "This mesocycle has not reached its review yet" });
+    await storage.setAdvancedTrainerSettings(userId, body.data.settings);
+    const completed = await storage.completeAdvancedTrainerCycle(
+      userId,
+      cycleId,
+      new Date().toISOString(),
+      body.data.reviewNotes ?? null,
+    );
+    if (!completed) return res.status(409).json({ message: "Mesocycle was already reviewed" });
+    if (!body.data.startNextCycle) return res.json({ completed: true, state: null });
+    await storage.createAdvancedTrainerCycle(userId, todayFor(req), body.data.settings);
+    res.json({ completed: true, state: await getAdvancedTrainerState(userId, todayFor(req)) });
+  });
+
   // ---------------- Workouts (scoped per user) ----------------
   app.get("/api/workouts", async (req, res) => {
     const userId = getUserId(req, res);
@@ -1036,6 +1110,18 @@ export async function registerRoutes(
       return res.status(400).json({ message: "Workout plan contains an unknown exercise" });
     }
 
+    const advancedMetadata = body.data.sessionPlan.advancedTrainer ?? null;
+    if (advancedMetadata) {
+      const currentState = await getAdvancedTrainerState(userId, todayFor(req));
+      if (
+        currentState.cycleId !== advancedMetadata.cycleId
+        || currentState.weekNumber !== advancedMetadata.weekNumber
+        || currentState.phase !== advancedMetadata.phase
+      ) {
+        return res.status(409).json({ message: "The mesocycle advanced. Refresh the plan before starting." });
+      }
+    }
+
     const zone = zoneOf(req);
     const now = new Date();
     const todayCivil = civilDateInZone(now, zone);
@@ -1051,7 +1137,7 @@ export async function registerRoutes(
       workoutTemplateId: body.data.workoutTemplateId,
       status: "in_progress",
       completedAt: null,
-      loggingMode: "guided",
+      loggingMode: advancedMetadata ? "advanced_guided" : "guided",
       timeBudgetMinutes: body.data.timeBudgetMinutes,
       plannedDurationMinutes: body.data.sessionPlan.estimatedMinutes,
       sessionPlan: JSON.stringify(body.data.sessionPlan),
@@ -1945,6 +2031,8 @@ export async function registerRoutes(
       .run();
     db.delete(userRecoverySettingsTable).where(eq(userRecoverySettingsTable.userId, userId)).run();
     db.delete(userCoachSettingsTable).where(eq(userCoachSettingsTable.userId, userId)).run();
+    db.delete(advancedTrainerCyclesTable).where(eq(advancedTrainerCyclesTable.userId, userId)).run();
+    db.delete(userAdvancedTrainerSettingsTable).where(eq(userAdvancedTrainerSettingsTable.userId, userId)).run();
     db.delete(userMuscleCoachOverridesTable).where(eq(userMuscleCoachOverridesTable.userId, userId)).run();
     db.delete(userExerciseCoachOverridesTable).where(eq(userExerciseCoachOverridesTable.userId, userId)).run();
     db.delete(userExerciseEquipmentProfilesTable).where(eq(userExerciseEquipmentProfilesTable.userId, userId)).run();
@@ -1993,6 +2081,8 @@ export async function registerRoutes(
       .where(eq(userRecoverySettingsTable.userId, userId))
       .get() ?? null;
     const coachSettings = db.select().from(userCoachSettingsTable).where(eq(userCoachSettingsTable.userId, userId)).get() ?? null;
+    const advancedTrainerSettings = db.select().from(userAdvancedTrainerSettingsTable).where(eq(userAdvancedTrainerSettingsTable.userId, userId)).get() ?? null;
+    const advancedTrainerCycles = db.select().from(advancedTrainerCyclesTable).where(eq(advancedTrainerCyclesTable.userId, userId)).all();
     const muscleCoachOverrides = db.select().from(userMuscleCoachOverridesTable).where(eq(userMuscleCoachOverridesTable.userId, userId)).all();
     const exerciseCoachOverrides = db.select().from(userExerciseCoachOverridesTable).where(eq(userExerciseCoachOverridesTable.userId, userId)).all();
     const equipmentSettings = db.select().from(userEquipmentSettingsTable).where(eq(userEquipmentSettingsTable.userId, userId)).all();
@@ -2012,6 +2102,8 @@ export async function registerRoutes(
       exerciseStimulusOverrides,
       recoverySettings,
       coachSettings,
+      advancedTrainerSettings,
+      advancedTrainerCycles,
       muscleCoachOverrides,
       exerciseCoachOverrides,
       equipmentSettings,
@@ -2037,7 +2129,7 @@ export async function registerRoutes(
     const payload = {
       exportType: "forge-profile-backup" as const,
       exportedAt: new Date().toISOString(),
-      version: 6,
+      version: 7,
       data: buildUserExport(user),
     };
 
@@ -2058,7 +2150,7 @@ export async function registerRoutes(
     const payload = {
       exportType: "forge-full-backup" as const,
       exportedAt: new Date().toISOString(),
-      version: 6,
+      version: 7,
       data: {
         muscleGroups: allMuscleGroups,
         exercises: allExercises,

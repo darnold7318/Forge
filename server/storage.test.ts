@@ -41,6 +41,8 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   assert.ok(columns("workout_exercise_snapshots").has("target_rir"));
   assert.ok(columns("user_muscle_learned_ranges").has("valid_week_count"));
   assert.ok(columns("user_muscle_learned_ranges").has("explanation"));
+  assert.ok(columns("user_advanced_trainer_settings").has("deload_load_percent"));
+  assert.ok(columns("advanced_trainer_cycles").has("settings_snapshot"));
   migrated.close();
 
   const users = await storage.getUsers();
@@ -70,6 +72,14 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   assert.equal(coachSettings.progressionStyle, "automatic");
   await storage.setCoachSettings(newUser.id, { ...coachSettings, progressionStyle: "rep_first", trendHistoryLimit: 6 });
   assert.equal((await storage.getCoachSettings(newUser.id)).progressionStyle, "rep_first");
+  const advancedSettings = await storage.getAdvancedTrainerSettings(newUser.id);
+  assert.equal(advancedSettings.accumulationWeeks, 4);
+  await storage.setAdvancedTrainerSettings(newUser.id, { ...advancedSettings, accumulationWeeks: 6 });
+  assert.equal((await storage.getAdvancedTrainerSettings(newUser.id)).accumulationWeeks, 6);
+  const cycle = await storage.createAdvancedTrainerCycle(newUser.id, "2026-08-14", advancedSettings);
+  assert.equal((await storage.getActiveAdvancedTrainerCycle(newUser.id))?.id, cycle.id);
+  await storage.completeAdvancedTrainerCycle(newUser.id, cycle.id, "2026-09-18T12:00:00.000Z", "Recovered well");
+  assert.equal(await storage.getActiveAdvancedTrainerCycle(newUser.id), undefined);
   const bench = (await storage.getExercises()).find((exercise) => exercise.name === "Barbell Bench Press");
   assert.ok(bench);
   const template = await storage.createWorkoutTemplate({ userId: newUser.id, name: "Snapshot Test", notes: null });

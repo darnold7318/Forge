@@ -25,6 +25,7 @@ import { invalidateTrainingHistoryQueries } from "@/lib/training-history-cache";
 import { useActiveUser } from "@/lib/user-context";
 import { useRestTimer } from "@/lib/rest-timer-context";
 import { useToast } from "@/hooks/use-toast";
+import { AdvancedTrainerSettingsEditor } from "@/components/advanced-trainer-settings";
 import { todayIso } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -46,16 +47,23 @@ import {
 } from "@/components/ui/alert-dialog";
 import type { DashboardSnapshot, WorkoutExerciseSuggestion } from "@shared/coaching";
 import { resolveWorkingSetCount } from "@shared/coaching";
-import type { ExerciseView, Set as LoggedSet, Workout } from "@shared/schema";
+import type { ExerciseView, MuscleGroupName, Set as LoggedSet, Workout } from "@shared/schema";
 import {
   buildGuidedSessionPlan,
   estimateGuidedSessionMinutes,
   evaluateGuidedSetAdjustment,
   type GuidedPlanExercise,
+  type GuidedPlanExerciseInput,
   type GuidedSessionPlan,
   type GuidedSetAdjustment,
   type GuidedTimeStrategy,
 } from "@shared/guided-workout";
+import {
+  applyAdvancedMesocyclePlan,
+  refreshAdvancedPlanMetadata,
+  type AdvancedExerciseVolumeProfile,
+  type AdvancedTrainerState,
+} from "@shared/advanced-trainer";
 
 interface TemplateExercise {
   id: number;
@@ -175,6 +183,23 @@ function PlanPreview({ plan }: { plan: GuidedSessionPlan }) {
           <p className="text-[11px] text-muted-foreground">exercises</p>
         </div>
       </div>
+      {plan.advancedTrainer && (
+        <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-medium">
+              {plan.advancedTrainer.phase === "deload" ? "Deload" : `Accumulation week ${plan.advancedTrainer.weekNumber}`}
+            </p>
+            <Badge variant="outline">RIR {plan.advancedTrainer.targetRir}-{Math.min(5, plan.advancedTrainer.targetRir + 1)}</Badge>
+          </div>
+          <div className="mt-2 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+            {plan.advancedTrainer.volumeSummary.map((row) => (
+              <span key={row.muscleGroup}>
+                {row.muscleGroup}: {row.prescribedDirectSets} direct · {row.fatigueLoad} total stimulus
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       {adjustedSets > 0 && (
         <p className="text-xs text-muted-foreground">
           {adjustedSets} lower-priority working {adjustedSets === 1 ? "set was" : "sets were"} trimmed to fit this budget.
@@ -215,7 +240,7 @@ function PlanPreview({ plan }: { plan: GuidedSessionPlan }) {
   );
 }
 
-export default function GuidedWorkout() {
+export default function GuidedWorkout({ advanced = false }: { advanced?: boolean }) {
   const { activeUserId, activeUser } = useActiveUser();
   const { toast } = useToast();
   const restTimer = useRestTimer();
@@ -250,6 +275,14 @@ export default function GuidedWorkout() {
     enabled: activeUserId != null,
     refetchOnWindowFocus: true,
   });
+  const { data: advancedState, isLoading: advancedLoading } = useQuery<AdvancedTrainerState>({
+    queryKey: ["/api/advanced-trainer/state", activeUserId],
+    queryFn: async () => (await apiRequest("GET", "/api/advanced-trainer/state")).json(),
+    enabled: advanced && activeUserId != null,
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+  });
 
   useEffect(() => {
     if (selectedTemplateId != null || !templates?.length) return;
@@ -272,10 +305,11 @@ export default function GuidedWorkout() {
   });
 
   const plan = useMemo(() => {
-    if (!selectedTemplate || !exercises || !suggestions) return null;
+    if (!selectedTemplate || !exercises || !suggestions || (advanced && !advancedState)) return null;
+    if (advancedState?.phase === "review") return null;
     const exerciseById = new Map(exercises.map((exercise) => [exercise.id, exercise]));
     const suggestionById = new Map(suggestions.map((suggestion) => [suggestion.exerciseId, suggestion]));
-    const rows = selectedTemplate.exercises.flatMap((templateExercise) => {
+    const rows: GuidedPlanExerciseInput[] = selectedTemplate.exercises.flatMap((templateExercise) => {
       const exercise = exerciseById.get(templateExercise.exerciseId);
       if (!exercise) return [];
       const coach = suggestionById.get(exercise.id);
@@ -307,14 +341,53 @@ export default function GuidedWorkout() {
       }];
     });
     if (rows.length === 0) return null;
-    return buildGuidedSessionPlan({
+    let plannedRows = rows;
+    let advancedTrainer = null;
+    let advancedVolumeProfiles: AdvancedExerciseVolumeProfile[] = [];
+    let advancedWarnings: string[] = [];
+    if (advanced && advancedState) {
+      const volumeProfiles: AdvancedExerciseVolumeProfile[] = exercises.flatMap((exercise) => {
+        const primary = [...exercise.stimulus].sort((a, b) => b.stimulusRatio - a.stimulusRatio)[0];
+        if (!primary) return [];
+        return [{
+          exerciseId: exercise.id,
+          primaryMuscle: primary.muscleGroupName as MuscleGroupName,
+          stimulus: exercise.stimulus.map((row) => ({
+            muscleGroupName: row.muscleGroupName as MuscleGroupName,
+            stimulusRatio: row.stimulusRatio,
+          })),
+        }];
+      });
+      advancedVolumeProfiles = volumeProfiles;
+      const advancedPlan = applyAdvancedMesocyclePlan({
+        exercises: rows,
+        allTemplateExercises: templates!.flatMap((template) => template.exercises.map((exercise) => ({
+          exerciseId: exercise.exerciseId,
+          targetSets: resolveWorkingSetCount(exercise),
+        }))),
+        volumeProfiles,
+        state: advancedState,
+      });
+      plannedRows = advancedPlan.exercises;
+      advancedTrainer = advancedPlan.metadata;
+      advancedWarnings = advancedPlan.warnings;
+    }
+    const built = buildGuidedSessionPlan({
       workoutTemplateId: selectedTemplate.id,
       workoutName: selectedTemplate.name,
-      exercises: rows,
+      exercises: plannedRows,
       timeBudgetMinutes: budget === "full" ? null : Number(budget),
       timeStrategy,
+      advancedTrainer,
     });
-  }, [selectedTemplate, exercises, suggestions, budget, timeStrategy]);
+    return {
+      ...built,
+      advancedTrainer: built.advancedTrainer && advancedVolumeProfiles.length > 0
+        ? refreshAdvancedPlanMetadata(built.advancedTrainer, built.exercises, advancedVolumeProfiles)
+        : built.advancedTrainer,
+      warnings: [...built.warnings, ...advancedWarnings],
+    };
+  }, [selectedTemplate, templates, exercises, suggestions, budget, timeStrategy, advanced, advancedState]);
 
   const startMutation = useMutation({
     mutationFn: async (value: GuidedSessionPlan) => {
@@ -516,7 +589,7 @@ export default function GuidedWorkout() {
     );
   }
 
-  if (activeLoading || templatesLoading) {
+  if (activeLoading || templatesLoading || (advanced && advancedLoading)) {
     return <div className="mx-auto max-w-3xl space-y-4 p-4 md:p-6"><Skeleton className="h-12 w-64" /><Skeleton className="h-48 w-full" /><Skeleton className="h-80 w-full" /></div>;
   }
 
@@ -525,16 +598,43 @@ export default function GuidedWorkout() {
       <div className="mx-auto max-w-3xl space-y-6 p-4 pb-24 md:p-6">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2"><Sparkles className="h-5 w-5 text-primary" /><h1 className="text-xl font-display font-bold">Guided Workout</h1></div>
-            <p className="text-sm text-muted-foreground">Fit quality training to your recovery and available time</p>
+            <div className="flex items-center gap-2"><Sparkles className="h-5 w-5 text-primary" /><h1 className="text-xl font-display font-bold">{advanced ? "Advanced Guided Trainer" : "Guided Workout"}</h1></div>
+            <p className="text-sm text-muted-foreground">{advanced ? "Mesocycle volume, effort progression, and planned deloads" : "Fit quality training to your recovery and available time"}</p>
           </div>
           <Button variant="outline" size="sm" disabled={switchToClassicMutation.isPending} onClick={() => switchToClassicMutation.mutate()}>Use Classic</Button>
         </div>
 
-        {!templates?.length ? (
+        {advanced && advancedState?.phase === "review" ? (
+          <Card className="border-primary/40" data-testid="card-mesocycle-review">
+            <CardHeader>
+              <CardTitle className="text-base">Mesocycle review</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Accumulation and deload are complete. Review the settings below before starting the next block.
+              </p>
+            </CardHeader>
+            <CardContent>
+              <AdvancedTrainerSettingsEditor reviewCycleId={advancedState.cycleId} />
+            </CardContent>
+          </Card>
+        ) : !templates?.length ? (
           <Card><CardContent className="space-y-3 p-6 text-center"><p className="font-medium">Create a workout template to use Guided mode.</p><p className="text-sm text-muted-foreground">Guided mode uses template prescriptions as a safe baseline. Classic remains available for free-form logging.</p><div className="flex justify-center gap-2"><Link href="/templates"><Button>Create template</Button></Link><Button variant="outline" disabled={switchToClassicMutation.isPending} onClick={() => switchToClassicMutation.mutate()}>Use Classic</Button></div></CardContent></Card>
         ) : (
           <>
+            {advanced && advancedState && (
+              <Card className={advancedState.phase === "deload" ? "border-volume-optimal/50" : "border-primary/30"}>
+                <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+                  <div>
+                    <p className="font-medium">{advancedState.phase === "deload" ? "Deload week" : `Accumulation week ${advancedState.weekNumber}`}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Week {advancedState.weekNumber} of {advancedState.totalWeeks} · {advancedState.daysRemaining} days until review
+                    </p>
+                  </div>
+                  <Badge variant="outline">
+                    {advancedState.phase === "deload" ? `${advancedState.settings.deloadSetPercent}% volume` : `RIR ${advancedState.settings.startRir} → ${advancedState.settings.endRir}`}
+                  </Badge>
+                </CardContent>
+              </Card>
+            )}
             <Card>
               <CardHeader><CardTitle className="text-base">1. Choose today&apos;s session</CardTitle></CardHeader>
               <CardContent className="space-y-4">
@@ -569,7 +669,7 @@ export default function GuidedWorkout() {
               </CardContent>
             </Card>
             <Button className="w-full" size="lg" disabled={!plan || suggestionsLoading || startMutation.isPending} onClick={() => plan && startMutation.mutate(plan)} data-testid="button-start-guided-workout">
-              <Play className="h-4 w-4" />{startMutation.isPending ? "Starting…" : "Start Guided Workout"}
+              <Play className="h-4 w-4" />{startMutation.isPending ? "Starting…" : advanced ? "Start Advanced Session" : "Start Guided Workout"}
             </Button>
           </>
         )}
@@ -604,12 +704,13 @@ export default function GuidedWorkout() {
   const currentExerciseDetails = exercises?.find((exercise) => exercise.id === activeExercise?.exerciseId);
   const canLog = activeExercise && weight !== "" && (activeExercise.trackingMode === "duration" ? Number(durationSeconds) > 0 : Number(reps) > 0);
   const activeWorkingCompleted = activeCompletedSets.filter((set) => !set.isWarmup).length;
+  const sessionAdvanced = session.sessionPlan.advancedTrainer != null;
 
   return (
     <div className="mx-auto max-w-2xl space-y-4 p-4 pb-32 md:p-6">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2"><h1 className="truncate text-xl font-display font-bold">{session.name}</h1><Badge variant="secondary">Autosaved</Badge></div>
+          <div className="flex flex-wrap items-center gap-2"><h1 className="truncate text-xl font-display font-bold">{session.name}</h1><Badge variant="secondary">Autosaved</Badge>{sessionAdvanced && <Badge variant="outline">Advanced · week {session.sessionPlan.advancedTrainer!.weekNumber}</Badge>}</div>
           <p className="text-sm text-muted-foreground">{formatElapsed(elapsedSeconds)} elapsed · {session.sessionPlan.estimatedMinutes} min planned</p>
         </div>
         <Button variant="ghost" size="icon" aria-label="Discard workout" onClick={() => setDiscardOpen(true)}><Trash2 className="h-4 w-4" /></Button>
@@ -663,7 +764,7 @@ export default function GuidedWorkout() {
           <Card>
             <CardContent className="flex flex-wrap gap-2 p-3">
               <Button size="sm" variant="ghost" disabled={session.sets.length === 0} onClick={undoLastSet}><RotateCcw className="h-3.5 w-3.5" />Undo last set</Button>
-              <Button size="sm" variant="ghost" onClick={() => updateActiveExercise((exercise) => ({ ...exercise, workingSets: exercise.workingSets + 1 }))}><Plus className="h-3.5 w-3.5" />Add set</Button>
+              {!sessionAdvanced && <Button size="sm" variant="ghost" onClick={() => updateActiveExercise((exercise) => ({ ...exercise, workingSets: exercise.workingSets + 1 }))}><Plus className="h-3.5 w-3.5" />Add set</Button>}
               <Button size="sm" variant="ghost" onClick={() => updateActiveExercise((exercise) => ({ ...exercise, skipped: true }))}><ChevronRight className="h-3.5 w-3.5" />Skip exercise</Button>
               <Button size="sm" variant="ghost" className="ml-auto" disabled={session.sets.length === 0} onClick={() => setFinishOpen(true)}><Square className="h-3.5 w-3.5" />Finish early</Button>
             </CardContent>

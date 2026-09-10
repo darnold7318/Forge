@@ -3,6 +3,22 @@ import { z } from "zod";
 export const guidedTimeStrategyIds = ["standard", "smart_pairs"] as const;
 export type GuidedTimeStrategy = (typeof guidedTimeStrategyIds)[number];
 
+export const advancedTrainerPlanMetadataSchema = z.object({
+  cycleId: z.number().int().positive(),
+  weekNumber: z.number().int().positive(),
+  totalWeeks: z.number().int().positive(),
+  phase: z.enum(["accumulation", "deload"]),
+  targetRir: z.number().int().min(0).max(5),
+  deloadLoadPercent: z.number().int().min(40).max(80).nullable(),
+  volumeSummary: z.array(z.object({
+    muscleGroup: z.string(),
+    templateDirectSets: z.number().min(0),
+    prescribedDirectSets: z.number().min(0),
+    secondaryStimulus: z.number().min(0),
+    fatigueLoad: z.number().min(0),
+  })),
+});
+
 export const guidedPlanExerciseSchema = z.object({
   exerciseId: z.number().int().positive(),
   exerciseName: z.string().min(1),
@@ -42,12 +58,14 @@ export const guidedSessionPlanSchema = z.object({
   originalEstimatedMinutes: z.number().int().min(1),
   exercises: z.array(guidedPlanExerciseSchema).min(1),
   warnings: z.array(z.string()),
+  advancedTrainer: advancedTrainerPlanMetadataSchema.nullable().optional(),
 });
 
 export type GuidedPlanExercise = z.infer<typeof guidedPlanExerciseSchema>;
 export type GuidedSessionPlan = z.infer<typeof guidedSessionPlanSchema>;
 
 export interface GuidedPlanExerciseInput extends Omit<GuidedPlanExercise, "pairGroup" | "skipped"> {}
+export type AdvancedTrainerPlanMetadata = z.infer<typeof advancedTrainerPlanMetadataSchema>;
 
 function exerciseSeconds(exercise: Pick<GuidedPlanExercise, "warmupSets" | "workingSets" | "restSeconds" | "skipped">): number {
   if (exercise.skipped) return 0;
@@ -108,6 +126,7 @@ export function buildGuidedSessionPlan(args: {
   exercises: GuidedPlanExerciseInput[];
   timeBudgetMinutes: number | null;
   timeStrategy?: GuidedTimeStrategy;
+  advancedTrainer?: AdvancedTrainerPlanMetadata | null;
   now?: Date;
 }): GuidedSessionPlan {
   const timeStrategy = args.timeStrategy ?? "standard";
@@ -156,6 +175,7 @@ export function buildGuidedSessionPlan(args: {
     originalEstimatedMinutes,
     exercises,
     warnings,
+    advancedTrainer: args.advancedTrainer ?? null,
   };
 }
 

@@ -48,6 +48,7 @@ import { useTheme } from "@/components/theme-provider";
 import { useToast } from "@/hooks/use-toast";
 import { RecoverySettingsEditor } from "@/components/recovery-settings-editor";
 import { AdvancedCoachSettings } from "@/components/advanced-coach-settings";
+import { AdvancedTrainerSettingsEditor } from "@/components/advanced-trainer-settings";
 import { EquipmentSettingsEditor } from "@/components/equipment-settings-editor";
 import {
   themeColorIds,
@@ -1335,17 +1336,34 @@ export default function Settings() {
                   <p className="text-xs text-muted-foreground">
                     {mode === "classic"
                       ? "The original full-page logger with optional per-set timers and a final Save Workout action."
-                      : "A resumable, focused session with Coach-adjusted sets, adaptive rest, time budgets, and automatic set saving."}
+                      : mode === "guided"
+                        ? "A resumable, focused session with Coach-adjusted sets, adaptive rest, time budgets, and automatic set saving."
+                        : "RP-style mesocycles with direct-volume progression, planned RIR targets, a deload week, and an end-of-cycle review."}
                   </p>
                 </div>
               </label>
             ))}
           </RadioGroup>
           <p className="text-xs text-muted-foreground">
-            This preference applies to new sessions. Guided never rewrites your saved templates.
+            This preference applies to new sessions. Guided modes never rewrite your saved templates.
           </p>
         </CardContent>
       </Card>
+
+      {activeUser.workoutLoggingMode === "advanced_guided" && (
+        <Card data-testid="card-advanced-trainer-settings">
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <ListChecks className="h-4 w-4" />
+              Advanced Guided Trainer
+            </CardTitle>
+            <p className="text-xs text-muted-foreground">
+              Configure the next mesocycle. The current cycle is a frozen snapshot and will not shift mid-block.
+            </p>
+          </CardHeader>
+          <CardContent><AdvancedTrainerSettingsEditor /></CardContent>
+        </Card>
+      )}
 
       {activeUser.trainingLevel !== "beginner" && <Card id="recovery-settings" data-testid="card-recovery-settings">
         <CardHeader>

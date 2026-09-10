@@ -29,12 +29,18 @@ import {
   type MuscleTrainingContext,
 } from "./coaching";
 import { primaryStimulusMuscle, resolveEquipmentProfile } from "./schema";
-import { DEFAULT_COACH_SETTINGS } from "./schema";
+import { DEFAULT_ADVANCED_TRAINER_SETTINGS, DEFAULT_COACH_SETTINGS } from "./schema";
 import {
   buildGuidedSessionPlan,
   evaluateGuidedSetAdjustment,
   type GuidedPlanExerciseInput,
 } from "./guided-workout";
+import {
+  applyAdvancedMesocyclePlan,
+  resolveAdvancedTrainerTiming,
+  targetRirForWeek,
+  type AdvancedTrainerState,
+} from "./advanced-trainer";
 import { CATALOG_EXERCISE_STIMULUS_DEFAULTS } from "../server/seed-data";
 
 function guidedExercise(overrides: Partial<GuidedPlanExerciseInput> = {}): GuidedPlanExerciseInput {
@@ -904,10 +910,62 @@ test("guided set response protects against forcing another failed set", () => {
   assert.ok(adjustment.suggestedWeight < 185);
 });
 
-test("high-low cable fly receives only conservative ancillary triceps credit", () => {
+test("advanced trainer resolves accumulation, deload, and review phases", () => {
+  const settings = DEFAULT_ADVANCED_TRAINER_SETTINGS;
+  assert.deepEqual(resolveAdvancedTrainerTiming({ startedOn: "2026-01-01", today: "2026-01-01", settings }), {
+    weekNumber: 1,
+    totalWeeks: 5,
+    phase: "accumulation",
+    daysRemaining: 35,
+  });
+  assert.equal(resolveAdvancedTrainerTiming({ startedOn: "2026-01-01", today: "2026-01-29", settings }).phase, "deload");
+  assert.equal(resolveAdvancedTrainerTiming({ startedOn: "2026-01-01", today: "2026-02-05", settings }).phase, "review");
+  assert.deepEqual([1, 2, 3, 4, 5].map((weekNumber) => targetRirForWeek(settings, weekNumber)), [3, 2, 2, 1, 4]);
+});
+
+test("advanced trainer uses combined direct landmarks, preserves high rep ranges, and deloads", () => {
+  const baseState: AdvancedTrainerState = {
+    cycleId: 7,
+    startedOn: "2026-01-01",
+    weekNumber: 1,
+    totalWeeks: 5,
+    phase: "accumulation",
+    settings: DEFAULT_ADVANCED_TRAINER_SETTINGS,
+    configuredSettings: DEFAULT_ADVANCED_TRAINER_SETTINGS,
+    daysRemaining: 35,
+  };
+  const profiles = [
+    { exerciseId: 1, primaryMuscle: "MidLowerChest" as const, stimulus: [{ muscleGroupName: "MidLowerChest" as const, stimulusRatio: 1 }, { muscleGroupName: "Triceps" as const, stimulusRatio: 0.35 }] },
+    { exerciseId: 2, primaryMuscle: "UpperChest" as const, stimulus: [{ muscleGroupName: "UpperChest" as const, stimulusRatio: 1 }, { muscleGroupName: "FrontDelts" as const, stimulusRatio: 0.4 }] },
+  ];
+  const accumulation = applyAdvancedMesocyclePlan({
+    exercises: [guidedExercise({ targetRepsMin: 15, targetRepsMax: 20 })],
+    allTemplateExercises: [{ exerciseId: 1, targetSets: 10 }, { exerciseId: 2, targetSets: 10 }],
+    volumeProfiles: profiles,
+    state: baseState,
+  });
+  assert.equal(accumulation.exercises[0].workingSets, 1);
+  assert.equal(accumulation.exercises[0].targetRepsMin, 15);
+  assert.equal(accumulation.exercises[0].targetRepsMax, 20);
+  assert.equal(accumulation.metadata.targetRir, 3);
+  assert.equal(accumulation.metadata.volumeSummary[0].templateDirectSets, 20);
+  assert.ok(accumulation.metadata.volumeSummary[0].secondaryStimulus > 0);
+
+  const deload = applyAdvancedMesocyclePlan({
+    exercises: [guidedExercise({ targetWeight: 200 })],
+    allTemplateExercises: [{ exerciseId: 1, targetSets: 6 }],
+    volumeProfiles: profiles,
+    state: { ...baseState, weekNumber: 5, phase: "deload" },
+  });
+  assert.equal(deload.exercises[0].targetWeight, 120);
+  assert.equal(deload.exercises[0].targetRirMin, 4);
+  assert.match(deload.exercises[0].recommendationReason, /no failure work/i);
+});
+
+test("high-low cable fly keeps direct chest volume without false lat credit", () => {
   const fly = CATALOG_EXERCISE_STIMULUS_DEFAULTS.find((exercise) => exercise.name === "High-Low Cable Fly");
   assert.ok(fly);
   assert.equal(fly.stimulus.MidLowerChest, 1);
   assert.equal(fly.stimulus.Triceps, 0.1);
-  assert.equal(fly.stimulus.Lats, 0.5);
+  assert.equal("Lats" in fly.stimulus, false);
 });

@@ -32,5 +32,9 @@ export default function LogWorkout() {
   }
 
   const mode = activeUser.workoutLoggingMode ?? "classic";
-  return mode === "guided" ? <GuidedWorkout /> : <ClassicLogWorkout />;
+  return mode === "advanced_guided"
+    ? <GuidedWorkout advanced />
+    : mode === "guided"
+      ? <GuidedWorkout />
+      : <ClassicLogWorkout />;
 }
