@@ -64,6 +64,13 @@ function estimate1RM(weight: number, reps: number): number {
   return weight * (1 + reps / 30);
 }
 
+function formatVolumeTick(value: number): string {
+  return Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
 const RECORD_TYPE_ICON_CLASS = "h-3.5 w-3.5";
 
 export default function ProgressPage() {
@@ -134,12 +141,14 @@ export default function ProgressPage() {
         const topSet = sets.reduce((best, s) => (s.weight > best.weight ? s : best), sets[0]);
         const e1rm = Math.max(...sets.map((s) => estimate1RM(s.weight, s.reps)));
         const longestHold = Math.max(...sets.map((s) => s.durationSeconds ?? 0));
+        const volume = sets.reduce((total, s) => total + s.weight * s.reps, 0);
         return {
           date,
           label: formatShortDate(date),
           topWeight: topSet.weight,
           e1RM: Math.round(e1rm * 10) / 10,
           longestHold,
+          volume: Math.round(volume * 10) / 10,
         };
       })
       .sort((a, b) => a.date.localeCompare(b.date));
@@ -168,7 +177,7 @@ export default function ProgressPage() {
         <h1 className="text-xl font-display font-bold" data-testid="text-page-title">
           Exercise Progress
         </h1>
-        <p className="text-sm text-muted-foreground">Track strength, hold duration, and personal records</p>
+        <p className="text-sm text-muted-foreground">Track strength, exercise volume, hold duration, and personal records</p>
       </div>
 
       <Card>
@@ -252,7 +261,7 @@ export default function ProgressPage() {
           <Card>
             <CardHeader>
               <CardTitle className="text-base" data-testid="text-chart-title">
-                {selectedExercise?.name} — {isDuration ? "Longest Hold" : "Top Set Weight & Est. 1RM"}
+                {selectedExercise?.name} — {isDuration ? "Longest Hold" : "Top Set Weight, Est. 1RM & Volume"}
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -262,6 +271,15 @@ export default function ProgressPage() {
                     <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
                     <XAxis dataKey="label" tick={{ fontSize: 11 }} />
                     <YAxis tick={{ fontSize: 11 }} domain={["auto", "auto"]} />
+                    {!isDuration && (
+                      <YAxis
+                        yAxisId="volume"
+                        orientation="right"
+                        tick={{ fontSize: 11 }}
+                        tickFormatter={(value) => formatVolumeTick(Number(value))}
+                        domain={[0, "auto"]}
+                      />
+                    )}
                     <Tooltip
                       contentStyle={{
                         backgroundColor: "hsl(var(--popover))",
@@ -297,6 +315,15 @@ export default function ProgressPage() {
                           stroke="hsl(var(--chart-2))"
                           strokeWidth={2}
                           strokeDasharray="4 3"
+                          dot={{ r: 3 }}
+                        />
+                        <Line
+                          yAxisId="volume"
+                          type="monotone"
+                          dataKey="volume"
+                          name="Exercise volume (lb × reps)"
+                          stroke="hsl(var(--chart-3))"
+                          strokeWidth={2}
                           dot={{ r: 3 }}
                         />
                       </>
