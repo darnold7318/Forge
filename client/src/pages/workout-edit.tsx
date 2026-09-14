@@ -3,6 +3,8 @@ import { useParams, useLocation } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Trash2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import type { GuidedSessionPlan } from "@shared/guided-workout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -46,6 +48,7 @@ interface WorkoutDetail {
   date: string;
   name: string | null;
   sets: SetRow[];
+  advancedTrainer?: GuidedSessionPlan["advancedTrainer"];
 }
 
 // Keyed debounce: each key (e.g. `${setId}-${field}`) gets its own independent
@@ -206,6 +209,7 @@ export default function WorkoutEdit() {
           <CardTitle className="text-base">Workout Details</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
+          {workout.advancedTrainer && <Badge variant="outline">Cycle #{workout.advancedTrainer.cycleId} · week {workout.advancedTrainer.weekNumber} · {workout.advancedTrainer.phase}</Badge>}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label className="text-xs text-muted-foreground">Name</Label>

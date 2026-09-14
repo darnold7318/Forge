@@ -52,17 +52,17 @@ export function AdvancedTrainerSettingsEditor({
         ? "/api/advanced-trainer/settings"
         : `/api/advanced-trainer/cycles/${reviewCycleId}/review`;
       const response = await apiRequest(reviewCycleId == null ? "PUT" : "POST", endpoint,
-        reviewCycleId == null ? settings : { settings, startNextCycle: true });
+        reviewCycleId == null ? settings : { settings, startNextCycle: false });
       return response.json();
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["/api/advanced-trainer/settings", activeUserId] });
       await queryClient.invalidateQueries({ queryKey: ["/api/advanced-trainer/state", activeUserId] });
       toast({
-        title: reviewCycleId == null ? "Next-cycle settings saved" : "New mesocycle started",
+        title: reviewCycleId == null ? "Next-cycle settings saved" : "Next mesocycle prepared",
         description: reviewCycleId == null
           ? "The active mesocycle keeps its original snapshot. These settings apply to the next one."
-          : "Week 1 is ready with the reviewed settings.",
+          : "The clock stays stopped until you explicitly start your next mesocycle.",
       });
       onReviewed?.();
     },
@@ -103,7 +103,7 @@ export function AdvancedTrainerSettingsEditor({
         </p>
         <Button disabled={!valid || mutation.isPending} onClick={() => mutation.mutate(draft)} data-testid="button-save-advanced-trainer-settings">
           {reviewCycleId == null ? <Save className="h-4 w-4" /> : <RefreshCcw className="h-4 w-4" />}
-          {mutation.isPending ? "Saving…" : reviewCycleId == null ? "Save for next cycle" : "Start next mesocycle"}
+          {mutation.isPending ? "Saving…" : reviewCycleId == null ? "Save for next cycle" : "Prepare next mesocycle"}
         </Button>
       </div>
       {reviewCycleId != null && (

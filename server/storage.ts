@@ -4,6 +4,7 @@ import {
   userCoachSettings,
   userAdvancedTrainerSettings,
   advancedTrainerCycles,
+  advancedTrainerCycleDateChanges,
   userMuscleCoachOverrides,
   userExerciseCoachOverrides,
   userEquipmentSettings,
@@ -89,6 +90,13 @@ import Database from "better-sqlite3";
 import { eq, desc, and, gte } from "drizzle-orm";
 import { CATALOG_EXERCISE_STIMULUS_DEFAULTS, MUSCLE_GROUPS, EXERCISES, WORKOUT_TEMPLATES } from "./seed-data";
 import { addCivilDays } from "@shared/timezone";
+import {
+  advancedStartAlignment,
+  parseAdvancedWorkoutMetadata,
+  validateAdvancedCycleAnchor,
+  type AdvancedCycleWorkout,
+  type AdvancedCycleDateChange,
+} from "@shared/advanced-trainer";
 
 const DB_PATH = process.env.DATABASE_PATH || "data.db";
 console.log("[startup-diagnostic] storage.ts loading, cwd=", process.cwd(), "DB_PATH=", DB_PATH);
@@ -217,6 +225,7 @@ function ensureTables() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       started_on TEXT NOT NULL,
+      start_source TEXT NOT NULL DEFAULT 'explicit',
       status TEXT NOT NULL DEFAULT 'active',
       settings_snapshot TEXT NOT NULL,
       completed_at TEXT,
@@ -227,6 +236,17 @@ function ensureTables() {
       ON advanced_trainer_cycles(user_id, status, id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_advanced_trainer_cycles_one_active
       ON advanced_trainer_cycles(user_id) WHERE status = 'active';
+
+    CREATE TABLE IF NOT EXISTS advanced_trainer_cycle_date_changes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      cycle_id INTEGER NOT NULL REFERENCES advanced_trainer_cycles(id) ON DELETE CASCADE,
+      previous_started_on TEXT NOT NULL,
+      new_started_on TEXT NOT NULL,
+      changed_at TEXT NOT NULL,
+      workout_id INTEGER,
+      undo_of_change_id INTEGER
+    );
 
     CREATE TABLE IF NOT EXISTS user_exercise_equipment_profiles (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -282,7 +302,8 @@ function ensureTables() {
       logging_mode TEXT NOT NULL DEFAULT 'classic',
       time_budget_minutes INTEGER,
       planned_duration_minutes INTEGER,
-      session_plan TEXT
+      session_plan TEXT,
+      advanced_trainer_cycle_id INTEGER REFERENCES advanced_trainer_cycles(id)
     );
 
     CREATE TABLE IF NOT EXISTS workout_exercise_snapshots (
@@ -513,6 +534,7 @@ function ensureTables() {
     ["time_budget_minutes", "ALTER TABLE workouts ADD COLUMN time_budget_minutes INTEGER"],
     ["planned_duration_minutes", "ALTER TABLE workouts ADD COLUMN planned_duration_minutes INTEGER"],
     ["session_plan", "ALTER TABLE workouts ADD COLUMN session_plan TEXT"],
+    ["advanced_trainer_cycle_id", "ALTER TABLE workouts ADD COLUMN advanced_trainer_cycle_id INTEGER REFERENCES advanced_trainer_cycles(id)"],
   ] as const) {
     if (!workoutColumns.has(column)) {
       try {
@@ -522,6 +544,33 @@ function ensureTables() {
       }
     }
   }
+
+  const cycleColumns = new Set(
+    (sqlite.prepare("PRAGMA table_info(advanced_trainer_cycles)").all() as { name: string }[]).map((column) => column.name),
+  );
+  if (!cycleColumns.has("start_source")) {
+    sqlite.exec("ALTER TABLE advanced_trainer_cycles ADD COLUMN start_source TEXT NOT NULL DEFAULT 'legacy'");
+  }
+
+  // v4.1: promote validated historical plan links into an explicit relation.
+  // Never rewrite plan JSON, sets, or dates. Invalid/unresolved history prevents
+  // retiring an empty-looking legacy cycle, rather than risking its detachment.
+  sqlite.transaction(() => {
+    const historical = db.select().from(workouts).where(eq(workouts.loggingMode, "advanced_guided")).all();
+    for (const workout of historical) {
+      if (workout.advancedTrainerCycleId != null) continue;
+      const metadata = parseAdvancedWorkoutMetadata(workout.sessionPlan);
+      if (!metadata) continue;
+      const cycle = db.select().from(advancedTrainerCycles).where(eq(advancedTrainerCycles.id, metadata.cycleId)).get();
+      if (cycle?.userId !== workout.userId) continue;
+      db.update(workouts).set({ advancedTrainerCycleId: cycle.id }).where(eq(workouts.id, workout.id)).run();
+    }
+    sqlite.exec(`UPDATE advanced_trainer_cycles SET status = 'awaiting_start'
+      WHERE status = 'active' AND start_source = 'legacy'
+      AND NOT EXISTS (SELECT 1 FROM workouts WHERE advanced_trainer_cycle_id = advanced_trainer_cycles.id)
+      AND NOT EXISTS (SELECT 1 FROM workouts WHERE user_id = advanced_trainer_cycles.user_id
+        AND logging_mode = 'advanced_guided' AND advanced_trainer_cycle_id IS NULL)`);
+  })();
 
   sqlite.exec(
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_sets_workout_client_request_unique ON sets(workout_id, client_request_id)",
@@ -921,6 +970,10 @@ export interface IStorage {
   getActiveAdvancedTrainerCycle(userId: number): Promise<AdvancedTrainerCycle | undefined>;
   createAdvancedTrainerCycle(userId: number, startedOn: string, settings: AdvancedTrainerSettings): Promise<AdvancedTrainerCycle>;
   completeAdvancedTrainerCycle(userId: number, cycleId: number, completedAt: string, reviewNotes?: string | null): Promise<AdvancedTrainerCycle | undefined>;
+  getAdvancedTrainerCycleWorkouts(userId: number, cycleId: number): Promise<AdvancedCycleWorkout[]>;
+  getAdvancedTrainerCycleDateChanges(userId: number, cycleId: number): Promise<AdvancedCycleDateChange[]>;
+  alignAdvancedTrainerCycleStart(userId: number, cycleId: number, workoutId: number, expectedStartedOn: string, today: string): Promise<void>;
+  undoAdvancedTrainerCycleStart(userId: number, cycleId: number, changeId: number, expectedStartedOn: string, today: string): Promise<void>;
   getMuscleCoachOverrides(userId: number): Promise<MuscleCoachOverride[]>;
   setMuscleCoachOverride(userId: number, value: MuscleCoachOverride): Promise<MuscleCoachOverride>;
   deleteMuscleCoachOverride(userId: number, muscleGroupId: number): Promise<void>;
@@ -1192,16 +1245,95 @@ export class DatabaseStorage implements IStorage {
     startedOn: string,
     settings: AdvancedTrainerSettings,
   ): Promise<AdvancedTrainerCycle> {
-    const existing = await this.getActiveAdvancedTrainerCycle(userId);
-    if (existing) return existing;
-    return db.insert(advancedTrainerCycles).values({
-      userId,
-      startedOn,
-      status: "active",
-      settingsSnapshot: JSON.stringify(settings),
-      completedAt: null,
-      reviewNotes: null,
-    }).returning().get();
+    return sqlite.transaction(() => {
+      const existing = db.select().from(advancedTrainerCycles)
+        .where(and(eq(advancedTrainerCycles.userId, userId), eq(advancedTrainerCycles.status, "active"))).get();
+      if (existing) return existing;
+      if (db.select().from(workouts).where(and(eq(workouts.userId, userId), eq(workouts.status, "in_progress"))).get()) {
+        throw new Error("Finish or discard the active workout before starting a mesocycle.");
+      }
+      return db.insert(advancedTrainerCycles).values({
+        userId,
+        startedOn,
+        startSource: "explicit",
+        status: "active",
+        settingsSnapshot: JSON.stringify(settings),
+        completedAt: null,
+        reviewNotes: null,
+      }).returning().get();
+    })();
+  }
+
+  private cycleWorkoutSummaries(userId: number, cycleId: number): AdvancedCycleWorkout[] {
+    return db.select().from(workouts).where(eq(workouts.userId, userId)).all().flatMap((workout) => {
+      const metadata = parseAdvancedWorkoutMetadata(workout.sessionPlan);
+      if (workout.advancedTrainerCycleId !== cycleId && metadata?.cycleId !== cycleId) return [];
+      if (!metadata || metadata.cycleId !== cycleId || workout.loggingMode !== "advanced_guided") {
+        throw new Error("A linked workout has invalid mesocycle metadata. Its history was not changed.");
+      }
+      const workingSets = db.select().from(sets).where(eq(sets.workoutId, workout.id)).all().filter((set) => !set.isWarmup).length;
+      return [{
+        id: workout.id, date: workout.date, name: workout.name, status: workout.status,
+        weekNumber: metadata.weekNumber, phase: metadata.phase, workingSets,
+      }];
+    }).sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id);
+  }
+
+  async getAdvancedTrainerCycleWorkouts(userId: number, cycleId: number): Promise<AdvancedCycleWorkout[]> {
+    const cycle = db.select().from(advancedTrainerCycles).where(and(eq(advancedTrainerCycles.id, cycleId), eq(advancedTrainerCycles.userId, userId))).get();
+    return cycle ? this.cycleWorkoutSummaries(userId, cycleId) : [];
+  }
+
+  async getAdvancedTrainerCycleDateChanges(userId: number, cycleId: number): Promise<AdvancedCycleDateChange[]> {
+    return db.select().from(advancedTrainerCycleDateChanges)
+      .where(and(eq(advancedTrainerCycleDateChanges.userId, userId), eq(advancedTrainerCycleDateChanges.cycleId, cycleId)))
+      .orderBy(desc(advancedTrainerCycleDateChanges.id)).all();
+  }
+
+  private dateChangeContext(userId: number, cycleId: number, expectedStartedOn: string) {
+    const cycle = db.select().from(advancedTrainerCycles).where(and(
+      eq(advancedTrainerCycles.id, cycleId), eq(advancedTrainerCycles.userId, userId), eq(advancedTrainerCycles.status, "active"),
+    )).get();
+    if (!cycle) throw new Error("Active mesocycle not found.");
+    if (cycle.startedOn !== expectedStartedOn) throw new Error("The cycle start changed. Refresh before trying again.");
+    const unresolved = db.select().from(workouts).where(and(eq(workouts.userId, userId), eq(workouts.loggingMode, "advanced_guided"))).all()
+      .some((workout) => workout.advancedTrainerCycleId == null && !parseAdvancedWorkoutMetadata(workout.sessionPlan));
+    if (unresolved) throw new Error("An Advanced workout has unresolved cycle metadata. Resolve its history before correcting cycle dates.");
+    const settings = advancedTrainerSettingsSchema.parse(JSON.parse(cycle.settingsSnapshot));
+    const hasActiveWorkout = !!db.select().from(workouts).where(and(eq(workouts.userId, userId), eq(workouts.status, "in_progress"))).get();
+    return { cycle, settings, hasActiveWorkout, workouts: this.cycleWorkoutSummaries(userId, cycleId) };
+  }
+
+  async alignAdvancedTrainerCycleStart(userId: number, cycleId: number, workoutId: number, expectedStartedOn: string, today: string): Promise<void> {
+    sqlite.transaction(() => {
+      const context = this.dateChangeContext(userId, cycleId, expectedStartedOn);
+      const alignment = advancedStartAlignment({ ...context, startedOn: context.cycle.startedOn, today });
+      if (!alignment.eligible || alignment.workoutId !== workoutId || !alignment.date) throw new Error(alignment.reason);
+      db.update(advancedTrainerCycles).set({ startedOn: alignment.date }).where(eq(advancedTrainerCycles.id, cycleId)).run();
+      db.insert(advancedTrainerCycleDateChanges).values({
+        userId, cycleId, previousStartedOn: expectedStartedOn, newStartedOn: alignment.date,
+        changedAt: new Date().toISOString(), workoutId, undoOfChangeId: null,
+      }).run();
+    })();
+  }
+
+  async undoAdvancedTrainerCycleStart(userId: number, cycleId: number, changeId: number, expectedStartedOn: string, today: string): Promise<void> {
+    sqlite.transaction(() => {
+      const context = this.dateChangeContext(userId, cycleId, expectedStartedOn);
+      const last = db.select().from(advancedTrainerCycleDateChanges)
+        .where(and(eq(advancedTrainerCycleDateChanges.userId, userId), eq(advancedTrainerCycleDateChanges.cycleId, cycleId)))
+        .orderBy(desc(advancedTrainerCycleDateChanges.id)).get();
+      if (!last || last.id !== changeId || last.undoOfChangeId != null || last.newStartedOn !== expectedStartedOn) {
+        throw new Error("This correction cannot be undone, or was already undone.");
+      }
+      const reason = validateAdvancedCycleAnchor({ ...context, startedOn: last.previousStartedOn, today });
+      if (reason) throw new Error(reason);
+      db.update(advancedTrainerCycles).set({ startedOn: last.previousStartedOn }).where(eq(advancedTrainerCycles.id, cycleId)).run();
+      db.insert(advancedTrainerCycleDateChanges).values({
+        userId, cycleId, previousStartedOn: expectedStartedOn, newStartedOn: last.previousStartedOn,
+        changedAt: new Date().toISOString(), workoutId: last.workoutId, undoOfChangeId: last.id,
+      }).run();
+    })();
   }
 
   async completeAdvancedTrainerCycle(
@@ -1749,6 +1881,19 @@ export class DatabaseStorage implements IStorage {
 
   async createWorkout(workout: InsertWorkout): Promise<Workout> {
     return db.transaction((tx) => {
+      if (workout.loggingMode === "advanced_guided") {
+        const metadata = parseAdvancedWorkoutMetadata(workout.sessionPlan);
+        const cycle = tx.select().from(advancedTrainerCycles).where(and(
+          eq(advancedTrainerCycles.id, workout.advancedTrainerCycleId ?? 0),
+          eq(advancedTrainerCycles.userId, workout.userId), eq(advancedTrainerCycles.status, "active"),
+        )).get();
+        if (!metadata || !cycle || metadata.cycleId !== cycle.id) throw new Error("Advanced workout requires an owned active mesocycle.");
+        const settings = advancedTrainerSettingsSchema.parse(JSON.parse(cycle.settingsSnapshot));
+        const conflict = validateAdvancedCycleAnchor({ startedOn: cycle.startedOn, today: workout.date, settings,
+          hasActiveWorkout: false, workouts: [{ id: 0, date: workout.date, name: workout.name ?? null,
+            status: workout.status ?? "completed", weekNumber: metadata.weekNumber, phase: metadata.phase, workingSets: 0 }] });
+        if (conflict) throw new Error(conflict);
+      } else if (workout.advancedTrainerCycleId != null) throw new Error("Only Advanced workouts can link to a mesocycle.");
       const created = tx.insert(workouts).values(workout).returning().get();
       if (created.workoutTemplateId != null) {
         const prescriptionRows = tx

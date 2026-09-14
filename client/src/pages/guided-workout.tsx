@@ -25,7 +25,7 @@ import { invalidateTrainingHistoryQueries } from "@/lib/training-history-cache";
 import { useActiveUser } from "@/lib/user-context";
 import { useRestTimer } from "@/lib/rest-timer-context";
 import { useToast } from "@/hooks/use-toast";
-import { AdvancedTrainerSettingsEditor } from "@/components/advanced-trainer-settings";
+import { AdvancedTrainerCyclePanel } from "@/components/advanced-trainer-cycle-panel";
 import { todayIso } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -62,7 +62,7 @@ import {
   applyAdvancedMesocyclePlan,
   refreshAdvancedPlanMetadata,
   type AdvancedExerciseVolumeProfile,
-  type AdvancedTrainerState,
+  type AdvancedTrainerOverview,
 } from "@shared/advanced-trainer";
 
 interface TemplateExercise {
@@ -275,7 +275,7 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
     enabled: activeUserId != null,
     refetchOnWindowFocus: true,
   });
-  const { data: advancedState, isLoading: advancedLoading } = useQuery<AdvancedTrainerState>({
+  const { data: advancedOverview, isLoading: advancedLoading } = useQuery<AdvancedTrainerOverview>({
     queryKey: ["/api/advanced-trainer/state", activeUserId],
     queryFn: async () => (await apiRequest("GET", "/api/advanced-trainer/state")).json(),
     enabled: advanced && activeUserId != null,
@@ -284,6 +284,7 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
     refetchOnWindowFocus: true,
   });
 
+  const advancedState = advancedOverview?.state ?? null;
   useEffect(() => {
     if (selectedTemplateId != null || !templates?.length) return;
     const hashQuery = window.location.hash.includes("?") ? window.location.hash.slice(window.location.hash.indexOf("?")) : "";
@@ -402,6 +403,7 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
     },
     onSuccess: (session) => {
       queryClient.setQueryData(["/api/workout-sessions/active", activeUserId], session);
+      queryClient.invalidateQueries({ queryKey: ["/api/advanced-trainer/state", activeUserId] });
       toast({ title: `${session.name} started`, description: "Every completed set is saved automatically." });
     },
     onError: (error: Error) => toast({ title: "Couldn't start workout", description: error.message, variant: "destructive" }),
@@ -534,6 +536,7 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
       setFinishOpen(false);
       queryClient.setQueryData(["/api/workout-sessions/active", activeUserId], null);
       await invalidateTrainingHistoryQueries(queryClient);
+      await queryClient.invalidateQueries({ queryKey: ["/api/advanced-trainer/state", activeUserId] });
       queryClient.invalidateQueries({ queryKey: ["/api/schedule"] });
       toast({ title: "Workout complete", description: `${completed.sets.length} sets saved.` });
     },
@@ -550,6 +553,7 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
       setAdjustment(null);
       queryClient.setQueryData(["/api/workout-sessions/active", activeUserId], null);
       toast({ title: "Workout discarded" });
+      queryClient.invalidateQueries({ queryKey: ["/api/advanced-trainer/state", activeUserId] });
     },
   });
 
@@ -573,6 +577,7 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-primary/15 text-primary"><Check className="h-7 w-7" /></div>
           <h1 className="text-2xl font-display font-bold">Workout complete</h1>
           <p className="text-muted-foreground">{finishedSession.name}</p>
+          {finishedSession.sessionPlan?.advancedTrainer && <p className="text-sm" data-testid="text-saved-mesocycle">Saved to cycle #{finishedSession.sessionPlan.advancedTrainer.cycleId} · week {finishedSession.sessionPlan.advancedTrainer.weekNumber} · {finishedSession.sessionPlan.advancedTrainer.phase}</p>}
         </div>
         <Card>
           <CardContent className="grid grid-cols-3 gap-3 p-4 text-center">
@@ -581,6 +586,7 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
             <div><p className="text-xl font-semibold tabular-nums">{formatElapsed(elapsed)}</p><p className="text-xs text-muted-foreground">elapsed</p></div>
           </CardContent>
         </Card>
+        {finishedSession.loggingMode === "advanced_guided" && <AdvancedTrainerCyclePanel />}
         <div className="grid grid-cols-2 gap-3">
           <Button variant="outline" onClick={() => setFinishedSession(null)}>Start another</Button>
           <Link href="/history"><Button className="w-full">Workout history</Button></Link>
@@ -604,37 +610,11 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
           <Button variant="outline" size="sm" disabled={switchToClassicMutation.isPending} onClick={() => switchToClassicMutation.mutate()}>Use Classic</Button>
         </div>
 
-        {advanced && advancedState?.phase === "review" ? (
-          <Card className="border-primary/40" data-testid="card-mesocycle-review">
-            <CardHeader>
-              <CardTitle className="text-base">Mesocycle review</CardTitle>
-              <p className="text-sm text-muted-foreground">
-                Accumulation and deload are complete. Review the settings below before starting the next block.
-              </p>
-            </CardHeader>
-            <CardContent>
-              <AdvancedTrainerSettingsEditor reviewCycleId={advancedState.cycleId} />
-            </CardContent>
-          </Card>
-        ) : !templates?.length ? (
+        {advanced && <AdvancedTrainerCyclePanel />}
+        {advanced && (!advancedState || advancedState.phase === "review") ? null : !templates?.length ? (
           <Card><CardContent className="space-y-3 p-6 text-center"><p className="font-medium">Create a workout template to use Guided mode.</p><p className="text-sm text-muted-foreground">Guided mode uses template prescriptions as a safe baseline. Classic remains available for free-form logging.</p><div className="flex justify-center gap-2"><Link href="/templates"><Button>Create template</Button></Link><Button variant="outline" disabled={switchToClassicMutation.isPending} onClick={() => switchToClassicMutation.mutate()}>Use Classic</Button></div></CardContent></Card>
         ) : (
           <>
-            {advanced && advancedState && (
-              <Card className={advancedState.phase === "deload" ? "border-volume-optimal/50" : "border-primary/30"}>
-                <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
-                  <div>
-                    <p className="font-medium">{advancedState.phase === "deload" ? "Deload week" : `Accumulation week ${advancedState.weekNumber}`}</p>
-                    <p className="text-xs text-muted-foreground">
-                      Week {advancedState.weekNumber} of {advancedState.totalWeeks} · {advancedState.daysRemaining} days until review
-                    </p>
-                  </div>
-                  <Badge variant="outline">
-                    {advancedState.phase === "deload" ? `${advancedState.settings.deloadSetPercent}% volume` : `RIR ${advancedState.settings.startRir} → ${advancedState.settings.endRir}`}
-                  </Badge>
-                </CardContent>
-              </Card>
-            )}
             <Card>
               <CardHeader><CardTitle className="text-base">1. Choose today&apos;s session</CardTitle></CardHeader>
               <CardContent className="space-y-4">
@@ -716,6 +696,7 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
         <Button variant="ghost" size="icon" aria-label="Discard workout" onClick={() => setDiscardOpen(true)}><Trash2 className="h-4 w-4" /></Button>
       </div>
       <div className="space-y-1.5"><div className="flex justify-between text-xs text-muted-foreground"><span>{completedCount} of {planSetTotal} sets</span><span>{progress}%</span></div><Progress value={progress} /></div>
+      {sessionAdvanced && <AdvancedTrainerCyclePanel />}
 
       {!activeExercise ? (
         <Card className="border-primary/40 bg-primary/5">

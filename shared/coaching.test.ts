@@ -39,6 +39,11 @@ import {
   applyAdvancedMesocyclePlan,
   resolveAdvancedTrainerTiming,
   targetRirForWeek,
+  advancedCycleDates,
+  advancedStartAlignment,
+  validateAdvancedCycleAnchor,
+  parseAdvancedWorkoutMetadata,
+  type AdvancedCycleWorkout,
   type AdvancedTrainerState,
 } from "./advanced-trainer";
 import { CATALOG_EXERCISE_STIMULUS_DEFAULTS } from "../server/seed-data";
@@ -921,6 +926,46 @@ test("advanced trainer resolves accumulation, deload, and review phases", () => 
   assert.equal(resolveAdvancedTrainerTiming({ startedOn: "2026-01-01", today: "2026-01-29", settings }).phase, "deload");
   assert.equal(resolveAdvancedTrainerTiming({ startedOn: "2026-01-01", today: "2026-02-05", settings }).phase, "review");
   assert.deepEqual([1, 2, 3, 4, 5].map((weekNumber) => targetRirForWeek(settings, weekNumber)), [3, 2, 2, 1, 4]);
+});
+
+test("cycle dates remain civil calendar days across DST and year boundaries", () => {
+  assert.deepEqual(advancedCycleDates("2026-10-25", DEFAULT_ADVANCED_TRAINER_SETTINGS), {
+    startedOn: "2026-10-25", deloadOn: "2026-11-22", reviewOn: "2026-11-29",
+  });
+  assert.equal(advancedCycleDates("2026-12-20", DEFAULT_ADVANCED_TRAINER_SETTINGS).reviewOn, "2027-01-24");
+});
+
+test("first-workout alignment only permits completed week-one work with no active session", () => {
+  const first: AdvancedCycleWorkout = { id: 1, date: "2026-09-14", name: "Push A", status: "completed", weekNumber: 1, phase: "accumulation", workingSets: 10 };
+  const args = { startedOn: "2026-09-10", today: "2026-09-14", settings: DEFAULT_ADVANCED_TRAINER_SETTINGS, workouts: [first], hasActiveWorkout: false };
+  assert.deepEqual(advancedStartAlignment(args), { eligible: true, reason: "Align the existing cycle to its first completed workout without changing workout history.", workoutId: 1, date: "2026-09-14" });
+  for (const patch of [{ workouts: [] }, { workouts: [first, { ...first, id: 2 }] }, { hasActiveWorkout: true },
+    { workouts: [{ ...first, status: "in_progress" }] }, { workouts: [{ ...first, weekNumber: 2 }] },
+    { workouts: [{ ...first, phase: "deload" as const }] }, { startedOn: first.date }, { today: "2026-09-13" }]) {
+    assert.equal(advancedStartAlignment({ ...args, ...patch }).eligible, false);
+  }
+});
+
+test("date changes reject invalid dates, excluded work and saved-week or phase conflicts", () => {
+  const first: AdvancedCycleWorkout = { id: 1, date: "2026-09-14", name: "Push A", status: "completed", weekNumber: 1, phase: "accumulation", workingSets: 10 };
+  const args = { startedOn: "2026-09-10", today: "2026-10-20", settings: DEFAULT_ADVANCED_TRAINER_SETTINGS, workouts: [first], hasActiveWorkout: false };
+  assert.equal(validateAdvancedCycleAnchor(args), null);
+  assert.match(validateAdvancedCycleAnchor({ ...args, startedOn: "2026-02-30" })!, /Invalid/);
+  assert.match(validateAdvancedCycleAnchor({ ...args, startedOn: "2026-09-15" })!, /exclude/);
+  assert.match(validateAdvancedCycleAnchor({ ...args, startedOn: "2026-09-01" })!, /conflict/);
+  const later = { ...first, id: 2, date: "2026-09-18" };
+  assert.equal(validateAdvancedCycleAnchor({ ...args, startedOn: "2026-09-14", workouts: [first, later] }), null);
+  assert.match(validateAdvancedCycleAnchor({ ...args, workouts: [first, later] })!, /conflict/);
+  assert.match(validateAdvancedCycleAnchor({ ...args, workouts: [{ ...first, date: "2026-10-08", weekNumber: 5, phase: "deload" }] , startedOn: "2026-09-14" })!, /conflict/);
+});
+
+test("cycle metadata parser validates the entire saved plan and ignores malformed history", () => {
+  for (const value of [null, "", "{", "{}", JSON.stringify({ advancedTrainer: { cycleId: 7 } })]) assert.equal(parseAdvancedWorkoutMetadata(value), null);
+  const plan = buildGuidedSessionPlan({ workoutTemplateId: 1, workoutName: "Push A", timeBudgetMinutes: null, exercises: [guidedExercise()], advancedTrainer: {
+    cycleId: 7, weekNumber: 1, totalWeeks: 5, phase: "accumulation", targetRir: 3, deloadLoadPercent: null, volumeSummary: [],
+  } });
+  assert.equal(parseAdvancedWorkoutMetadata(JSON.stringify(plan))?.cycleId, 7);
+  assert.equal(plan.advancedTrainer?.weekNumber, 1);
 });
 
 test("advanced trainer uses combined direct landmarks, preserves high rep ranges, and deloads", () => {

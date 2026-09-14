@@ -424,6 +424,7 @@ export const advancedTrainerCycles = sqliteTable("advanced_trainer_cycles", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   startedOn: text("started_on").notNull(),
+  startSource: text("start_source").notNull().default("explicit"),
   status: text("status").notNull().default("active"),
   settingsSnapshot: text("settings_snapshot").notNull(),
   completedAt: text("completed_at"),
@@ -431,6 +432,17 @@ export const advancedTrainerCycles = sqliteTable("advanced_trainer_cycles", {
 });
 
 export type AdvancedTrainerCycle = typeof advancedTrainerCycles.$inferSelect;
+
+export const advancedTrainerCycleDateChanges = sqliteTable("advanced_trainer_cycle_date_changes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  cycleId: integer("cycle_id").notNull().references(() => advancedTrainerCycles.id, { onDelete: "cascade" }),
+  previousStartedOn: text("previous_started_on").notNull(),
+  newStartedOn: text("new_started_on").notNull(),
+  changedAt: text("changed_at").notNull(),
+  workoutId: integer("workout_id"),
+  undoOfChangeId: integer("undo_of_change_id"),
+});
 
 export type EquipmentWeightSettings = z.infer<typeof equipmentWeightSettingsSchema>;
 export type UserEquipmentSettingsRow = typeof userEquipmentSettings.$inferSelect;
@@ -738,6 +750,7 @@ export const workouts = sqliteTable("workouts", {
   timeBudgetMinutes: integer("time_budget_minutes"),
   plannedDurationMinutes: integer("planned_duration_minutes"),
   sessionPlan: text("session_plan"),
+  advancedTrainerCycleId: integer("advanced_trainer_cycle_id").references(() => advancedTrainerCycles.id),
 });
 
 export const workoutStatusIds = ["in_progress", "completed"] as const;

@@ -3,6 +3,8 @@ import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { CalendarDays, ChevronRight, Dumbbell, Trash2 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import type { GuidedSessionPlan } from "@shared/guided-workout";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -38,6 +40,7 @@ interface WorkoutWithSets {
   date: string;
   name: string | null;
   sets: SetWithExercise[];
+  advancedTrainer?: GuidedSessionPlan["advancedTrainer"];
 }
 
 function formatDate(dateStr: string) {
@@ -82,6 +85,7 @@ function WorkoutRow({ workout, onDelete }: { workout: WorkoutWithSets; onDelete:
                   {formatDate(workout.date)}
                 </span>
               </div>
+              {workout.advancedTrainer && <Badge variant="outline" className="mt-1 text-xs">Cycle #{workout.advancedTrainer.cycleId} · week {workout.advancedTrainer.weekNumber} · {workout.advancedTrainer.phase}</Badge>}
               <p className="text-sm text-muted-foreground truncate mt-1" data-testid={`text-workout-summary-${workout.id}`}>
                 {exerciseCount > 0
                   ? `${exerciseNames.slice(0, 3).join(", ")}${exerciseCount > 3 ? ` +${exerciseCount - 3} more` : ""}`

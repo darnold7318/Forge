@@ -3,6 +3,8 @@ import type {
   AdvancedTrainerPlanMetadata,
   GuidedPlanExerciseInput,
 } from "./guided-workout";
+import { guidedSessionPlanSchema } from "./guided-workout";
+import { addCivilDays } from "./timezone";
 
 export type AdvancedTrainerPhase = "accumulation" | "deload" | "review";
 
@@ -15,6 +17,99 @@ export interface AdvancedTrainerState {
   settings: AdvancedTrainerSettings;
   configuredSettings: AdvancedTrainerSettings;
   daysRemaining: number;
+}
+
+export interface AdvancedCycleWorkout {
+  id: number;
+  date: string;
+  name: string | null;
+  status: string;
+  weekNumber: number;
+  phase: "accumulation" | "deload";
+  workingSets: number;
+}
+
+export interface AdvancedCycleDateChange {
+  id: number;
+  previousStartedOn: string;
+  newStartedOn: string;
+  changedAt: string;
+  workoutId: number | null;
+  undoOfChangeId: number | null;
+}
+
+export interface AdvancedStartAlignment {
+  eligible: boolean;
+  reason: string;
+  workoutId: number | null;
+  date: string | null;
+}
+
+export interface AdvancedTrainerOverview {
+  state: AdvancedTrainerState | null;
+  settings: AdvancedTrainerSettings;
+  dates: { startedOn: string; deloadOn: string; reviewOn: string };
+  workouts: AdvancedCycleWorkout[];
+  dateChanges: AdvancedCycleDateChange[];
+  alignment: AdvancedStartAlignment;
+  undo: { eligible: boolean; reason: string; changeId: number | null };
+}
+
+export function parseAdvancedWorkoutMetadata(sessionPlan: string | null | undefined): AdvancedTrainerPlanMetadata | null {
+  if (!sessionPlan) return null;
+  try {
+    const parsed = guidedSessionPlanSchema.safeParse(JSON.parse(sessionPlan));
+    return parsed.success ? parsed.data.advancedTrainer ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
+export function advancedCycleDates(startedOn: string, settings: AdvancedTrainerSettings) {
+  return {
+    startedOn,
+    deloadOn: addCivilDays(startedOn, settings.accumulationWeeks * 7),
+    reviewOn: addCivilDays(startedOn, (settings.accumulationWeeks + 1) * 7),
+  };
+}
+
+export function validateAdvancedCycleAnchor(args: {
+  startedOn: string;
+  today: string;
+  settings: AdvancedTrainerSettings;
+  workouts: AdvancedCycleWorkout[];
+  hasActiveWorkout: boolean;
+}): string | null {
+  if (args.hasActiveWorkout) return "Finish or discard the active workout before changing the cycle start.";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(args.startedOn) || addCivilDays(args.startedOn, 0) !== args.startedOn) return "Invalid cycle start date.";
+  if (args.startedOn > args.today) return "The cycle cannot start in the future.";
+  for (const workout of args.workouts) {
+    if (workout.date < args.startedOn) return "The new start would exclude a linked workout.";
+    const timing = resolveAdvancedTrainerTiming({ startedOn: args.startedOn, today: workout.date, settings: args.settings });
+    if (timing.weekNumber !== workout.weekNumber || timing.phase !== workout.phase) {
+      return "The new start would conflict with a workout's saved week or phase.";
+    }
+  }
+  return null;
+}
+
+export function advancedStartAlignment(args: {
+  startedOn: string;
+  today: string;
+  settings: AdvancedTrainerSettings;
+  workouts: AdvancedCycleWorkout[];
+  hasActiveWorkout: boolean;
+}): AdvancedStartAlignment {
+  const blocked = (reason: string): AdvancedStartAlignment => ({ eligible: false, reason, workoutId: null, date: null });
+  if (args.workouts.length !== 1) return blocked("Alignment requires exactly one completed workout linked to this cycle.");
+  const first = args.workouts[0];
+  if (first.status !== "completed" || first.weekNumber !== 1 || first.phase !== "accumulation") {
+    return blocked("The first workout must be completed week-1 accumulation work.");
+  }
+  if (first.date === args.startedOn) return blocked("The cycle already starts on your first workout's date.");
+  const reason = validateAdvancedCycleAnchor({ ...args, startedOn: first.date });
+  if (reason) return blocked(reason);
+  return { eligible: true, reason: "Align the existing cycle to its first completed workout without changing workout history.", workoutId: first.id, date: first.date };
 }
 
 export interface AdvancedTemplateExercise {
