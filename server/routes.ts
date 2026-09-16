@@ -4,6 +4,8 @@ import type { Server } from "node:http";
 import { z } from "zod";
 import { storage, db } from "./storage";
 import { getEffectiveCoachContext } from "./coach-settings";
+import { integrateCycleSuggestions, type IntegratedSuggestion } from "./integrated-coach";
+import type { GuidedPlanExerciseInput } from "@shared/guided-workout";
 import type { SetWithExercise } from "./storage";
 import { hashPassword, verifyPassword, toPublicUser, requireAuth, requireAdmin, login as loginUser, issueTokenFor, logout as logoutToken } from "./auth";
 import {
@@ -33,6 +35,7 @@ import {
 } from "@shared/schema";
 import {
   CLIENT_TZ_HEADER,
+  addCivilDays,
   civilDateInZone,
   civilMonthInZone,
   isValidTimezone,
@@ -107,9 +110,10 @@ import {
 } from "@shared/coaching";
 import { guidedSessionPlanSchema, type GuidedSessionPlan } from "@shared/guided-workout";
 import {
-  resolveAdvancedTrainerTiming, advancedCycleDates, advancedStartAlignment,
+  advancedCycleDates, advancedStartAlignment,
+  targetRirForWeek,
   parseAdvancedWorkoutMetadata, validateAdvancedCycleAnchor,
-  type AdvancedTrainerOverview, type AdvancedTrainerState,
+  type AdvancedTrainerOverview,
 } from "@shared/advanced-trainer";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -240,29 +244,17 @@ async function buildExerciseViews(userId: number) {
 }
 
 async function getAdvancedTrainerState(userId: number, today: string): Promise<AdvancedTrainerOverview> {
-  const configuredSettings = await storage.getAdvancedTrainerSettings(userId);
-  const cycle = await storage.getActiveAdvancedTrainerCycle(userId);
-  if (!cycle) return {
+  const context = await getEffectiveCoachContext(userId, today);
+  const state = context.cycle;
+  const configuredSettings = state?.configuredSettings ?? await storage.getAdvancedTrainerSettings(userId);
+  if (!state) return {
     state: null, settings: configuredSettings, dates: advancedCycleDates(today, configuredSettings),
     workouts: [], dateChanges: [],
     alignment: { eligible: false, reason: "Start a mesocycle first.", workoutId: null, date: null },
     undo: { eligible: false, reason: "No correction to undo.", changeId: null },
   };
-  let rawSnapshot: unknown = null;
-  try {
-    rawSnapshot = JSON.parse(cycle.settingsSnapshot);
-  } catch {
-    rawSnapshot = null;
-  }
-  const snapshot = advancedTrainerSettingsSchema.safeParse(rawSnapshot);
-  const settings = snapshot.success ? snapshot.data : configuredSettings;
-  const state: AdvancedTrainerState = {
-    cycleId: cycle.id,
-    startedOn: cycle.startedOn,
-    settings,
-    configuredSettings,
-    ...resolveAdvancedTrainerTiming({ startedOn: cycle.startedOn, today, settings }),
-  };
+  const cycle = { id: state.cycleId, startedOn: state.startedOn };
+  const settings = state.settings;
   const [workouts, dateChanges, activeWorkout] = await Promise.all([
     storage.getAdvancedTrainerCycleWorkouts(userId, cycle.id),
     storage.getAdvancedTrainerCycleDateChanges(userId, cycle.id),
@@ -306,6 +298,10 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
   }
 
   return workoutsList.map((w) => {
+    let savedPlan: GuidedSessionPlan | null = null;
+    if (["guided", "advanced_guided"].includes(w.loggingMode) && w.sessionPlan) {
+      try { const parsed = guidedSessionPlanSchema.safeParse(JSON.parse(w.sessionPlan)); if (parsed.success) savedPlan = parsed.data; } catch { /* Keep legacy snapshots if malformed. */ }
+    }
     const workoutSets = setsByWorkout.get(w.id) ?? [];
     const byExercise = new Map<number, SetWithExercise[]>();
     for (const s of workoutSets) {
@@ -318,6 +314,7 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
         const exercise = exSets[0].exercise;
         const stimulus = stimulusMap.get(exerciseId) ?? [];
         const snapshot = snapshotMap.get(`${w.id}:${exerciseId}`);
+        const savedTarget = savedPlan?.exercises.find((row) => row.exerciseId === exerciseId);
         const historySets = exSets.sort((a, b) => a.setNumber - b.setNumber).map(toHistorySet);
         return {
           exerciseId,
@@ -328,8 +325,12 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
           stimulus,
           intensityTechnique: snapshot?.intensityTechnique ?? "Normal",
           failureTarget: snapshot?.failureTarget ?? "Never",
-          prescriptionSnapshotAvailable: snapshot != null,
-          prescription: snapshot ? {
+          prescriptionSnapshotAvailable: savedTarget != null || snapshot != null,
+          prescription: savedTarget ? {
+            targetSets: savedTarget.workingSets, targetRepsMin: savedTarget.targetRepsMin, targetRepsMax: savedTarget.targetRepsMax,
+            targetDurationMinSeconds: savedTarget.targetDurationMinSeconds, targetDurationMaxSeconds: savedTarget.targetDurationMaxSeconds,
+            targetRir: savedTarget.targetRirMin, targetRirMin: savedTarget.targetRirMin, targetRirMax: savedTarget.targetRirMax, restSeconds: savedTarget.restSeconds,
+          } : snapshot ? {
             targetSets: resolveWorkingSetCount({ targetSets: snapshot.targetSets }, historySets),
             targetRepsMin: snapshot.targetRepsMin,
             targetRepsMax: snapshot.targetRepsMax,
@@ -347,6 +348,7 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
       id: w.id,
       workoutTemplateId: w.workoutTemplateId ?? null,
       workoutName: w.name ?? "Workout",
+      plannedDeload: savedPlan?.advancedTrainer?.phase === "deload",
       startedAt: workoutInstant(w, zone),
       exercises: exercisesForSession,
     };
@@ -1697,15 +1699,13 @@ export async function registerRoutes(
   });
 
   // ---------------- Coach: full suggestion detail per exercise ----------------
-  app.get("/api/coach/suggestions", async (req, res) => {
-    const userId = getUserId(req, res);
-    if (userId == null) return;
+  async function buildIntegratedCoachSuggestions(userId: number, zone: string, today: string, templateId?: number): Promise<IntegratedSuggestion[]> {
     const exercisesList = await buildExerciseViews(userId);
     const exerciseMap = new Map(exercisesList.map((e) => [e.id, e]));
-    const history = await buildHistory(userId, zoneOf(req));
+    const history = await buildHistory(userId, zone);
     const { lookup, nameById } = await buildMuscleGroupLookup();
-    await refreshLearnedVolumeRanges(userId, history, zoneOf(req));
-    const coachContext = await getEffectiveCoachContext(userId);
+    await refreshLearnedVolumeRanges(userId, history, zone);
+    const coachContext = await getEffectiveCoachContext(userId, today);
     const recoveryStates = evaluateRecovery(
       history,
       lookup,
@@ -1719,11 +1719,15 @@ export async function registerRoutes(
     const workoutMap = new Map(workoutsList.map((workout) => [workout.id, workout]));
     const allSets = await storage.getAllSets(userId);
     const { start: weekStart, end: weekEnd } = startOfWeekWindow(new Date(), 0);
+    const cycleWeekStart = coachContext.loggingMode === "advanced_guided" && coachContext.cycle && coachContext.cycle.phase !== "review"
+      ? addCivilDays(coachContext.cycle.startedOn, (coachContext.cycle.weekNumber - 1) * 7) : null;
+    const cycleWeekEnd = cycleWeekStart ? addCivilDays(cycleWeekStart, 7) : null;
     const weeklyVolume = computeWeeklyVolumeByMuscleGroup(allSets
       .filter((set) => {
         const workout = workoutMap.get(set.workoutId);
         if (!workout) return false;
-        const instant = workoutInstant(workout, zoneOf(req));
+        if (cycleWeekStart && cycleWeekEnd) return workout.date >= cycleWeekStart && workout.date < cycleWeekEnd;
+        const instant = workoutInstant(workout, zone);
         return instant >= weekStart && instant < weekEnd;
       })
       .map((set) => ({
@@ -1735,10 +1739,10 @@ export async function registerRoutes(
     // Optional filter by template. In the all-trained view, resolve each
     // exercise from the template used for its most recent workout so selecting
     // that template cannot change the displayed prescription.
-    const templateId = req.query.templateId ? Number(req.query.templateId) : undefined;
     const allTemplates = await storage.getAllWorkoutTemplatesWithExercises(userId);
     const templateById = new Map(allTemplates.map((template) => [template.id, template]));
     let targetExercises = exercisesList;
+    const sourceTemplateByExercise = new Map<number, number>();
     let prescriptionByExercise = new Map<number, {
       targetSets: number;
       targetRepsMin: number;
@@ -1752,6 +1756,7 @@ export async function registerRoutes(
     const rememberTemplatePrescription = (
       te: (typeof allTemplates)[number]["exercises"][number],
       recentExercise?: HistoryExerciseInput,
+      sourceTemplateId?: number,
     ) => {
       prescriptionByExercise.set(te.exerciseId, {
         targetSets: resolveWorkingSetCount(te, recentExercise?.sets),
@@ -1762,31 +1767,33 @@ export async function registerRoutes(
         targetRir: te.targetRir,
         restSeconds: te.restSeconds,
       });
+      if (sourceTemplateId != null) sourceTemplateByExercise.set(te.exerciseId, sourceTemplateId);
     };
 
     if (templateId) {
       const template = await storage.getWorkoutTemplateWithExercises(templateId);
-      if (template && template.userId !== userId) return res.status(403).json({ message: "You do not own this template" });
+      if (template && template.userId !== userId) throw new Error("You do not own this template");
       if (template) {
         targetExercises = template.exercises
           .map((te) => exerciseMap.get(te.exerciseId))
           .filter((e): e is (typeof exercisesList)[number] => !!e);
         for (const te of template.exercises) {
           const recentExercise = history
-            .find((session) => session.workoutTemplateId === template.id && session.exercises.some((row) => row.exerciseId === te.exerciseId))
+            .find((session) => !session.plannedDeload && session.workoutTemplateId === template.id && session.exercises.some((row) => row.exerciseId === te.exerciseId))
             ?.exercises.find((row) => row.exerciseId === te.exerciseId);
-          rememberTemplatePrescription(te, recentExercise);
+          rememberTemplatePrescription(te, recentExercise, template.id);
         }
       }
     } else {
       for (const session of history) {
+        if (session.plannedDeload) continue;
         if (session.workoutTemplateId == null) continue;
         const template = templateById.get(session.workoutTemplateId);
         if (!template) continue;
         for (const historyExercise of session.exercises) {
           if (prescriptionByExercise.has(historyExercise.exerciseId)) continue;
           const te = template.exercises.find((row) => row.exerciseId === historyExercise.exerciseId);
-          if (te) rememberTemplatePrescription(te, historyExercise);
+          if (te) rememberTemplatePrescription(te, historyExercise, template.id);
         }
       }
 
@@ -1794,6 +1801,7 @@ export async function registerRoutes(
       // its immutable workout snapshot is still more accurate than a generic
       // 3 x 8-12 fallback.
       for (const session of history) {
+        if (session.plannedDeload) continue;
         for (const historyExercise of session.exercises) {
           if (prescriptionByExercise.has(historyExercise.exerciseId)) continue;
           const snapshot = historyExercise.prescriptionSnapshotAvailable ? historyExercise.prescription : null;
@@ -1811,9 +1819,8 @@ export async function registerRoutes(
       }
     }
 
-    const suggestions = [];
-    for (const exercise of targetExercises) {
-      const prescription = prescriptionByExercise.get(exercise.id) ?? {
+    const evaluateForExercise = (exercise: (typeof exercisesList)[number], templatePrescription?: ReturnType<typeof prescriptionByExercise.get>): IntegratedSuggestion => {
+      const prescription = templatePrescription ?? prescriptionByExercise.get(exercise.id) ?? {
         targetSets: 3,
         targetRepsMin: 8,
         targetRepsMax: 12,
@@ -1822,7 +1829,6 @@ export async function registerRoutes(
         targetRir: 2,
       };
       const previous = getPreviousExercisePerformance(history, exercise.id, exercise.name);
-      if (previous.lastSets.length === 0 && !templateId) continue; // skip untrained exercises in the "all" view
 
       const primaryStimulus = primaryStimulusMuscle(exercise.stimulus);
       const primaryMuscleId = primaryStimulus?.muscleGroupId ?? exercise.primaryMuscleGroupId;
@@ -1877,17 +1883,83 @@ export async function registerRoutes(
         fatigue,
         muscleContexts,
         weightSettings: exercise.equipmentSettings,
+        sessionRir: coachContext.loggingMode === "advanced_guided" && coachContext.cycle && coachContext.cycle.phase !== "review"
+          ? { min: targetRirForWeek(coachContext.cycle.settings, coachContext.cycle.weekNumber),
+            max: Math.min(5, targetRirForWeek(coachContext.cycle.settings, coachContext.cycle.weekNumber) + 1) } : undefined,
       };
       const evaluation = evaluateGoalAwareProgressionV2(progressionInput);
       const suggestion = buildGoalAwareWorkoutSuggestion(progressionInput, evaluation);
 
-      suggestions.push({
+      return {
         exerciseId: exercise.id,
         ...suggestion,
+      };
+    };
+    const allTemplateExercises = allTemplates.flatMap((template) => template.exercises.map((exercise) => ({ exerciseId: exercise.exerciseId, targetSets: resolveWorkingSetCount(exercise) })));
+    const volumeProfiles = exercisesList.map((exercise) => ({ exerciseId: exercise.id,
+      primaryMuscle: primaryStimulusMuscle(exercise.stimulus)?.muscleGroupName ?? nameById.get(exercise.primaryMuscleGroupId)!,
+      stimulus: exercise.stimulus.map((row) => ({ muscleGroupName: row.muscleGroupName as MuscleGroupName, stimulusRatio: row.stimulusRatio })) }));
+    const equipmentById = new Map(exercisesList.map((exercise) => [exercise.id, exercise.equipmentSettings]));
+    const integrate = (suggestions: IntegratedSuggestion[], rows: GuidedPlanExerciseInput[]) => integrateCycleSuggestions({ context: coachContext,
+      suggestions, exercises: rows, allTemplateExercises, volumeProfiles, equipmentById });
+    const rowFor = (suggestion: IntegratedSuggestion, te?: (typeof allTemplates)[number]["exercises"][number]): GuidedPlanExerciseInput => {
+      const exercise = exerciseMap.get(suggestion.exerciseId)!;
+      return { exerciseId: exercise.id, exerciseName: exercise.name, exerciseOrder: te?.exerciseOrder ?? 0, exerciseRole: te?.exerciseRole ?? "Accessory",
+        trackingMode: exercise.trackingMode === "duration" ? "duration" : "reps", equipment: exercise.equipment, isCompound: exercise.isCompound,
+        primaryMuscleGroupId: exercise.primaryMuscleGroupId, warmupSets: te?.warmupSets ?? 0,
+        workingSets: suggestion.recommendedWorkingSets ?? 3, templateWorkingSets: te ? resolveWorkingSetCount(te) : suggestion.recommendedWorkingSets ?? 3,
+        targetWeight: suggestion.suggestedWeight ?? 0, targetRepsMin: suggestion.targetRepsMin ?? 8, targetRepsMax: suggestion.targetRepsMax ?? 12,
+        targetDurationMinSeconds: suggestion.targetDurationMinSeconds ?? null, targetDurationMaxSeconds: suggestion.targetDurationMaxSeconds ?? null,
+        targetRirMin: suggestion.targetRirMin ?? 2, targetRirMax: suggestion.targetRirMax ?? 3, restSeconds: suggestion.recommendedRestSeconds ?? 90,
+        recommendation: suggestion.recommendation, recommendationReason: suggestion.reason, recoveryPercent: suggestion.recoveryPercent, fatiguePercent: suggestion.fatiguePercent };
+    };
+    const byTemplate = new Map<number, IntegratedSuggestion[]>();
+    const forTemplate = (id: number) => {
+      const cached = byTemplate.get(id);
+      if (cached) return cached;
+      const template = templateById.get(id)!;
+      const entries = [...template.exercises].sort((a, b) => a.exerciseOrder - b.exerciseOrder).flatMap((te) => {
+        const exercise = exerciseMap.get(te.exerciseId);
+        if (!exercise) return [];
+        const recent = history.find((session) => !session.plannedDeload && session.workoutTemplateId === id)?.exercises.find((row) => row.exerciseId === te.exerciseId);
+        const suggestion = { ...evaluateForExercise(exercise, { targetSets: resolveWorkingSetCount(te, recent?.sets), targetRepsMin: te.targetRepsMin,
+          targetRepsMax: te.targetRepsMax, targetDurationMinSeconds: te.targetDurationMinSeconds, targetDurationMaxSeconds: te.targetDurationMaxSeconds,
+          targetRir: te.targetRir, restSeconds: te.restSeconds }), sourceTemplateId: id, sourceTemplateName: template.name };
+        return [{ suggestion, row: rowFor(suggestion, te) }];
       });
-    }
+      const result = integrate(entries.map((entry) => entry.suggestion), entries.map((entry) => entry.row));
+      byTemplate.set(id, result);
+      return result;
+    };
+    if (templateId && templateById.has(templateId)) return forTemplate(templateId);
+    return targetExercises.flatMap((exercise) => {
+      if (!getPreviousExercisePerformance(history, exercise.id, exercise.name).lastSets.length) return [];
+      const source = sourceTemplateByExercise.get(exercise.id);
+      if (source != null) return forTemplate(source).filter((suggestion) => suggestion.exerciseId === exercise.id);
+      const suggestion = evaluateForExercise(exercise);
+      return integrate([suggestion], [rowFor(suggestion)]);
+    });
+  }
 
-    res.json(suggestions);
+  app.get("/api/coach/suggestions", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const templateId = req.query.templateId ? Number(req.query.templateId) : undefined;
+    if (templateId != null) {
+      if (!Number.isInteger(templateId) || templateId <= 0) return res.status(400).json({ message: "Invalid template id" });
+      const template = await storage.getWorkoutTemplate(templateId);
+      if (!template) return res.status(404).json({ message: "Template not found" });
+      if (template.userId !== userId) return res.status(403).json({ message: "You do not own this template" });
+    }
+    res.json(await buildIntegratedCoachSuggestions(userId, zoneOf(req), todayFor(req), templateId));
+  });
+
+  app.get("/api/coach/training-context", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const context = await getEffectiveCoachContext(userId, todayFor(req));
+    res.json({ goal: context.goal, experience: context.experience, loggingMode: context.loggingMode, cycle: context.cycle,
+      settings: context.settings, recoverySettings: context.recoverySettings });
   });
 
   // ---------------- Workout schedule (calendar-based) ----------------
@@ -2035,6 +2107,9 @@ export async function registerRoutes(
       zone: zoneOf(req),
     });
 
+    if (snapshot.todayWorkoutTemplateId != null && !snapshot.loggedWorkoutTodayName) {
+      snapshot.suggestions = await buildIntegratedCoachSuggestions(userId, zoneOf(req), todayFor(req), snapshot.todayWorkoutTemplateId);
+    }
     res.json(snapshot);
   });
 

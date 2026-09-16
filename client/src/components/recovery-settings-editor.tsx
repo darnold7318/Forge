@@ -92,6 +92,7 @@ export function RecoverySettingsEditor({
       setDraft(cloneSettings(saved));
       queryClient.setQueryData(["/api/recovery/settings", activeUserId], saved);
       queryClient.invalidateQueries({ queryKey: ["/api/recovery"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/coach/training-context"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
       toast({ title: "Recovery settings saved" });

@@ -124,12 +124,12 @@ export interface AdvancedExerciseVolumeProfile {
 }
 
 export interface AdvancedPlanResult {
-  exercises: GuidedPlanExerciseInput[];
+  exercises: Array<GuidedPlanExerciseInput & { skipped?: boolean }>;
   metadata: AdvancedTrainerPlanMetadata;
   warnings: string[];
 }
 
-interface VolumeLandmark {
+export interface VolumeLandmark {
   label: string;
   mev: number;
   mav: number;
@@ -198,8 +198,8 @@ export function targetRirForWeek(settings: AdvancedTrainerSettings, weekNumber: 
   return Math.round(settings.startRir + (settings.endRir - settings.startRir) * progress);
 }
 
-function targetSetsFor(key: string, state: AdvancedTrainerState): number | null {
-  const landmark = VOLUME_LANDMARKS[key];
+function targetSetsFor(key: string, state: AdvancedTrainerState, landmarks = VOLUME_LANDMARKS): number | null {
+  const landmark = landmarks[key];
   if (!landmark) return null;
   if (state.phase === "deload") {
     return Math.max(1, Math.round(landmark.mev * state.settings.deloadSetPercent / 100));
@@ -260,6 +260,9 @@ export function applyAdvancedMesocyclePlan(args: {
   allTemplateExercises: AdvancedTemplateExercise[];
   volumeProfiles: AdvancedExerciseVolumeProfile[];
   state: AdvancedTrainerState;
+  volumeLandmarks?: Record<string, VolumeLandmark>;
+  recoveryLimitedExerciseIds?: number[];
+  maxRecommendedSets?: number | null;
 }): AdvancedPlanResult {
   if (args.state.phase === "review") throw new Error("Complete the mesocycle review before starting another workout");
 
@@ -280,32 +283,34 @@ export function applyAdvancedMesocyclePlan(args: {
     const profile = profileByExercise.get(exercise.exerciseId);
     const key = profile ? advancedVolumeKey(profile.primaryMuscle) : null;
     const weeklyBase = key ? templateDirect.get(key) ?? 0 : 0;
-    const weeklyTarget = key ? targetSetsFor(key, args.state) : null;
+    const weeklyTarget = key ? targetSetsFor(key, args.state, args.volumeLandmarks) : null;
     const scaled = weeklyTarget != null && weeklyBase > 0
       ? Math.max(1, Math.round(exercise.templateWorkingSets * weeklyTarget / weeklyBase))
       : exercise.workingSets;
-    const recoveryCap = exercise.fatiguePercent >= 70 ? Math.max(1, exercise.workingSets - 1) : Number.POSITIVE_INFINITY;
-    const exerciseCap = Math.min(args.state.settings.maxSetsPerExercise, recoveryCap);
+    const limited = args.recoveryLimitedExerciseIds?.includes(exercise.exerciseId) ?? exercise.fatiguePercent >= 70;
+    const recoveryCap = limited ? exercise.workingSets : Number.POSITIVE_INFINITY;
+    const exerciseCap = Math.min(args.state.settings.maxSetsPerExercise, recoveryCap, args.maxRecommendedSets ?? Number.POSITIVE_INFINITY);
     const alreadyUsed = key ? sessionUsed.get(key) ?? 0 : 0;
-    const sessionAvailable = Math.max(1, args.state.settings.maxSetsPerMuscleSession - alreadyUsed);
+    const sessionAvailable = Math.max(0, args.state.settings.maxSetsPerMuscleSession - alreadyUsed);
+    const skipped = sessionAvailable === 0;
     const workingSets = Math.max(1, Math.min(scaled, exerciseCap, sessionAvailable));
     if (key) {
-      sessionUsed.set(key, alreadyUsed + workingSets);
-      prescribedWeekly.set(key, (prescribedWeekly.get(key) ?? 0) + workingSets);
+      sessionUsed.set(key, alreadyUsed + (skipped ? 0 : workingSets));
+      prescribedWeekly.set(key, (prescribedWeekly.get(key) ?? 0) + (skipped ? 0 : workingSets));
     }
 
-    const isDuration = exercise.trackingMode === "duration";
     const targetWeight = args.state.phase === "deload"
       ? roundOne(exercise.targetWeight * args.state.settings.deloadLoadPercent / 100)
       : exercise.targetWeight;
     return {
       ...exercise,
+      skipped,
       workingSets,
       targetWeight,
-      targetRepsMin: isDuration ? exercise.targetRepsMin : Math.max(5, Math.min(30, exercise.targetRepsMin)),
-      targetRepsMax: isDuration ? exercise.targetRepsMax : Math.max(5, Math.min(30, exercise.targetRepsMax)),
-      targetRirMin: targetRir,
-      targetRirMax: Math.min(5, targetRir + 1),
+      targetRepsMin: exercise.targetRepsMin,
+      targetRepsMax: exercise.targetRepsMax,
+      targetRirMin: limited ? Math.max(targetRir, exercise.targetRirMin) : targetRir,
+      targetRirMax: limited ? Math.max(Math.min(5, targetRir + 1), exercise.targetRirMax) : Math.min(5, targetRir + 1),
       recommendation: args.state.phase === "deload" ? "Deload Technique" : "Mesocycle Target",
       recommendationReason: args.state.phase === "deload"
         ? `Reduce fatigue with ${workingSets} crisp set${workingSets === 1 ? "" : "s"}, about ${args.state.settings.deloadLoadPercent}% of normal load, and no failure work.`
@@ -317,6 +322,7 @@ export function applyAdvancedMesocyclePlan(args: {
   for (const profile of args.volumeProfiles) keys.add(advancedVolumeKey(profile.primaryMuscle));
   const summary = Array.from(keys).flatMap((key) => {
     const sessionExercises = exercises.filter((exercise) => {
+      if (exercise.skipped) return false;
       const profile = profileByExercise.get(exercise.exerciseId);
       return profile && advancedVolumeKey(profile.primaryMuscle) === key;
     });

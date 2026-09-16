@@ -22,6 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { apiRequest } from "@/lib/queryClient";
+import { CoachTrainingContext } from "@/components/coach-training-context";
 import { useActiveUser } from "@/lib/user-context";
 import type { WorkoutExerciseSuggestion, FatigueSignal } from "@shared/coaching";
 
@@ -84,6 +85,9 @@ export default function Coach() {
       return res.json();
     },
     enabled: activeUserId != null,
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
   });
 
   const { data: suggestions, isLoading: suggestionsLoading } = useQuery<Suggestion[]>({
@@ -97,6 +101,9 @@ export default function Coach() {
       return res.json();
     },
     enabled: activeUserId != null,
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
   });
 
   const { data: fatigue, isLoading: fatigueLoading } = useQuery<FatigueSignal>({
@@ -116,6 +123,7 @@ export default function Coach() {
         </h1>
         <p className="text-sm text-muted-foreground">Next-session targets for {suggestions?.[0]?.goalLabel ?? "your training goal"}</p>
       </div>
+      <CoachTrainingContext />
 
       {!fatigueLoading && fatigue && (
         <Card
@@ -249,6 +257,8 @@ export default function Coach() {
                     </>
                   )}
                   {s.restGuidance && <p className="text-xs text-muted-foreground">{s.restGuidance}</p>}
+                  {s.sourceTemplateName && <p className="text-xs text-muted-foreground">Template: {s.sourceTemplateName}</p>}
+                  {s.cycleNotice && <p className="text-xs text-primary">{s.cycleNotice}</p>}
                   {s.templateAdjustmentNote && (
                     <p className="text-xs text-muted-foreground" data-testid={`text-template-adjustment-${s.exerciseId}`}>
                       {s.templateAdjustmentNote}

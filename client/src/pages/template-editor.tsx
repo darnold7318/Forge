@@ -387,6 +387,8 @@ export default function TemplateEditor() {
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/workout-templates", String(templateId)] });
     queryClient.invalidateQueries({ queryKey: ["/api/workout-templates"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
   };
 
   const patchTemplateMutation = useMutation({
@@ -464,6 +466,8 @@ export default function TemplateEditor() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/workout-templates"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
       toast({ title: "Template deleted" });
       navigate("/templates");
     },

@@ -1119,6 +1119,8 @@ export default function Settings() {
       queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
       queryClient.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
       queryClient.invalidateQueries({ queryKey: ["/api/coach/settings"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/coach/training-context"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/advanced-trainer/state"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/coach/fatigue-trend"] });
       toast({ title: "Preferences saved" });

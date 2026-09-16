@@ -7,6 +7,7 @@ import {
   type MuscleGroupName,
   type CoachSettings,
   type RecoverySettings,
+  type WorkoutLoggingModeId,
   muscleGroupDisplayNames,
 } from "@shared/schema";
 import {
@@ -18,6 +19,9 @@ import {
   type ExperienceCoachingProfile,
   type RecoveryModelOverrides,
 } from "@shared/coaching";
+import { advancedTrainerSettingsSchema } from "@shared/schema";
+import { resolveAdvancedTrainerTiming, type AdvancedTrainerState } from "@shared/advanced-trainer";
+import { civilDateInZone, resolveEffectiveZone } from "@shared/timezone";
 
 export interface EffectiveMuscleCoachSettings {
   muscleGroupId: number;
@@ -36,6 +40,8 @@ export interface EffectiveMuscleCoachSettings {
 }
 
 export interface EffectiveCoachContext {
+  loggingMode: WorkoutLoggingModeId;
+  cycle: AdvancedTrainerState | null;
   goal: TrainingGoalId;
   profile: GoalCoachingProfile;
   experience: TrainingLevelId;
@@ -48,8 +54,8 @@ export interface EffectiveCoachContext {
   exerciseFatigueCosts: Record<number, number>;
 }
 
-export async function getEffectiveCoachContext(userId: number): Promise<EffectiveCoachContext> {
-  const [user, settings, recoverySettings, muscleGroups, muscleOverrides, exerciseOverrides, learnedRanges] = await Promise.all([
+export async function getEffectiveCoachContext(userId: number, today?: string): Promise<EffectiveCoachContext> {
+  const [user, settings, recoverySettings, muscleGroups, muscleOverrides, exerciseOverrides, learnedRanges, activeCycle, trainerSettings] = await Promise.all([
     storage.getUser(userId),
     storage.getCoachSettings(userId),
     storage.getRecoverySettings(userId),
@@ -57,7 +63,16 @@ export async function getEffectiveCoachContext(userId: number): Promise<Effectiv
     storage.getMuscleCoachOverrides(userId),
     storage.getExerciseCoachOverrides(userId),
     storage.getLearnedVolumeRanges(userId),
+    storage.getActiveAdvancedTrainerCycle(userId),
+    storage.getAdvancedTrainerSettings(userId),
   ]);
+  let cycle: AdvancedTrainerState | null = null;
+  if (activeCycle) {
+    // The active snapshot wins over settings prepared for the next cycle.
+    const snapshot = advancedTrainerSettingsSchema.parse(JSON.parse(activeCycle.settingsSnapshot));
+    cycle = { cycleId: activeCycle.id, startedOn: activeCycle.startedOn, settings: snapshot, configuredSettings: trainerSettings,
+      ...resolveAdvancedTrainerTiming({ startedOn: activeCycle.startedOn, today: today ?? civilDateInZone(new Date(), resolveEffectiveZone(user)), settings: snapshot }) };
+  }
   const rawGoal = user?.trainingGoal as TrainingGoalId | undefined;
   const goal = rawGoal && trainingGoalIds.includes(rawGoal) ? rawGoal : "hypertrophy";
   const rawExperience = user?.trainingLevel as TrainingLevelId | undefined;
@@ -108,6 +123,8 @@ export async function getEffectiveCoachContext(userId: number): Promise<Effectiv
       ? 1.25
       : 1;
   return {
+    loggingMode: (user?.workoutLoggingMode ?? "classic") as WorkoutLoggingModeId,
+    cycle,
     goal,
     profile: resolveGoalCoachingProfile(goal),
     experience,

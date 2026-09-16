@@ -37,6 +37,8 @@ export function AdvancedTrainerCyclePanel() {
     onSuccess: (overview, action) => {
       queryClient.setQueryData(queryKey, overview);
       queryClient.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/coach/training-context"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
       toast({ title: action === "start" ? "Mesocycle started" : action === "align" ? "Start aligned to first workout" : "Previous start restored",
         description: "Your saved workout plans and sets are unchanged." });
       setConfirm(null);

@@ -61,6 +61,8 @@ export interface HistoryExerciseInput {
     targetDurationMinSeconds?: number | null;
     targetDurationMaxSeconds?: number | null;
     targetRir: number;
+    targetRirMin?: number;
+    targetRirMax?: number;
     restSeconds?: number;
   } | null;
   prescriptionSnapshotAvailable?: boolean;
@@ -68,6 +70,7 @@ export interface HistoryExerciseInput {
 }
 
 export interface HistorySessionInput {
+  plannedDeload?: boolean;
   id: number;
   workoutTemplateId: number | null;
   workoutName: string;
@@ -172,6 +175,7 @@ export function getPreviousExercisePerformance(
 
   // history assumed sorted most-recent-first
   for (const session of history) {
+    if (session.plannedDeload) continue;
     const ex = session.exercises.find((e) => e.exerciseId === exerciseId);
     if (!ex) continue;
     const completed = completedSetsOf(ex.sets);
@@ -683,6 +687,8 @@ export interface ExerciseExposureSummary {
   averageRir: number | null;
   rirCompleteness: number;
   prescribedRir: number | null;
+  prescribedRirMin?: number | null;
+  prescribedRirMax?: number | null;
   setCompletion: number;
   comparableRepLossPercent: number | null;
   relativeIntensity: number | null;
@@ -723,6 +729,8 @@ function summarizeExposure(session: HistorySessionInput, exercise: HistoryExerci
     averageRir: rirValues.length ? rirValues.reduce((sum, value) => sum + value, 0) / rirValues.length : null,
     rirCompleteness: rirValues.length / working.length,
     prescribedRir: exercise.prescriptionSnapshotAvailable ? exercise.prescription?.targetRir ?? null : null,
+    prescribedRirMin: exercise.prescriptionSnapshotAvailable ? exercise.prescription?.targetRirMin ?? null : null,
+    prescribedRirMax: exercise.prescriptionSnapshotAvailable ? exercise.prescription?.targetRirMax ?? null : null,
     setCompletion: targetSets && targetSets > 0 ? Math.min(1, working.length / targetSets) : 1,
     comparableRepLossPercent: comparableDrops.length
       ? (comparableDrops.reduce((sum, value) => sum + value, 0) / comparableDrops.length) * 100
@@ -751,6 +759,7 @@ export function evaluateExerciseTrend(
   settings: Pick<CoachSettings, "minComparableExposures" | "trendHistoryLimit">,
 ): ExerciseTrendEvaluation {
   const exposures = history
+    .filter((session) => !session.plannedDeload)
     .map((session) => {
       const exercise = session.exercises.find((item) => item.exerciseId === exerciseId);
       return exercise ? summarizeExposure(session, exercise) : null;
@@ -854,8 +863,8 @@ export function evaluateRirAdherence(
     };
   }
 
-  const snapshotMin = Math.max(0, latest.prescribedRir - 1);
-  const snapshotMax = latest.prescribedRir + 1;
+  const snapshotMin = latest.prescribedRirMin ?? Math.max(0, latest.prescribedRir - 1);
+  const snapshotMax = latest.prescribedRirMax ?? latest.prescribedRir + 1;
   const deviation = latest.averageRir - latest.prescribedRir;
   const status = latest.averageRir < snapshotMin
     ? "too_hard" as const
@@ -1029,6 +1038,7 @@ export interface GoalAwareProgressionV2Input {
   fatigue: FatigueSignal;
   muscleContexts: MuscleTrainingContext[];
   weightSettings?: EquipmentWeightSettings & { name?: string };
+  sessionRir?: { min: number; max: number };
 }
 
 export type GoalAwareProgressionInput = GoalAwareProgressionV2Input;
@@ -1055,19 +1065,20 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
   const { goal, trackingMode, previous, trend, settings, recovery, fatigue, muscleContexts } = input;
   const experience = input.experience ?? "intermediate";
   const experienceProfile = resolveExperienceCoachingProfile(experience);
-  const prescription = resolveGoalExperiencePrescription({
+  const resolvedPrescription = resolveGoalExperiencePrescription({
     goal,
     experience,
     trackingMode,
     prescription: input.prescription,
   });
+  const prescription = input.sessionRir ? { ...resolvedPrescription, targetRir: input.sessionRir.min } : resolvedPrescription;
   const progressionStyle = resolveProgressionStyle(goal, settings.progressionStyle, experience);
   const rirAdherence = evaluateRirAdherence(trend, prescription.targetRir, trackingMode, goal);
   const effortTrend = evaluateEffortAdjustedTrend(trend, rirAdherence, goal, trackingMode);
   const confidence = calculateCoachingConfidence(trend, rirAdherence);
   const latest = trend.exposures.at(-1);
-  const rirMin = Math.max(0, prescription.targetRir - 1);
-  const rirMax = prescription.targetRir + 1;
+  const rirMin = input.sessionRir?.min ?? Math.max(0, prescription.targetRir - 1);
+  const rirMax = input.sessionRir?.max ?? prescription.targetRir + 1;
   const topWeight = latest?.topWeight ?? 0;
   const latestWorkingSets = completedSetsOf(previous.lastSets).filter((set) => set.setType === "Working");
   const topLoadSets = latestWorkingSets.filter((set) => Math.abs(set.weight - topWeight) < 1e-9);
@@ -1516,6 +1527,9 @@ export function evaluateFatigueTrend(
   history: HistorySessionInput[],
   sensitivity: CoachSettings["fatigueSensitivity"] = "normal",
 ): FatigueSignal {
+  // Intentional lighter work is not evidence of lost performance. Actual
+  // recovery and weekly volume still consume the complete, unfiltered history.
+  history = history.filter((session) => !session.plannedDeload);
   if (history.length < 3) {
     const sessionsRemaining = 3 - history.length;
     return {
@@ -1696,16 +1710,19 @@ export function learnPersonalVolumeRanges(
   const currentWeek = mondayForCivilDate(civilDateInZone(now, zone));
   const buckets = new Map<string, MutableSample>();
   const previousByExercise = new Map<number, ExerciseExposureSummary>();
+  const deloadWeeks = new Set(history.filter((session) => session.plannedDeload)
+    .map((session) => mondayForCivilDate(civilDateInZone(session.startedAt, zone))));
   const chronological = [...history].sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
 
   for (const session of chronological) {
+    if (session.plannedDeload) continue;
     const weekStart = mondayForCivilDate(civilDateInZone(session.startedAt, zone));
     for (const exercise of session.exercises) {
       const summary = summarizeExposure(session, exercise);
       if (!summary) continue;
       const outcome = exposureOutcome(previousByExercise.get(exercise.exerciseId), summary);
       previousByExercise.set(exercise.exerciseId, summary);
-      if (weekStart >= currentWeek) continue;
+      if (weekStart >= currentWeek || deloadWeeks.has(weekStart)) continue;
       const stimulus = exercise.stimulus?.length
         ? exercise.stimulus
         : [{ muscleGroupId: exercise.primaryMuscleGroupId, stimulusRatio: 1 }];
@@ -2213,6 +2230,12 @@ export interface WorkoutExerciseSuggestion {
   targetRirMax?: number;
   recommendedWorkingSets?: number;
   recommendedRestSeconds?: number;
+  mesocycle?: import("./guided-workout").AdvancedTrainerPlanMetadata | null;
+  cycleNotice?: string | null;
+  sessionAvailable?: boolean;
+  sourceTemplateId?: number | null;
+  sourceTemplateName?: string | null;
+  excludeFromSession?: boolean;
 }
 
 export function buildWorkoutSuggestion(

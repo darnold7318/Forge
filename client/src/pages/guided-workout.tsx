@@ -59,7 +59,6 @@ import {
   type GuidedTimeStrategy,
 } from "@shared/guided-workout";
 import {
-  applyAdvancedMesocyclePlan,
   refreshAdvancedPlanMetadata,
   type AdvancedExerciseVolumeProfile,
   type AdvancedTrainerOverview,
@@ -302,18 +301,24 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
     queryKey: ["/api/coach/suggestions", "guided", selectedTemplateId, activeUserId, activeUser?.trainingGoal, activeUser?.trainingLevel],
     queryFn: async () => (await apiRequest("GET", suggestionUrl!)).json(),
     enabled: suggestionUrl != null && activeSession == null,
-    staleTime: 60_000,
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
   });
 
   const plan = useMemo(() => {
     if (!selectedTemplate || !exercises || !suggestions || (advanced && !advancedState)) return null;
     if (advancedState?.phase === "review") return null;
+    const cycleMetadata = suggestions[0]?.mesocycle ?? null;
+    if (advanced && (!cycleMetadata || cycleMetadata.cycleId !== advancedState?.cycleId
+      || cycleMetadata.weekNumber !== advancedState?.weekNumber || cycleMetadata.phase !== advancedState?.phase)) return null;
     const exerciseById = new Map(exercises.map((exercise) => [exercise.id, exercise]));
     const suggestionById = new Map(suggestions.map((suggestion) => [suggestion.exerciseId, suggestion]));
     const rows: GuidedPlanExerciseInput[] = selectedTemplate.exercises.flatMap((templateExercise) => {
       const exercise = exerciseById.get(templateExercise.exerciseId);
       if (!exercise) return [];
       const coach = suggestionById.get(exercise.id);
+      if (coach?.excludeFromSession) return [];
       const templateWorkingSets = resolveWorkingSetCount(templateExercise);
       return [{
         exerciseId: exercise.id,
@@ -342,8 +347,8 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
       }];
     });
     if (rows.length === 0) return null;
-    let plannedRows = rows;
-    let advancedTrainer = null;
+    const plannedRows = rows;
+    const advancedTrainer = advanced ? cycleMetadata : null;
     let advancedVolumeProfiles: AdvancedExerciseVolumeProfile[] = [];
     let advancedWarnings: string[] = [];
     if (advanced && advancedState) {
@@ -360,18 +365,9 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
         }];
       });
       advancedVolumeProfiles = volumeProfiles;
-      const advancedPlan = applyAdvancedMesocyclePlan({
-        exercises: rows,
-        allTemplateExercises: templates!.flatMap((template) => template.exercises.map((exercise) => ({
-          exerciseId: exercise.exerciseId,
-          targetSets: resolveWorkingSetCount(exercise),
-        }))),
-        volumeProfiles,
-        state: advancedState,
-      });
-      plannedRows = advancedPlan.exercises;
-      advancedTrainer = advancedPlan.metadata;
-      advancedWarnings = advancedPlan.warnings;
+      advancedWarnings = [advancedState.phase === "deload"
+        ? "Planned deload: reduced sets and load, no failure work. Targets come from your integrated Coach."
+        : "Cycle targets come from Coach using your active settings, template, equipment, and recovery limits."];
     }
     const built = buildGuidedSessionPlan({
       workoutTemplateId: selectedTemplate.id,

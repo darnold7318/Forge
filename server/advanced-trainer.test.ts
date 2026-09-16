@@ -155,6 +155,83 @@ test("v4.1 preserves used legacy cycles, retires only unused auto starts, and sa
     const explicit = await request("/api/advanced-trainer/cycles", "POST");
     assert.equal(explicit.status, 201);
     assert.equal((await explicit.json()).state.startedOn, today);
+
+    // Unified Coach targets: user settings and cycle context reach every surface.
+    const unifiedUser = await storage.createUser({ name: "Unified Coach", passwordHash: "test:test" });
+    await storage.updateUserPreferences(unifiedUser.id, { workoutLoggingMode: "advanced_guided", trainingLevel: "advanced" });
+    const unifiedToken = issueTokenFor(unifiedUser);
+    const coachRequest = (path: string, method = "GET", body?: unknown) => fetch(`${base}${path}`, { method,
+      headers: { Authorization: `Bearer ${unifiedToken}`, "Content-Type": "application/json" },
+      ...(body == null ? {} : { body: JSON.stringify(body) }) });
+    const push = await storage.createWorkoutTemplate({ userId: unifiedUser.id, name: "Push A", notes: null });
+    await storage.createWorkoutTemplateExercise({ workoutTemplateId: push.id, exerciseId: bench.id, exerciseOrder: 1,
+      exerciseRole: "Primary Compound", targetSets: 12, targetRepsMin: 8, targetRepsMax: 12, targetRir: 2,
+      warmupSets: 0, topSets: 0, backoffSets: 0, backoffReductionPercent: 0, targetDurationMinSeconds: null,
+      targetDurationMaxSeconds: null, tempo: null, failureTarget: "Last Set", intensityTechnique: "None", restSeconds: 120, notes: null });
+    const prior = await storage.createWorkout({ userId: unifiedUser.id, date: addCivilDays(today, -10), name: "Manual Push A", workoutTemplateId: push.id });
+    await storage.createSet({ workoutId: prior.id, exerciseId: bench.id, setNumber: 1, weight: 100, reps: 10, rir: 3, isWarmup: false });
+    const suggestionsPath = `/api/coach/suggestions?templateId=${push.id}`;
+    const awaitingTargets = await (await coachRequest(suggestionsPath)).json();
+    assert.equal(awaitingTargets[0].sessionAvailable, false);
+    assert.equal(awaitingTargets[0].mesocycle, null);
+    assert.equal((await (await coachRequest("/api/coach/training-context")).json()).loggingMode, "advanced_guided");
+    const unifiedCycle = (await (await coachRequest("/api/advanced-trainer/cycles", "POST")).json()).state;
+    const weekOne = await (await coachRequest(suggestionsPath)).json();
+    assert.equal(weekOne[0].mesocycle.cycleId, unifiedCycle.cycleId);
+    assert.equal(weekOne[0].targetRirMin, 3);
+    assert.equal(weekOne[0].prescribedRirMin, 3);
+    assert.equal(weekOne[0].recommendedWorkingSets, weekOne[0].prescribedSets);
+    assert.equal(weekOne[0].sourceTemplateId, push.id);
+    assert.match(weekOne[0].suggestedGoal, /RIR 3-4/);
+    assert.ok(weekOne[0].recommendedWorkingSets <= DEFAULT_ADVANCED_TRAINER_SETTINGS.maxSetsPerExercise);
+    const allTargets = await (await coachRequest("/api/coach/suggestions")).json();
+    assert.deepEqual(allTargets[0], weekOne[0]);
+    const dashboard = await (await coachRequest("/api/dashboard")).json();
+    assert.equal(dashboard.todayWorkoutTemplateId, push.id);
+    assert.equal(dashboard.suggestions[0].suggestedGoal, weekOne[0].suggestedGoal);
+    assert.equal(dashboard.suggestions[0].mesocycle.cycleId, unifiedCycle.cycleId);
+    await coachRequest("/api/advanced-trainer/settings", "PUT", { ...DEFAULT_ADVANCED_TRAINER_SETTINGS, accumulationWeeks: 6, startRir: 4 });
+    assert.equal((await (await coachRequest(suggestionsPath)).json())[0].targetRirMin, 3);
+    const context = await (await coachRequest("/api/coach/training-context")).json();
+    assert.equal(context.cycle.settings.accumulationWeeks, 4);
+    assert.equal(context.cycle.configuredSettings.accumulationWeeks, 6);
+    await storage.setMuscleCoachOverride(unifiedUser.id, { muscleGroupId: bench.primaryMuscleGroupId, mev: 2, mav: 4, mrv: 6, recoveryHalfLifeHours: null });
+    const customized = await (await coachRequest(suggestionsPath)).json();
+    assert.equal(customized[0].recommendedWorkingSets, 2);
+    assert.equal(customized[0].mesocycle.volumeSummary[0].prescribedDirectSets, 2);
+    inspection.prepare("UPDATE advanced_trainer_cycles SET started_on = ? WHERE id = ?").run(addCivilDays(today, -7), unifiedCycle.cycleId);
+    assert.equal((await (await coachRequest(suggestionsPath)).json())[0].targetRirMin, 2);
+    inspection.prepare("UPDATE advanced_trainer_cycles SET started_on = ? WHERE id = ?").run(addCivilDays(today, -21), unifiedCycle.cycleId);
+    assert.equal((await (await coachRequest(suggestionsPath)).json())[0].targetRirMin, 1);
+    inspection.prepare("UPDATE advanced_trainer_cycles SET started_on = ? WHERE id = ?").run(addCivilDays(today, -28), unifiedCycle.cycleId);
+    const deload = await (await coachRequest(suggestionsPath)).json();
+    assert.equal(deload[0].mesocycle.phase, "deload");
+    assert.equal(deload[0].targetRirMin, 4);
+    assert.equal(deload[0].recommendation, "Deload Technique");
+    assert.ok(deload[0].suggestedWeight < weekOne[0].suggestedWeight);
+    assert.match(deload[0].nextGoalText, /RIR 4-5/);
+    const deloadDashboard = await (await coachRequest("/api/dashboard")).json();
+    assert.equal(deloadDashboard.suggestions[0].suggestedGoal, deload[0].suggestedGoal);
+    const deloadPlan = JSON.parse(savedPlan(unifiedCycle.cycleId, bench.id));
+    deloadPlan.workoutTemplateId = push.id;
+    deloadPlan.advancedTrainer = deload[0].mesocycle;
+    deloadPlan.exercises[0] = { ...deloadPlan.exercises[0], targetWeight: deload[0].suggestedWeight,
+      workingSets: deload[0].recommendedWorkingSets, targetRirMin: 4, targetRirMax: 5 };
+    const deloadStarted = await coachRequest("/api/workout-sessions", "POST", { date: today, workoutTemplateId: push.id,
+      name: "Deload Push A", timeBudgetMinutes: null, sessionPlan: deloadPlan });
+    assert.equal(deloadStarted.status, 201);
+    const deloadSession = await deloadStarted.json();
+    await coachRequest("/api/sets", "POST", { workoutId: deloadSession.id, exerciseId: bench.id, setNumber: 1,
+      weight: deload[0].suggestedWeight, reps: 10, rir: 4, isWarmup: false });
+    assert.equal((await coachRequest(`/api/workout-sessions/${deloadSession.id}/complete`, "POST")).status, 200);
+    const nextDeload = await (await coachRequest(suggestionsPath)).json();
+    assert.equal(nextDeload[0].suggestedWeight, deload[0].suggestedWeight);
+    assert.equal((await storage.getWorkout(prior.id))?.advancedTrainerCycleId, null);
+    await storage.updateUserPreferences(unifiedUser.id, { workoutLoggingMode: "classic", trainingGoal: "strength" });
+    const classic = await (await coachRequest(suggestionsPath)).json();
+    assert.equal(classic[0].mesocycle, undefined);
+    assert.equal(classic[0].goal, "strength");
+    assert.notEqual(classic[0].recommendation, "Deload Technique");
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }

@@ -178,6 +178,8 @@ export default function WorkoutTemplates() {
     },
     onSuccess: (created) => {
       queryClient.invalidateQueries({ queryKey: ["/api/workout-templates"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
       setNewOpen(false);
       setNewName("");
       navigate(`/templates/${created.id}/edit`);

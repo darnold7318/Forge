@@ -58,6 +58,9 @@ export function AdvancedTrainerSettingsEditor({
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["/api/advanced-trainer/settings", activeUserId] });
       await queryClient.invalidateQueries({ queryKey: ["/api/advanced-trainer/state", activeUserId] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/coach/training-context"] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
       toast({
         title: reviewCycleId == null ? "Next-cycle settings saved" : "Next mesocycle prepared",
         description: reviewCycleId == null

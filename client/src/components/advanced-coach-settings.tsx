@@ -73,6 +73,8 @@ export function AdvancedCoachSettings() {
 
   const refresh = async () => {
     await queryClient.invalidateQueries({ queryKey: ["/api/coach/settings"] });
+    await queryClient.invalidateQueries({ queryKey: ["/api/coach/training-context"] });
+    await queryClient.invalidateQueries({ queryKey: ["/api/coach/fatigue-trend"] });
     await queryClient.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
     await queryClient.invalidateQueries({ queryKey: ["/api/recovery"] });
     await queryClient.invalidateQueries({ queryKey: ["/api/volume-tracker"] });

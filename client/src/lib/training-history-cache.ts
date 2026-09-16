@@ -14,6 +14,7 @@ const trainingHistoryQueryRoots = [
   "/api/coach/fatigue-trend",
   "/api/coach/personal-records",
   "/api/coach/settings",
+  "/api/coach/training-context",
   "/api/progress/tracked-exercises",
   "/api/exercises",
 ] as const;

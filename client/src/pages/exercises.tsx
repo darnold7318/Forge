@@ -202,6 +202,8 @@ function ExerciseFormDialog({
     onSuccess: (ex: Exercise) => {
       queryClient.invalidateQueries({ queryKey: ["/api/exercises"] });
       queryClient.invalidateQueries({ queryKey: ["/api/coach/settings"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
       toast({
         title: mode === "create" ? "Exercise created" : "Exercise updated",
         description: `${ex.name} ${mode === "create" ? "added to" : "updated in"} your library.`,

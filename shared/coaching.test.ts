@@ -8,6 +8,7 @@ import {
   evaluateRecovery,
   evaluateExerciseTrend,
   evaluateGoalAwareProgressionV2,
+  evaluateRirAdherence,
   buildGoalAwareWorkoutSuggestion,
   applyExperienceCoachSettings,
   identifyLimitingMuscles,
@@ -47,6 +48,8 @@ import {
   type AdvancedTrainerState,
 } from "./advanced-trainer";
 import { CATALOG_EXERCISE_STIMULUS_DEFAULTS } from "../server/seed-data";
+import { integrateCycleSuggestions, type IntegratedSuggestion } from "../server/integrated-coach";
+import type { EffectiveCoachContext } from "../server/coach-settings";
 
 function guidedExercise(overrides: Partial<GuidedPlanExerciseInput> = {}): GuidedPlanExerciseInput {
   return {
@@ -1013,4 +1016,101 @@ test("high-low cable fly keeps direct chest volume without false lat credit", ()
   assert.equal(fly.stimulus.MidLowerChest, 1);
   assert.equal(fly.stimulus.Triceps, 0.1);
   assert.equal("Lats" in fly.stimulus, false);
+});
+
+function integratedFixture(weekNumber = 1) {
+  const context: Pick<EffectiveCoachContext, "loggingMode" | "cycle" | "muscles"> = {
+    loggingMode: "advanced_guided",
+    cycle: { cycleId: 7, startedOn: "2026-01-01", weekNumber, totalWeeks: 5, phase: weekNumber === 5 ? "deload" : "accumulation",
+      daysRemaining: 35, settings: { ...DEFAULT_ADVANCED_TRAINER_SETTINGS, maxSetsPerExercise: 6, maxSetsPerMuscleSession: 6 }, configuredSettings: DEFAULT_ADVANCED_TRAINER_SETTINGS },
+    muscles: [{ muscleGroupId: 1, muscle: "MidLowerChest", displayName: "Chest", recoveryHalfLifeHours: 24,
+      mev: 6, mav: 12, mrv: 18, customized: { volumeLandmarks: false, recoveryHalfLifeHours: false },
+      learnedRange: { productiveLow: null, productiveHigh: null, confidence: 0, validWeekCount: 0, explanation: "Learning" },
+      forgeDefaults: { recoveryHalfLifeHours: 24, mev: 6, mav: 12, mrv: 18 } }],
+  };
+  const row = guidedExercise({ workingSets: 2, templateWorkingSets: 12, targetWeight: 185, targetRirMin: 2, targetRirMax: 3 });
+  const suggestion: IntegratedSuggestion = { exerciseId: 1, exerciseName: "Bench", lastPerformance: "185", recommendation: "Maintain",
+    suggestedGoal: "Baseline", nextGoalText: "Baseline", reason: "Baseline", evidenceText: "Baseline", confidenceScore: 80,
+    recoveryStatus: "Recovered", recoveryText: "Recovered", recoveryPercent: 100, fatiguePercent: 0, readinessScore: 90,
+    readinessStatus: "Ready", readinessText: "Ready", readinessGuidance: "Ready", trackingMode: "reps", suggestedWeight: 185,
+    targetRepsMin: row.targetRepsMin, targetRepsMax: row.targetRepsMax, targetRirMin: 2, targetRirMax: 3, recommendedWorkingSets: 2,
+    prescribedSets: 2, setRecommendation: "Maintain Sets" };
+  return { context, suggestions: [suggestion], exercises: [row], allTemplateExercises: [{ exerciseId: 1, targetSets: 12 }],
+    volumeProfiles: [{ exerciseId: 1, primaryMuscle: "MidLowerChest" as const, stimulus: [{ muscleGroupName: "MidLowerChest" as const, stimulusRatio: 1 }] }],
+    equipmentById: new Map([[1, { minWeight: 0, maxWeight: 300, weightIncrement: 10 }]]) };
+}
+
+test("integrated Coach rounds deload load to equipment and updates every target description once", () => {
+  const targets = integrateCycleSuggestions(integratedFixture(5));
+  assert.equal(targets[0].suggestedWeight, 110);
+  assert.equal(targets[0].targetRirMin, 4);
+  assert.equal(targets[0].prescribedRirMin, 4);
+  assert.match(targets[0].suggestedGoal, /110 lb/);
+  assert.match(targets[0].nextGoalText, /110 lb/);
+  assert.match(targets[0].reason, /progression is paused/);
+});
+
+test("integrated Coach preserves recovery-limited volume and easier effort over late-cycle increases", () => {
+  const fixture = integratedFixture(4);
+  fixture.exercises[0].targetRirMin = 3;
+  fixture.exercises[0].targetRirMax = 4;
+  fixture.suggestions[0].recommendation = "Hold Progression";
+  fixture.suggestions[0].setRecommendation = "Reduce Set";
+  const target = integrateCycleSuggestions(fixture)[0];
+  assert.equal(target.recommendedWorkingSets, 2);
+  assert.equal(target.targetRirMin, 3);
+  assert.equal(target.setRecommendation, "Reduce Set");
+  assert.match(target.reason, /limits override/);
+});
+
+test("integrated Coach excludes later exercises rather than exceeding the user's session cap", () => {
+  const fixture = integratedFixture(4);
+  for (const id of [2, 3, 4]) {
+    fixture.suggestions.push({ ...fixture.suggestions[0], exerciseId: id });
+    fixture.exercises.push({ ...fixture.exercises[0], exerciseId: id, exerciseOrder: id });
+    fixture.allTemplateExercises.push({ exerciseId: id, targetSets: 12 });
+    fixture.volumeProfiles.push({ ...fixture.volumeProfiles[0], exerciseId: id });
+  }
+  const targets = integrateCycleSuggestions(fixture);
+  assert.equal(targets.reduce((total, target) => total + (target.recommendedWorkingSets ?? 0), 0), 6);
+  assert.equal(targets[2].excludeFromSession, true);
+  assert.equal(targets[3].prescribedSets, 0);
+  assert.equal(targets[0].mesocycle?.volumeSummary[0].prescribedDirectSets, 6);
+});
+
+test("integrated Coach honors custom landmarks and preserves goal-specific rep ranges", () => {
+  const fixture = integratedFixture(1);
+  fixture.context.muscles[0] = { ...fixture.context.muscles[0], mev: 2, mav: 4, mrv: 6,
+    customized: { volumeLandmarks: true, recoveryHalfLifeHours: false } };
+  fixture.exercises[0].targetRepsMin = 2;
+  fixture.exercises[0].targetRepsMax = 6;
+  const target = integrateCycleSuggestions(fixture)[0];
+  assert.equal(target.recommendedWorkingSets, 2);
+  assert.equal(target.targetRepsMin, 2);
+  assert.equal(target.targetRepsMax, 6);
+  fixture.context.loggingMode = "classic";
+  assert.deepEqual(integrateCycleSuggestions(fixture), fixture.suggestions);
+});
+
+test("Coach grades past effort against the saved session's exact RIR range, not today's cycle target", () => {
+  const history = exposureHistory([[10, 10]], 2);
+  const exercise = history[0].exercises[0];
+  exercise.prescription = { ...exercise.prescription!, targetRir: 3, targetRirMin: 3, targetRirMax: 4 };
+  const trend = evaluateExerciseTrend(history, exercise.exerciseId, "hypertrophy", "reps", DEFAULT_COACH_SETTINGS);
+  assert.equal(evaluateRirAdherence(trend, 1, "reps", "hypertrophy").status, "too_hard");
+  for (const set of exercise.sets) set.rir = 3;
+  const onTarget = evaluateExerciseTrend(history, exercise.exerciseId, "hypertrophy", "reps", DEFAULT_COACH_SETTINGS);
+  assert.equal(evaluateRirAdherence(onTarget, 1, "reps", "hypertrophy").status, "on_target");
+});
+
+test("planned deloads do not reset normal-load baselines or create false regression trends", () => {
+  const history = exposureHistory([[10, 10], [10, 10], [10, 10]], 3);
+  const deload: HistorySessionInput = { ...history[0], id: 100, plannedDeload: true, startedAt: new Date("2026-09-20T12:00:00Z"),
+    exercises: history[0].exercises.map((exercise) => ({ ...exercise, sets: exercise.sets.map((set) => ({ ...set, weight: 60, reps: 5, rir: 4 })) })) };
+  const all = [deload, ...history];
+  const previous = getPreviousExercisePerformance(all, history[0].exercises[0].exerciseId, "Bench");
+  assert.equal(previous.lastSets[0].weight, history[0].exercises[0].sets[0].weight);
+  const trend = evaluateExerciseTrend(all, history[0].exercises[0].exerciseId, "hypertrophy", "reps", DEFAULT_COACH_SETTINGS);
+  assert.equal(trend.exposureCount, 3);
+  assert.deepEqual(evaluateFatigueTrend(all), evaluateFatigueTrend(history));
 });

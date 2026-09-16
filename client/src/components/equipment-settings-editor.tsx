@@ -48,6 +48,8 @@ function ProfileRow({ profile, canDelete, onDelete }: { profile: EquipmentProfil
     mutationFn: async () => (await apiRequest("PUT", `/api/equipment-profiles/${profile.id}`, draft)).json(),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/equipment-profiles"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/coach/training-context"] });
       queryClient.invalidateQueries({ queryKey: ["/api/exercises"] });
       queryClient.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
       toast({ title: `${draft.name} saved` });
@@ -75,6 +77,8 @@ export function EquipmentSettingsEditor() {
   const countsByType = useMemo(() => new Map(equipmentTypes.map((equipment) => [equipment, (data ?? []).filter((profile) => profile.equipment === equipment).length])), [data]);
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/equipment-profiles"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/coach/training-context"] });
     queryClient.invalidateQueries({ queryKey: ["/api/exercises"] });
     queryClient.invalidateQueries({ queryKey: ["/api/coach/suggestions"] });
   };
