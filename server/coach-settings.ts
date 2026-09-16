@@ -40,6 +40,7 @@ export interface EffectiveMuscleCoachSettings {
 }
 
 export interface EffectiveCoachContext {
+  baselineRevision: number;
   loggingMode: WorkoutLoggingModeId;
   cycle: AdvancedTrainerState | null;
   goal: TrainingGoalId;
@@ -123,6 +124,7 @@ export async function getEffectiveCoachContext(userId: number, today?: string): 
       ? 1.25
       : 1;
   return {
+    baselineRevision: user?.coachBaselineRevision ?? 0,
     loggingMode: (user?.workoutLoggingMode ?? "classic") as WorkoutLoggingModeId,
     cycle,
     goal,

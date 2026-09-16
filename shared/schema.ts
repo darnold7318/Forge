@@ -33,6 +33,9 @@ export const users = sqliteTable("users", {
   // Selects the workout-entry experience. Existing accounts default to the
   // original logger so upgrades never change their established workflow.
   workoutLoggingMode: text("workout_logging_mode").notNull().default("classic"),
+  // Server-owned training context revision. Mode/goal transitions reset
+  // comparisons without relabeling or deleting any previous workouts.
+  coachBaselineRevision: integer("coach_baseline_revision").notNull().default(0),
   // Timezone handling. "home" (default) anchors all calendar dates to
   // homeTimezone so training weeks stay stable while travelling. "auto"
   // follows whatever timezone the device reports on each request.
@@ -42,7 +45,7 @@ export const users = sqliteTable("users", {
   homeTimezone: text("home_timezone"),
 });
 
-export const insertUserSchema = createInsertSchema(users).omit({ id: true, passwordHash: true, isAdmin: true });
+export const insertUserSchema = createInsertSchema(users).omit({ id: true, passwordHash: true, isAdmin: true, coachBaselineRevision: true });
 
 export const signupSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -751,6 +754,7 @@ export const workouts = sqliteTable("workouts", {
   plannedDurationMinutes: integer("planned_duration_minutes"),
   sessionPlan: text("session_plan"),
   advancedTrainerCycleId: integer("advanced_trainer_cycle_id").references(() => advancedTrainerCycles.id),
+  coachBaselineRevision: integer("coach_baseline_revision").notNull().default(0),
 });
 
 export const workoutStatusIds = ["in_progress", "completed"] as const;
@@ -807,6 +811,7 @@ export interface LearnedVolumeRange {
 
 export const insertWorkoutSchema = createInsertSchema(workouts).omit({
   id: true,
+  coachBaselineRevision: true,
 });
 
 export type InsertWorkout = z.infer<typeof insertWorkoutSchema>;

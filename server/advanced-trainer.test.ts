@@ -262,6 +262,53 @@ test("v4.1 preserves used legacy cycles, retires only unused auto starts, and sa
     assert.equal(classic[0].mesocycle, undefined);
     assert.equal(classic[0].goal, "strength");
     assert.notEqual(classic[0].recommendation, "Deload Technique");
+    assert.equal(classic[0].trend, "Learning");
+    assert.equal(classic[0].rirAdherence.status, "insufficient_data");
+    assert.ok(classic[0].suggestedWeight > 0);
+    assert.ok(classic[0].estimatedReps != null);
+    const normalRevision = (await storage.getUser(unifiedUser.id))!.coachBaselineRevision;
+    assert.equal((await (await coachRequest("/api/coach/training-context")).json()).baselineRevision, normalRevision);
+    assert.equal((await storage.getWorkout(accumulationSession.id))?.coachBaselineRevision, normalRevision - 1);
+    const normalTemplateExercise = (await storage.getWorkoutTemplateWithExercises(push.id))!.exercises[0];
+    await storage.updateWorkoutTemplateExercise(normalTemplateExercise.id, { targetSets: 3, targetRepsMin: 8, targetRepsMax: 12,
+      targetRir: 2, failureTarget: "Every Set" });
+    await storage.updateUserPreferences(unifiedUser.id, { trainingGoal: "hypertrophy" });
+    const failureTargets = await (await coachRequest(suggestionsPath)).json();
+    assert.equal(failureTargets[0].trend, "Learning");
+    assert.equal(failureTargets[0].failureTarget, "Every Set");
+    assert.equal(failureTargets[0].targetRirMin, 0);
+    assert.equal(failureTargets[0].targetRirMax, 0);
+    assert.match(failureTargets[0].estimateText, /RIR 0/);
+    const normalCreated = await coachRequest("/api/workouts", "POST", { date: today, workoutTemplateId: push.id,
+      name: "Normal failure training", coachBaselineRevision: 999 });
+    assert.equal(normalCreated.status, 201);
+    const normalSession = await normalCreated.json();
+    const currentRevision = (await storage.getUser(unifiedUser.id))!.coachBaselineRevision;
+    assert.equal(normalSession.coachBaselineRevision, currentRevision);
+    assert.equal(normalSession.loggingMode, "classic");
+    for (let setNumber = 1; setNumber <= 3; setNumber++) await coachRequest("/api/sets", "POST", {
+      workoutId: normalSession.id, exerciseId: bench.id, setNumber, weight: failureTargets[0].suggestedWeight, reps: 10,
+      rir: 0, isWarmup: false });
+    const firstNormal = await (await coachRequest(suggestionsPath)).json();
+    assert.equal(firstNormal[0].trend, "Learning");
+    assert.equal(firstNormal[0].rirAdherence.status, "on_target");
+    const normalSnapshot = await storage.getWorkoutWithSets(normalSession.id);
+    await storage.updateWorkoutTemplateExercise(normalTemplateExercise.id, { targetRir: 3, failureTarget: "Never" });
+    const newRange = await (await coachRequest(suggestionsPath)).json();
+    assert.equal(newRange[0].trend, "Learning");
+    assert.equal(newRange[0].rirAdherence.status, "insufficient_data");
+    assert.match(newRange[0].lastPerformance, /load reference/);
+    // Re-saving the same mode or visual preferences must not reset learning.
+    await coachRequest(`/api/users/${unifiedUser.id}/preferences`, "PATCH", { workoutLoggingMode: "classic", themeMode: "light" });
+    assert.equal((await storage.getUser(unifiedUser.id))!.coachBaselineRevision, currentRevision);
+    await coachRequest(`/api/users/${unifiedUser.id}/preferences`, "PATCH", { workoutLoggingMode: "guided" });
+    assert.equal((await storage.getUser(unifiedUser.id))!.coachBaselineRevision, currentRevision + 1);
+    await coachRequest(`/api/users/${unifiedUser.id}/preferences`, "PATCH", { workoutLoggingMode: "classic" });
+    assert.equal((await storage.getUser(unifiedUser.id))!.coachBaselineRevision, currentRevision + 2);
+    const returnedNormal = await (await coachRequest(suggestionsPath)).json();
+    assert.equal(returnedNormal[0].trend, "Learning");
+    assert.equal(returnedNormal[0].rirAdherence.status, "insufficient_data");
+    assert.deepEqual(await storage.getWorkoutWithSets(normalSession.id), normalSnapshot);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }

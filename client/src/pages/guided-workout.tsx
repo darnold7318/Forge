@@ -52,6 +52,7 @@ import {
   buildGuidedSessionPlan,
   estimateGuidedSessionMinutes,
   evaluateGuidedSetAdjustment,
+  guidedSetRirTarget,
   type GuidedPlanExercise,
   type GuidedPlanExerciseInput,
   type GuidedSessionPlan,
@@ -217,6 +218,7 @@ function PlanPreview({ plan }: { plan: GuidedSessionPlan }) {
                 {exercise.workingSets} working · {exercise.trackingMode === "duration"
                   ? `${exercise.targetDurationMinSeconds}-${exercise.targetDurationMaxSeconds} sec`
                   : `${exercise.targetRepsMin}-${exercise.targetRepsMax} reps`} · {exercise.restSeconds}s rest
+                {exercise.failureTarget && exercise.failureTarget !== "Never" ? ` · ${exercise.failureTarget} failure policy` : ""}
               </p>
               <p className="mt-1 text-xs text-muted-foreground line-clamp-2">{exercise.recommendationReason}</p>
             </div>
@@ -339,6 +341,8 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
         targetDurationMaxSeconds: coach?.targetDurationMaxSeconds ?? templateExercise.targetDurationMaxSeconds ?? 60,
         targetRirMin: coach?.targetRirMin ?? Math.max(0, templateExercise.targetRir - 1),
         targetRirMax: coach?.targetRirMax ?? templateExercise.targetRir + 1,
+        failureTarget: (advanced ? "Never" : coach?.failureTarget ?? templateExercise.failureTarget) as GuidedPlanExerciseInput["failureTarget"],
+        templateTargetRir: templateExercise.targetRir,
         restSeconds: coach?.recommendedRestSeconds ?? templateExercise.restSeconds,
         recommendation: coach?.recommendation ?? "Start Conservative",
         recommendationReason: coach?.plainLanguageReason ?? coach?.reason ?? "Use the template target and adjust from today's performance.",
@@ -454,6 +458,7 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
       const exerciseDetails = exercises?.find((exercise) => exercise.id === activeExercise.exerciseId);
       const nextAdjustment = evaluateGuidedSetAdjustment({
         exercise: activeExercise,
+        workingSetNumber: activeWorkingCompleted + 1,
         current: currentPerformance,
         previousWorkingSet: priorWorking ? {
           weight: priorWorking.weight,
@@ -714,7 +719,8 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
                 <p className="mt-1 text-xs text-muted-foreground">{activeExercise.recommendationReason}</p>
                 <div className="mt-2 flex flex-wrap gap-2 text-xs">
                   <Badge variant="outline">{activeExercise.trackingMode === "duration" ? `${activeExercise.targetDurationMinSeconds}-${activeExercise.targetDurationMaxSeconds}s` : `${activeExercise.targetRepsMin}-${activeExercise.targetRepsMax} reps`}</Badge>
-                  {!nextIsWarmup && <Badge variant="outline">RIR {activeExercise.targetRirMin}-{activeExercise.targetRirMax}</Badge>}
+                  {!nextIsWarmup && <Badge variant="outline">RIR {guidedSetRirTarget(activeExercise, activeWorkingCompleted + 1).min}-{guidedSetRirTarget(activeExercise, activeWorkingCompleted + 1).max}</Badge>}
+                  {!nextIsWarmup && activeExercise.failureTarget && activeExercise.failureTarget !== "Never" && <Badge variant="outline">{activeExercise.failureTarget} · stop at technical failure</Badge>}
                   <Badge variant="outline">{activeExercise.restSeconds}s rest</Badge>
                   <Badge variant="outline">{activeExercise.recoveryPercent}% ready</Badge>
                 </div>

@@ -68,6 +68,10 @@ export function integrateCycleSuggestions(args: {
       : `Cycle #${context.cycle!.cycleId}, accumulation week ${context.cycle!.weekNumber}: cycle volume and RIR use your active settings and effective muscle-volume landmarks.`;
     const reason = `${cycleReason} ${limited ? "Recovery/volume limits override planned increases. " : ""}${context.cycle!.phase === "deload" ? "Accumulation progression is paused during this recovery week." : suggestion.reason}`;
     return { ...suggestion, recommendation: context.cycle!.phase === "deload" ? "Deload Technique" : limited ? suggestion.recommendation : "Mesocycle Target",
+      // The estimate was calculated for the base load/effort. Never display
+      // it beside a different deload or recovery-adjusted prescription.
+      ...(weight !== suggestion.suggestedWeight || target.targetRirMin !== suggestion.targetRirMin || target.targetRirMax !== suggestion.targetRirMax
+        ? { estimatedReps: null, estimatedFailureReps: null, estimateText: null } : {}),
       suggestedGoal, nextGoalText: `Next session: ${suggestedGoal}. ${limited ? "Take additional rest if needed." : "Use consistent technique."}`,
       reason, plainLanguageReason: reason, effortGuidance: duration ? suggestion.effortGuidance : `Stop with ${target.targetRirMin}-${target.targetRirMax} good reps in reserve.`,
       suggestedWeight: weight, recommendedWorkingSets: target.workingSets, prescribedSets: target.workingSets,

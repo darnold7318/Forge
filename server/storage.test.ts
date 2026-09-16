@@ -30,6 +30,8 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   assert.ok(columns("sets").has("duration_seconds"));
   assert.ok(columns("users").has("training_goal"));
   assert.ok(columns("users").has("workout_logging_mode"));
+  assert.ok(columns("users").has("coach_baseline_revision"));
+  assert.ok(columns("workouts").has("coach_baseline_revision"));
   assert.ok(columns("workouts").has("status"));
   assert.ok(columns("workouts").has("completed_at"));
   assert.ok(columns("workouts").has("session_plan"));
@@ -50,6 +52,7 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   assert.equal(users[1].trainingLevel, "advanced");
   assert.equal(users[0].trainingGoal, "hypertrophy");
   assert.equal(users[0].workoutLoggingMode, "classic");
+  assert.equal(users[0].coachBaselineRevision, 0);
   const newUser = await storage.createUser({ name: "New user", passwordHash: "test:test" });
   assert.equal(newUser.trainingLevel, "beginner");
   assert.equal(newUser.trainingGoal, "hypertrophy");

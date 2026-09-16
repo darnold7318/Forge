@@ -46,6 +46,7 @@ export interface HistorySetInput {
 }
 
 export interface HistoryExerciseInput {
+  effortContextRir?: number;
   exerciseId: number;
   exerciseOrder: number;
   exerciseName: string;
@@ -70,6 +71,8 @@ export interface HistoryExerciseInput {
 }
 
 export interface HistorySessionInput {
+  coachBaselineRevision?: number;
+  currentModeComparison?: boolean;
   advancedTrainerCycleId?: number | null;
   currentCycleComparison?: boolean;
   plannedDeload?: boolean;
@@ -82,11 +85,35 @@ export interface HistorySessionInput {
 
 // derived helpers on a session/exercise -------------------------------------
 // Explicit membership only. Recovery, actual volume and PRs retain full history.
-export function coachComparisonHistory(history: HistorySessionInput[], mode: string, cycleId?: number | null): HistorySessionInput[] {
+export function coachComparisonHistory(history: HistorySessionInput[], mode: string, cycleId?: number | null, baselineRevision?: number): HistorySessionInput[] {
+  const block = baselineRevision == null ? history : history.filter((session) => (session.coachBaselineRevision ?? 0) === baselineRevision);
   return mode === "advanced_guided"
-    ? history.filter((session) => cycleId != null && session.advancedTrainerCycleId === cycleId && !session.plannedDeload)
+    ? block.filter((session) => cycleId != null && session.advancedTrainerCycleId === cycleId && !session.plannedDeload)
       .map((session) => ({ ...session, currentCycleComparison: true }))
-    : history;
+    : baselineRevision == null ? history : block.filter((session) => session.advancedTrainerCycleId == null && !session.plannedDeload)
+      .map((session) => ({ ...session, currentModeComparison: true }));
+}
+
+// Effort changes in a template are a new comparison range too. Only immutable
+// saved prescriptions can establish that an exposure belongs to this range.
+export function coachEffortHistory(history: HistorySessionInput[], exerciseId: number, prescription: CoachPrescriptionInput): HistorySessionInput[] {
+  return history.filter((session) => !session.currentModeComparison || session.exercises.some((exercise) => exercise.exerciseId === exerciseId &&
+    exercise.prescriptionSnapshotAvailable && (exercise.effortContextRir ?? exercise.prescription?.targetRir) === prescription.targetRir &&
+    exercise.failureTarget === (prescription.failureTarget ?? "Never")));
+}
+
+export function coachTemplateEffortHistory(history: HistorySessionInput[], templates: { id: number; exercises: (CoachPrescriptionInput & { exerciseId: number })[] }[]): HistorySessionInput[] {
+  const byId = new Map(templates.map((template) => [template.id, template]));
+  return history.flatMap((session) => {
+    if (!session.currentModeComparison) return [session];
+    const template = session.workoutTemplateId == null ? undefined : byId.get(session.workoutTemplateId);
+    const exercises = session.exercises.filter((exercise) => {
+      const current = template?.exercises.find((row) => row.exerciseId === exercise.exerciseId);
+      if (template && !current) return false;
+      return current ? coachEffortHistory([session], exercise.exerciseId, current).length > 0 : exercise.prescriptionSnapshotAvailable;
+    });
+    return exercises.length ? [{ ...session, exercises }] : [];
+  });
 }
 
 export function completedSetsOf(sets: HistorySetInput[]): HistorySetInput[] {
@@ -569,6 +596,7 @@ export function resolveGoalCoachingProfile(goal: TrainingGoalId): GoalCoachingPr
 }
 
 export interface CoachPrescriptionInput extends ProgressionPrescription {
+  failureTarget?: string;
   targetSets?: number;
   targetDurationMinSeconds?: number | null;
   targetDurationMaxSeconds?: number | null;
@@ -685,6 +713,9 @@ export function resolveGoalExperiencePrescription(args: {
 }
 
 export interface ExerciseExposureSummary {
+  setRirHardDeviation?: number;
+  setRirEasyDeviation?: number;
+  effortBaselineComparison?: boolean;
   cycleComparison?: boolean;
   effortCapacity?: number | null;
   workoutId: number;
@@ -728,9 +759,22 @@ function summarizeExposure(session: HistorySessionInput, exercise: HistoryExerci
     comparableDrops.push(Math.max(0, (previousSet.reps - currentSet.reps) / previousSet.reps));
   }
   const targetSets = exercise.prescriptionSnapshotAvailable ? exercise.prescription?.targetSets : null;
+  const fullFailure = exercise.failureTarget === "Every Set" || exercise.failureTarget === "Technical Failure";
+  const mixedFailure = exercise.failureTarget === "Last Set";
+  const setDeviations = exercise.prescriptionSnapshotAvailable && (fullFailure || mixedFailure)
+    ? working.flatMap((set, index) => {
+      if (set.rir == null) return [];
+      const failure = fullFailure || (mixedFailure && index + 1 === targetSets);
+      const min = failure ? 0 : exercise.prescription?.targetRirMin ?? Math.max(0, (exercise.prescription?.targetRir ?? 2) - 1);
+      const max = failure ? 0 : exercise.prescription?.targetRirMax ?? (exercise.prescription?.targetRir ?? 2) + 1;
+      return [{ hard: Math.max(0, min - set.rir), easy: Math.max(0, set.rir - max) }];
+    }) : [];
   return {
+    ...(setDeviations.length ? { setRirHardDeviation: Math.max(...setDeviations.map((item) => item.hard)),
+      setRirEasyDeviation: Math.max(...setDeviations.map((item) => item.easy)) } : {}),
     workoutId: session.id,
     cycleComparison: session.currentCycleComparison === true,
+    effortBaselineComparison: session.currentCycleComparison === true || session.currentModeComparison === true,
     // RIR-adjusted per-set capacity avoids rewarding extra planned sets or
     // penalizing deliberately stopping further from failure. Not a measured 1RM.
     effortCapacity: rirValues.length === working.length
@@ -746,9 +790,9 @@ function summarizeExposure(session: HistorySessionInput, exercise: HistoryExerci
     workingSetCount: working.length,
     averageRir: rirValues.length ? rirValues.reduce((sum, value) => sum + value, 0) / rirValues.length : null,
     rirCompleteness: rirValues.length / working.length,
-    prescribedRir: exercise.prescriptionSnapshotAvailable ? exercise.prescription?.targetRir ?? null : null,
-    prescribedRirMin: exercise.prescriptionSnapshotAvailable ? exercise.prescription?.targetRirMin ?? null : null,
-    prescribedRirMax: exercise.prescriptionSnapshotAvailable ? exercise.prescription?.targetRirMax ?? null : null,
+    prescribedRir: exercise.prescriptionSnapshotAvailable ? fullFailure ? 0 : exercise.prescription?.targetRir ?? null : null,
+    prescribedRirMin: exercise.prescriptionSnapshotAvailable ? fullFailure ? 0 : exercise.prescription?.targetRirMin ?? null : null,
+    prescribedRirMax: exercise.prescriptionSnapshotAvailable ? fullFailure ? 0 : exercise.prescription?.targetRirMax ?? null : null,
     setCompletion: targetSets && targetSets > 0 ? Math.min(1, working.length / targetSets) : 1,
     comparableRepLossPercent: comparableDrops.length
       ? (comparableDrops.reduce((sum, value) => sum + value, 0) / comparableDrops.length) * 100
@@ -758,7 +802,7 @@ function summarizeExposure(session: HistorySessionInput, exercise: HistoryExerci
 }
 
 function exposurePerformanceScore(exposure: ExerciseExposureSummary, goal: TrainingGoalId, trackingMode: TrackingMode): number {
-  if (exposure.cycleComparison) return trackingMode === "duration"
+  if (exposure.effortBaselineComparison) return trackingMode === "duration"
     ? exposure.totalDurationSeconds / exposure.workingSetCount : exposure.effortCapacity ?? 0;
   if (trackingMode === "duration" || goal === "mobility") return exposure.totalDurationSeconds || exposure.totalReps;
   if (goal === "strength") return exposure.estimatedOneRepMax;
@@ -803,8 +847,8 @@ export function evaluateExerciseTrend(
     ? exposures.reduce((sum, item) => sum + item.rirCompleteness, 0) / exposures.length
     : 0;
 
-  const comparable = exposures.filter((item) => !item.cycleComparison || trackingMode === "duration" || item.effortCapacity != null);
-  const latestMissingEffort = exposures.at(-1)?.cycleComparison && trackingMode !== "duration" && exposures.at(-1)?.effortCapacity == null;
+  const comparable = exposures.filter((item) => !item.effortBaselineComparison || trackingMode === "duration" || item.effortCapacity != null);
+  const latestMissingEffort = exposures.at(-1)?.effortBaselineComparison && trackingMode !== "duration" && exposures.at(-1)?.effortCapacity == null;
   if (comparable.length < settings.minComparableExposures || latestMissingEffort) {
     return {
       status: "Learning",
@@ -813,7 +857,7 @@ export function evaluateExerciseTrend(
       scoreChangePercent: 0,
       averageRir,
       rirCompleteness,
-      evidence: `${comparable.length}/${settings.minComparableExposures} comparable exposures logged.${exposures.some((item) => item.cycleComparison) ? " Current-cycle baseline; complete RIR is needed for rep comparisons." : ""}`,
+      evidence: `${comparable.length}/${settings.minComparableExposures} comparable exposures logged.${exposures.some((item) => item.effortBaselineComparison) ? " Current training baseline; complete RIR is needed for rep comparisons." : ""}`,
       requiredExposureCount: settings.minComparableExposures,
     };
   }
@@ -836,7 +880,7 @@ export function evaluateExerciseTrend(
     scoreChangePercent,
     averageRir,
     rirCompleteness,
-    evidence: `${status} across ${comparable.length} comparable exposures (${scoreChangePercent >= 0 ? "+" : ""}${fmt1(scoreChangePercent)}%).${exposures.some((item) => item.cycleComparison) ? " Current-cycle RIR-adjusted per-set capacity, not total reps or volume." : ""}`,
+    evidence: `${status} across ${comparable.length} comparable exposures (${scoreChangePercent >= 0 ? "+" : ""}${fmt1(scoreChangePercent)}%).${exposures.some((item) => item.effortBaselineComparison) ? " Current-block RIR-adjusted per-set capacity, not total reps or volume." : ""}`,
     requiredExposureCount: settings.minComparableExposures,
   };
 }
@@ -888,15 +932,17 @@ export function evaluateRirAdherence(
   const snapshotMin = latest.prescribedRirMin ?? Math.max(0, latest.prescribedRir - 1);
   const snapshotMax = latest.prescribedRirMax ?? latest.prescribedRir + 1;
   const deviation = latest.averageRir - latest.prescribedRir;
-  const status = latest.averageRir < snapshotMin
+  const hardDeviation = latest.setRirHardDeviation ?? Math.max(0, snapshotMin - latest.averageRir);
+  const easyDeviation = latest.setRirEasyDeviation ?? Math.max(0, latest.averageRir - snapshotMax);
+  const status = hardDeviation > 0
     ? "too_hard" as const
-    : latest.averageRir > snapshotMax
+    : easyDeviation > 0
       ? "too_easy" as const
       : "on_target" as const;
   const excessDeviation = status === "too_hard"
-    ? snapshotMin - latest.averageRir
+    ? hardDeviation
     : status === "too_easy"
-      ? latest.averageRir - snapshotMax
+      ? easyDeviation
       : 0;
   const accuracy = Math.max(0, 100 - excessDeviation * 30);
   return {
@@ -928,11 +974,11 @@ export function evaluateEffortAdjustedTrend(
     };
   }
 
-  if (latest.cycleComparison) {
+  if (latest.effortBaselineComparison) {
     const ready = trend.status !== "Learning" && (trackingMode === "duration" || (previous.effortCapacity != null && latest.effortCapacity != null));
     return { rawTrend: trend, rirAdherence: adherence,
       effortNormalizedStatus: !ready ? "uncertain" : trend.status === "Improving" ? "improving" : trend.status === "Regressing" ? "declining" : "stable",
-      evidence: ready ? "Current-cycle per-set capacity comparison accounts for reported RIR and planned set changes." : "Establishing a current-cycle baseline; no regression inferred from incomplete comparisons." };
+      evidence: ready ? "Current-block per-set capacity comparison accounts for reported RIR and planned set changes." : "Establishing a fresh effort baseline; no regression inferred from incomplete comparisons." };
   }
   const previousSignal = trackingMode === "duration" || goal === "mobility"
     ? previous.totalDurationSeconds
@@ -1073,6 +1119,9 @@ export interface GoalAwareProgressionV2Input {
 export type GoalAwareProgressionInput = GoalAwareProgressionV2Input;
 
 export interface GoalAwareProgressionEvaluation extends ProgressionEvaluation {
+  failureTarget?: string;
+  estimatedReps?: number | null;
+  estimatedFailureReps?: number | null;
   trend: ExerciseTrendEvaluation["status"];
   trendEvidence: string;
   confidenceFactors: ConfidenceFactor[];
@@ -1100,20 +1149,33 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
     trackingMode,
     prescription: input.prescription,
   });
-  const prescription = input.sessionRir ? { ...resolvedPrescription, targetRir: input.sessionRir.min } : resolvedPrescription;
+  const fullFailure = !input.sessionRir && (input.prescription.failureTarget === "Every Set" || input.prescription.failureTarget === "Technical Failure");
+  let prescription = input.sessionRir ? { ...resolvedPrescription, targetRir: input.sessionRir.min }
+    : fullFailure ? { ...resolvedPrescription, targetRir: 0 } : resolvedPrescription;
   const progressionStyle = resolveProgressionStyle(goal, settings.progressionStyle, experience);
   const rirAdherence = evaluateRirAdherence(trend, prescription.targetRir, trackingMode, goal);
   const effortTrend = evaluateEffortAdjustedTrend(trend, rirAdherence, goal, trackingMode);
   const confidence = calculateCoachingConfidence(trend, rirAdherence);
   const latest = trend.exposures.at(-1);
-  const rirMin = input.sessionRir?.min ?? Math.max(0, prescription.targetRir - 1);
-  const rirMax = input.sessionRir?.max ?? prescription.targetRir + 1;
+  let rirMin = input.sessionRir?.min ?? Math.max(0, prescription.targetRir - 1);
+  let rirMax = input.sessionRir?.max ?? (fullFailure ? 0 : prescription.targetRir + 1);
+  let failureTarget = input.sessionRir ? "Never" : input.prescription.failureTarget ?? "Never";
   const referenceSets = completedSetsOf(input.startingReference?.lastSets ?? []).filter((set) => set.setType !== "Warmup");
   const reference = referenceSets.reduce<HistorySetInput | null>((best, set) => !best || set.weight > best.weight ? set : best, null);
   let startingWeight = reference?.weight ?? 0;
   if (reference && reference.rir != null && trackingMode !== "duration") {
     const capacity = estimateOneRepMax(reference.weight, reference.reps + reference.rir);
-    startingWeight = Math.min(reference.weight, capacity / (1 + (prescription.targetRepsMin + rirMin) / 30));
+    const repsAtReference = Math.max(0, Math.floor(reference.reps + reference.rir - prescription.targetRir));
+    if (repsAtReference < prescription.targetRepsMin) {
+      startingWeight = capacity / (1 + (prescription.targetRepsMin + prescription.targetRir) / 30);
+    } else if (repsAtReference > prescription.targetRepsMax && input.weightSettings) {
+      const equipment = input.weightSettings;
+      const desired = capacity / (1 + (prescription.targetRepsMax + prescription.targetRir) / 30);
+      const candidate = Math.min(equipment.maxWeight, equipment.minWeight + Math.ceil((desired - equipment.minWeight) / equipment.weightIncrement) * equipment.weightIncrement);
+      const estimate = calculateRepProjection({ weight: reference.weight, reps: reference.reps, rir: reference.rir,
+        targetWeight: candidate, targetReps: prescription.targetRepsMin, targetRir: prescription.targetRir });
+      if (estimate && estimate.projectedRepsAtTargetWeight >= prescription.targetRepsMin && estimate.projectedRepsAtTargetWeight <= prescription.targetRepsMax) startingWeight = candidate;
+    }
   }
   if (startingWeight > 0 && input.weightSettings) {
     const equipment = input.weightSettings;
@@ -1142,7 +1204,7 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
   const primaryContext = [...muscleContexts].sort((a, b) => b.stimulusRatio - a.stimulusRatio)[0];
   const secondaryLimit = limitingMuscles.find((item) => item.context.muscleGroupId !== primaryContext?.muscleGroupId);
   let recommendation = latest ? "Maintain" : "Start Conservative";
-  let reason = latest ? trend.evidence : reference ? "Earlier training is a starting-load reference only, not this cycle's effort or progress baseline. Adjust during warm-ups to meet the new RIR target." : "No previous completed sets are available.";
+  let reason = latest ? trend.evidence : reference ? "Earlier training is a starting-load reference only, not the new effort or progress baseline. Adjust during warm-ups to meet the new RIR target." : "No previous completed sets are available.";
   let nextGoalText = latest ? "Repeat the prescription and collect another comparable exposure." : `Start within ${prescription.targetRepsMin}-${prescription.targetRepsMax} reps.`;
   let suggestedWeight = topWeight;
   const improving = effortTrend.effortNormalizedStatus === "improving" || trend.status === "Improving";
@@ -1156,9 +1218,9 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
 
   if (!latest) {
     // Defaults above intentionally stay conservative until an exposure exists.
-  } else if (latest.cycleComparison && trend.status === "Learning" && rirAdherence.status !== "too_hard") {
+  } else if (latest.effortBaselineComparison && trend.status === "Learning" && rirAdherence.status !== "too_hard") {
     recommendation = "Maintain";
-    reason = `Establishing this cycle's baseline. ${trend.evidence} No regression or load increase is inferred yet.`;
+    reason = `Establishing the current training baseline. ${trend.evidence} No regression or load increase is inferred yet.`;
     nextGoalText = `Repeat the load at RIR ${rirMin}-${rirMax} and log effort for each working set.`;
   } else if (effortTrend.effortNormalizedStatus === "declining" || trend.status === "Regressing") {
     recommendation = lowRangeMissed && rirAdherence.status === "too_hard" ? "Reduce Load" : fatigue.riskScore >= 55 ? "Reduce Or Delay" : "Hold Weight";
@@ -1313,10 +1375,31 @@ export function evaluateGoalAwareProgressionV2(input: GoalAwareProgressionV2Inpu
     prescribedSets = Math.max(1, targetSets - 1);
   }
   const learningSessionsRemaining = Math.max(0, settings.minComparableExposures - trend.exposureCount);
+  if (failureTarget !== "Never" && (severeFatigue || elevatedFatigue)) {
+    failureTarget = "Never";
+    prescription = { ...prescription, targetRir: Math.max(2, prescription.targetRir) };
+    rirMin = Math.max(2, rirMin);
+    rirMax = Math.max(3, rirMax);
+    reason += " Failure targets are suspended while recovery is limited.";
+  }
   const learningText = learningSessionsRemaining > 0
     ? `${learningSessionsRemaining} more similar session${learningSessionsRemaining === 1 ? "" : "s"} needed before Coach can evaluate your trend.`
-    : trend.status === "Learning" && latest?.cycleComparison ? "Log complete working-set RIR to evaluate current-cycle progress." : null;
+    : trend.status === "Learning" && latest?.effortBaselineComparison ? "Log complete working-set RIR to evaluate this training baseline." : null;
+  const projectionSet = !latest ? reference : topLoadSets[0];
+  const unloadedCapacity = projectionSet?.weight === 0 && suggestedWeight === 0 && projectionSet.rir != null && trackingMode !== "duration"
+    ? projectionSet.reps + projectionSet.rir : null;
+  const projection = projectionSet?.rir != null && trackingMode !== "duration" ? calculateRepProjection({
+    weight: projectionSet.weight, reps: projectionSet.reps, rir: projectionSet.rir, targetWeight: suggestedWeight,
+    targetReps: prescription.targetRepsMin, targetRir: prescription.targetRir,
+  }) : null;
+  const failureProjection = projectionSet?.rir != null && trackingMode !== "duration" ? calculateRepProjection({
+    weight: projectionSet.weight, reps: projectionSet.reps, rir: projectionSet.rir, targetWeight: suggestedWeight,
+    targetReps: prescription.targetRepsMin, targetRir: 0,
+  }) : null;
   return {
+    failureTarget,
+    estimatedReps: projection?.projectedRepsAtTargetWeight ?? (unloadedCapacity != null ? Math.max(0, Math.floor(unloadedCapacity - prescription.targetRir)) : null),
+    estimatedFailureReps: failureProjection?.projectedRepsAtTargetWeight ?? (unloadedCapacity != null ? Math.floor(unloadedCapacity) : null),
     exerciseId: previous.exerciseId,
     exerciseName: previous.exerciseName,
     status: trackingMode === "duration"
@@ -1575,7 +1658,7 @@ export function evaluateFatigueTrend(
   // Intentional lighter work is not evidence of lost performance. Actual
   // recovery and weekly volume still consume the complete, unfiltered history.
   history = history.filter((session) => !session.plannedDeload);
-  const currentCycleComparison = history.some((session) => session.currentCycleComparison);
+  const effortBaselineComparison = history.some((session) => session.currentCycleComparison || session.currentModeComparison);
   if (history.length < 3) {
     const sessionsRemaining = 3 - history.length;
     return {
@@ -1589,27 +1672,28 @@ export function evaluateFatigueTrend(
 
   // Compare like with like: repeated exposures of the same exercise, never raw
   // tonnage from unrelated Push/Pull/Legs sessions.
-  const byExercise = new Map<number, { name: string; values: number[]; rirs: (number | null)[] }>();
+  const byExercise = new Map<string, { name: string; values: number[]; rirs: (number | null)[] }>();
   for (const session of [...history].sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime())) {
     for (const exercise of session.exercises) {
       const summary = summarizeExposure(session, exercise);
       if (!summary) continue;
-      if (summary.cycleComparison && exercise.trackingMode !== "duration" && summary.effortCapacity == null) continue;
-      const value = summary.cycleComparison
+      if (summary.effortBaselineComparison && exercise.trackingMode !== "duration" && summary.effortCapacity == null) continue;
+      const value = summary.effortBaselineComparison
         ? exposurePerformanceScore(summary, "hypertrophy", exercise.trackingMode ?? "reps")
         : exercise.trackingMode === "duration"
         ? summary.totalDurationSeconds
         : summary.estimatedOneRepMax + summary.totalReps * 0.15;
-      const item = byExercise.get(exercise.exerciseId) ?? { name: exercise.exerciseName, values: [], rirs: [] };
+      const key = session.currentModeComparison ? `${exercise.exerciseId}:${exercise.effortContextRir ?? exercise.prescription?.targetRir}:${exercise.failureTarget}` : String(exercise.exerciseId);
+      const item = byExercise.get(key) ?? { name: exercise.exerciseName, values: [], rirs: [] };
       item.values.push(value);
       item.rirs.push(summary.averageRir);
-      byExercise.set(exercise.exerciseId, item);
+      byExercise.set(key, item);
     }
   }
 
-  if (currentCycleComparison && !Array.from(byExercise.values()).some((item) => item.values.length >= 3)) {
-    return { status: "Learning", summary: "Current-cycle fatigue baseline needs three comparable exposures of a repeated exercise with complete RIR.",
-      riskScore: 10, deloadSuggested: false, evidence: ["Earlier cycles and manual sessions are not performance-fatigue comparisons. Actual recovery still includes them."] };
+  if (effortBaselineComparison && !Array.from(byExercise.values()).some((item) => item.values.length >= 3)) {
+    return { status: "Learning", summary: "This training block's fatigue baseline needs three comparable exposures of a repeated exercise with complete RIR.",
+      riskScore: 10, deloadSuggested: false, evidence: ["Earlier training blocks are not performance-fatigue comparisons. Actual recovery still includes them."] };
   }
   const regressing: string[] = [];
   const worseningEffort: string[] = [];
@@ -1630,7 +1714,7 @@ export function evaluateFatigueTrend(
   for (const session of history) {
     // Current-cycle fatigue compares repeated exercises, not averages of
     // changing template contents or prescribed set counts.
-    if (session.currentCycleComparison) continue;
+    if (session.currentCycleComparison || session.currentModeComparison) continue;
     if (session.workoutTemplateId == null) continue;
     const list = byTemplate.get(session.workoutTemplateId) ?? [];
     list.push(session);
@@ -1657,10 +1741,15 @@ export function evaluateFatigueTrend(
     .flatMap((session) => session.exercises);
   const workingSets = recentExercises.flatMap((exercise) => completedSetsOf(exercise.sets).filter((set) => set.setType !== "Warmup"));
   const unexpectedFailureCount = recentExercises.reduce((count, exercise) => {
-    const failureWasPrescribed = currentCycleComparison && (!exercise.prescriptionSnapshotAvailable ||
-      (exercise.prescription?.targetRirMin ?? exercise.prescription?.targetRir ?? 0) <= 0);
-    if (failureWasPrescribed) return count;
-    return count + completedSetsOf(exercise.sets).filter((set) => set.setType !== "Warmup" && set.rir != null && set.rir <= 0).length;
+    const working = completedSetsOf(exercise.sets).filter((set) => set.setType !== "Warmup");
+    return count + working.filter((set, index) => {
+      if (set.rir == null || set.rir > 0) return false;
+      if (!effortBaselineComparison) return true;
+      if (!exercise.prescriptionSnapshotAvailable) return false;
+      const prescribedFailure = exercise.failureTarget === "Every Set" || exercise.failureTarget === "Technical Failure" ||
+        (exercise.failureTarget === "Last Set" && index + 1 === exercise.prescription?.targetSets);
+      return !prescribedFailure && (exercise.prescription?.targetRirMin ?? exercise.prescription?.targetRir ?? 0) > 0;
+    }).length;
   }, 0);
   const lowRirRate = workingSets.length
     ? unexpectedFailureCount / workingSets.length
@@ -2245,6 +2334,10 @@ export function markHistoricalPrs<T extends LivePrCheckInput & { id: number }>(
 // ---------------------------------------------------------------------------
 
 export interface WorkoutExerciseSuggestion {
+  failureTarget?: string;
+  estimatedReps?: number | null;
+  estimatedFailureReps?: number | null;
+  estimateText?: string | null;
   exerciseName: string;
   lastPerformance: string;
   recommendation: string;
@@ -2392,16 +2485,25 @@ export function buildGoalAwareWorkoutSuggestion(
                 : "Repeat the target with consistent technique before making it harder.";
   const effortGuidance = duration || input.goal === "mobility"
     ? "Move with control and stop if your range of motion or form gets worse."
-    : `Stop each set when you could still do about ${prescription.targetRir} more good rep${prescription.targetRir === 1 ? "" : "s"}.`;
+    : progression.failureTarget === "Last Set"
+      ? `Keep earlier sets at RIR ${progression.prescribedRirMin}-${progression.prescribedRirMax}; only the final planned working set targets RIR 0. Stop if technique breaks down.`
+      : progression.failureTarget === "Every Set" || progression.failureTarget === "Technical Failure"
+        ? "Your template targets RIR 0 on working sets. Stop at technical failure; do not force failed repetitions. Recovery limits still take priority."
+        : `Stop each set when you could still do about ${prescription.targetRir} more good rep${prescription.targetRir === 1 ? "" : "s"}.`;
   const restMinutes = prescription.restSeconds / 60;
   const restGuidance = `Rest about ${Number.isInteger(restMinutes) ? restMinutes : fmt1(restMinutes)} minute${restMinutes === 1 ? "" : "s"} between working sets.`;
   return {
+    failureTarget: progression.failureTarget,
+    estimatedReps: progression.estimatedReps,
+    estimatedFailureReps: progression.estimatedFailureReps,
+    estimateText: progression.estimatedReps != null
+      ? `Estimate at ${progression.suggestedWeight > 0 ? `${fmt1(progression.suggestedWeight)} lb` : "bodyweight/no added load"}: about ${progression.estimatedReps} reps at RIR ${prescription.targetRir}${progression.failureTarget === "Last Set" && progression.estimatedFailureReps != null ? `; about ${progression.estimatedFailureReps} reps on the final RIR 0 set` : ""}. Historical capacity estimate, not a guarantee; confirm during warm-ups.` : null,
     exerciseName: input.previous.exerciseName,
     lastPerformance: latest
       ? duration
         ? `${latest.workingSetCount} holds, ${latest.totalDurationSeconds} sec total`
         : `${latest.workingSetCount} sets, ${latest.totalReps} total reps at up to ${fmt1(latest.topWeight)} lb`
-      : input.startingReference ? "No current-cycle exposure; earlier training used only as a load reference." : "No previous workout available.",
+      : input.startingReference ? "No exposure in the current effort range; earlier training used only as a load reference." : "No previous workout available.",
     recommendation: progression.recommendation,
     suggestedGoal,
     reason: progression.reason,
@@ -2587,6 +2689,7 @@ export interface DashboardTemplateInput {
   name: string;
   exercises: Array<
     ProgressionPrescription & {
+      failureTarget?: string;
       exerciseId: number;
       exerciseOrder: number;
       targetSets: number;
@@ -2926,7 +3029,8 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
 
   for (const prescription of templateExercises.slice(0, 6)) {
     const fallbackName = exerciseNameLookup.get(prescription.exerciseId) ?? "Exercise";
-    const previous = getPreviousExercisePerformance(comparisonHistory, prescription.exerciseId, fallbackName);
+    const effortHistory = coachEffortHistory(comparisonHistory, prescription.exerciseId, prescription);
+    const previous = getPreviousExercisePerformance(effortHistory, prescription.exerciseId, fallbackName);
     if (!previous.exerciseName) previous.exerciseName = fallbackName;
 
     const resolvedExerciseName = previous.exerciseName || "Exercise";
@@ -2971,13 +3075,15 @@ export function getDashboardSnapshot(args: GetDashboardSnapshotArgs): DashboardS
     const trackingMode = prescription.trackingMode === "duration" || historicalExercise?.trackingMode === "duration"
       ? "duration" as const
       : "reps" as const;
-    const trend = evaluateExerciseTrend(comparisonHistory, prescription.exerciseId, trainingGoal, trackingMode, coachSettings);
+    const trend = evaluateExerciseTrend(effortHistory, prescription.exerciseId, trainingGoal, trackingMode, coachSettings);
     const progressionInput: GoalAwareProgressionInput = {
       goal: trainingGoal,
       experience: trainingExperience,
       trackingMode,
       prescription,
       previous: resolvedPrevious,
+      startingReference: !previous.lastSets.length && args.comparisonHistory != null
+        ? getPreviousExercisePerformance(history, prescription.exerciseId, fallbackName) : undefined,
       trend,
       settings: coachSettings,
       recovery,

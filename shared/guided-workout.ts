@@ -38,6 +38,8 @@ export const guidedPlanExerciseSchema = z.object({
   targetDurationMaxSeconds: z.number().int().min(1).nullable(),
   targetRirMin: z.number().min(0),
   targetRirMax: z.number().min(0),
+  failureTarget: z.enum(["Never", "Last Set", "Every Set", "Technical Failure"]).optional(),
+  templateTargetRir: z.number().min(0).optional(),
   restSeconds: z.number().int().min(0),
   recommendation: z.string(),
   recommendationReason: z.string(),
@@ -66,6 +68,12 @@ export type GuidedSessionPlan = z.infer<typeof guidedSessionPlanSchema>;
 
 export interface GuidedPlanExerciseInput extends Omit<GuidedPlanExercise, "pairGroup" | "skipped"> {}
 export type AdvancedTrainerPlanMetadata = z.infer<typeof advancedTrainerPlanMetadataSchema>;
+
+export function guidedSetRirTarget(exercise: Pick<GuidedPlanExercise, "failureTarget" | "workingSets" | "targetRirMin" | "targetRirMax">, workingSetNumber: number) {
+  const failure = exercise.failureTarget === "Every Set" || exercise.failureTarget === "Technical Failure" ||
+    (exercise.failureTarget === "Last Set" && workingSetNumber === exercise.workingSets);
+  return failure ? { min: 0, max: 0 } : { min: exercise.targetRirMin, max: exercise.targetRirMax };
+}
 
 function exerciseSeconds(exercise: Pick<GuidedPlanExercise, "warmupSets" | "workingSets" | "restSeconds" | "skipped">): number {
   if (exercise.skipped) return 0;
@@ -199,6 +207,7 @@ export function evaluateGuidedSetAdjustment(args: {
   current: GuidedSetPerformance;
   previousWorkingSet?: GuidedSetPerformance;
   weightIncrement?: number;
+  workingSetNumber?: number;
 }): GuidedSetAdjustment {
   const { exercise, current, previousWorkingSet } = args;
   const increment = Math.max(0.5, args.weightIncrement ?? 5);
@@ -224,7 +233,8 @@ export function evaluateGuidedSetAdjustment(args: {
       suggestTrimRemainingSet: true,
     };
   }
-  if ((current.rir != null && current.rir < exercise.targetRirMin) || repDrop >= 0.2) {
+  const effort = guidedSetRirTarget(exercise, args.workingSetNumber ?? 1);
+  if ((current.rir != null && current.rir < effort.min) || repDrop >= 0.2) {
     return {
       status: repDrop >= 0.25 ? "consider_stopping" : "extend_rest",
       message: repDrop >= 0.2
@@ -244,7 +254,7 @@ export function evaluateGuidedSetAdjustment(args: {
       suggestTrimRemainingSet: false,
     };
   }
-  if (current.reps >= exercise.targetRepsMax && current.rir != null && current.rir >= exercise.targetRirMax) {
+  if (current.reps >= exercise.targetRepsMax && current.rir != null && current.rir > 0 && current.rir >= effort.max) {
     return {
       status: "ready_to_progress",
       message: "You reached the top of the range with reps in reserve. Keep quality high; this supports progression next session.",

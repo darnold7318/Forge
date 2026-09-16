@@ -455,6 +455,7 @@ function ensureTables() {
     { column: "training_level", ddl: "ALTER TABLE users ADD COLUMN training_level TEXT NOT NULL DEFAULT 'beginner'" },
     { column: "training_goal", ddl: "ALTER TABLE users ADD COLUMN training_goal TEXT NOT NULL DEFAULT 'hypertrophy'" },
     { column: "workout_logging_mode", ddl: "ALTER TABLE users ADD COLUMN workout_logging_mode TEXT NOT NULL DEFAULT 'classic'" },
+    { column: "coach_baseline_revision", ddl: "ALTER TABLE users ADD COLUMN coach_baseline_revision INTEGER NOT NULL DEFAULT 0" },
   ];
   for (const { column, ddl } of migrations) {
     if (!existingColumns.has(column)) {
@@ -535,6 +536,7 @@ function ensureTables() {
     ["planned_duration_minutes", "ALTER TABLE workouts ADD COLUMN planned_duration_minutes INTEGER"],
     ["session_plan", "ALTER TABLE workouts ADD COLUMN session_plan TEXT"],
     ["advanced_trainer_cycle_id", "ALTER TABLE workouts ADD COLUMN advanced_trainer_cycle_id INTEGER REFERENCES advanced_trainer_cycles(id)"],
+    ["coach_baseline_revision", "ALTER TABLE workouts ADD COLUMN coach_baseline_revision INTEGER NOT NULL DEFAULT 0"],
   ] as const) {
     if (!workoutColumns.has(column)) {
       try {
@@ -1091,7 +1093,15 @@ export class DatabaseStorage implements IStorage {
     id: number,
     prefs: Partial<Pick<UserRecord, "themeColor" | "themeMode" | "workoutSplit" | "trainingLevel" | "trainingGoal" | "workoutLoggingMode" | "timezoneMode" | "homeTimezone">>,
   ): Promise<UserRecord | undefined> {
-    return db.update(users).set(prefs).where(eq(users.id, id)).returning().get();
+    return db.transaction((tx) => {
+      const current = tx.select().from(users).where(eq(users.id, id)).get();
+      if (!current) return undefined;
+      const changed = (prefs.workoutLoggingMode != null && prefs.workoutLoggingMode !== current.workoutLoggingMode) ||
+        (prefs.trainingGoal != null && prefs.trainingGoal !== current.trainingGoal);
+      return tx.update(users).set({ ...prefs,
+        coachBaselineRevision: current.coachBaselineRevision + (changed ? 1 : 0),
+      }).where(eq(users.id, id)).returning().get();
+    });
   }
 
   async getRecoverySettings(userId: number): Promise<RecoverySettings> {
@@ -1894,7 +1904,9 @@ export class DatabaseStorage implements IStorage {
             status: workout.status ?? "completed", weekNumber: metadata.weekNumber, phase: metadata.phase, workingSets: 0 }] });
         if (conflict) throw new Error(conflict);
       } else if (workout.advancedTrainerCycleId != null) throw new Error("Only Advanced workouts can link to a mesocycle.");
-      const created = tx.insert(workouts).values(workout).returning().get();
+      const user = tx.select().from(users).where(eq(users.id, workout.userId)).get();
+      if (!user) throw new Error("Workout requires an existing user.");
+      const created = tx.insert(workouts).values({ ...workout, coachBaselineRevision: user.coachBaselineRevision }).returning().get();
       if (created.workoutTemplateId != null) {
         const prescriptionRows = tx
           .select({ template: workoutTemplateExercises, exercise: exercises })

@@ -256,6 +256,8 @@ export default function Coach() {
                       {s.nextGoalText && <p className="text-xs text-muted-foreground italic">{s.nextGoalText}</p>}
                     </>
                   )}
+                  {s.estimateText && <p className="text-xs text-muted-foreground" data-testid={`text-capacity-estimate-${s.exerciseId}`}>{s.estimateText}</p>}
+                  {!isBeginner && s.failureTarget && s.failureTarget !== "Never" && s.effortGuidance && <p className="text-xs text-muted-foreground">{s.effortGuidance}</p>}
                   {s.restGuidance && <p className="text-xs text-muted-foreground">{s.restGuidance}</p>}
                   {s.sourceTemplateName && <p className="text-xs text-muted-foreground">Template: {s.sourceTemplateName}</p>}
                   {s.cycleNotice && <p className="text-xs text-primary">{s.cycleNotice}</p>}

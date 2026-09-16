@@ -5,7 +5,7 @@ import { z } from "zod";
 import { storage, db } from "./storage";
 import { getEffectiveCoachContext } from "./coach-settings";
 import { integrateCycleSuggestions, type IntegratedSuggestion } from "./integrated-coach";
-import { coachComparisonHistory } from "@shared/coaching";
+import { coachComparisonHistory, coachEffortHistory, coachTemplateEffortHistory } from "@shared/coaching";
 import type { GuidedPlanExerciseInput } from "@shared/guided-workout";
 import type { SetWithExercise } from "./storage";
 import { hashPassword, verifyPassword, toPublicUser, requireAuth, requireAdmin, login as loginUser, issueTokenFor, logout as logoutToken } from "./auth";
@@ -325,7 +325,8 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
           primaryMuscleGroupId: primaryStimulusMuscle(stimulus)?.muscleGroupId ?? exercise.primaryMuscleGroupId,
           stimulus,
           intensityTechnique: snapshot?.intensityTechnique ?? "Normal",
-          failureTarget: snapshot?.failureTarget ?? "Never",
+          failureTarget: savedPlan?.advancedTrainer ? "Never" : savedTarget ? savedTarget.failureTarget ?? "Never" : snapshot?.failureTarget ?? "Never",
+          effortContextRir: savedTarget?.templateTargetRir ?? snapshot?.targetRir,
           prescriptionSnapshotAvailable: savedTarget != null || snapshot != null,
           prescription: savedTarget ? {
             targetSets: savedTarget.workingSets, targetRepsMin: savedTarget.targetRepsMin, targetRepsMax: savedTarget.targetRepsMax,
@@ -351,6 +352,7 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
       workoutName: w.name ?? "Workout",
       plannedDeload: savedPlan?.advancedTrainer?.phase === "deload",
       advancedTrainerCycleId: w.advancedTrainerCycleId,
+      coachBaselineRevision: w.coachBaselineRevision,
       startedAt: workoutInstant(w, zone),
       exercises: exercisesForSession,
     };
@@ -1686,7 +1688,9 @@ export async function registerRoutes(
     if (userId == null) return;
     const history = await buildHistory(userId, zoneOf(req));
     const coachContext = await getEffectiveCoachContext(userId);
-    const signal = evaluateFatigueTrend(coachComparisonHistory(history, coachContext.loggingMode, coachContext.cycle?.cycleId), coachContext.settings.fatigueSensitivity);
+    const templates = coachContext.loggingMode === "advanced_guided" ? [] : await storage.getAllWorkoutTemplatesWithExercises(userId);
+    const comparisons = coachTemplateEffortHistory(coachComparisonHistory(history, coachContext.loggingMode, coachContext.cycle?.cycleId, coachContext.baselineRevision), templates);
+    const signal = evaluateFatigueTrend(comparisons, coachContext.settings.fatigueSensitivity);
     res.json(signal);
   });
 
@@ -1715,7 +1719,8 @@ export async function registerRoutes(
       coachContext.recoverySettings,
       coachContext.recoveryOverrides,
     );
-    const comparisonHistory = coachComparisonHistory(history, coachContext.loggingMode, coachContext.cycle?.cycleId);
+    const allTemplates = await storage.getAllWorkoutTemplatesWithExercises(userId);
+    const comparisonHistory = coachTemplateEffortHistory(coachComparisonHistory(history, coachContext.loggingMode, coachContext.cycle?.cycleId, coachContext.baselineRevision), allTemplates);
     const fatigue = evaluateFatigueTrend(comparisonHistory, coachContext.settings.fatigueSensitivity);
 
     const workoutsList = await storage.getWorkouts(userId);
@@ -1742,7 +1747,6 @@ export async function registerRoutes(
     // Optional filter by template. In the all-trained view, resolve each
     // exercise from the template used for its most recent workout so selecting
     // that template cannot change the displayed prescription.
-    const allTemplates = await storage.getAllWorkoutTemplatesWithExercises(userId);
     const templateById = new Map(allTemplates.map((template) => [template.id, template]));
     let targetExercises = exercisesList;
     const sourceTemplateByExercise = new Map<number, number>();
@@ -1753,6 +1757,7 @@ export async function registerRoutes(
       targetDurationMinSeconds: number | null;
       targetDurationMaxSeconds: number | null;
       targetRir: number;
+      failureTarget: string;
       restSeconds: number;
     }>();
 
@@ -1768,6 +1773,7 @@ export async function registerRoutes(
         targetDurationMinSeconds: te.targetDurationMinSeconds,
         targetDurationMaxSeconds: te.targetDurationMaxSeconds,
         targetRir: te.targetRir,
+        failureTarget: te.failureTarget,
         restSeconds: te.restSeconds,
       });
       if (sourceTemplateId != null) sourceTemplateByExercise.set(te.exerciseId, sourceTemplateId);
@@ -1816,6 +1822,7 @@ export async function registerRoutes(
             targetDurationMinSeconds: snapshot.targetDurationMinSeconds ?? null,
             targetDurationMaxSeconds: snapshot.targetDurationMaxSeconds ?? null,
             targetRir: snapshot.targetRir,
+            failureTarget: historyExercise.failureTarget,
             restSeconds: snapshot.restSeconds ?? 90,
           });
         }
@@ -1823,16 +1830,20 @@ export async function registerRoutes(
     }
 
     const evaluateForExercise = (exercise: (typeof exercisesList)[number], templatePrescription?: ReturnType<typeof prescriptionByExercise.get>): IntegratedSuggestion => {
-      const prescription = templatePrescription ?? prescriptionByExercise.get(exercise.id) ?? {
+      const configuredPrescription = templatePrescription ?? prescriptionByExercise.get(exercise.id) ?? {
         targetSets: 3,
         targetRepsMin: 8,
         targetRepsMax: 12,
         targetDurationMinSeconds: 20,
         targetDurationMaxSeconds: 60,
         targetRir: 2,
+        failureTarget: "Never",
       };
-      const previous = getPreviousExercisePerformance(comparisonHistory, exercise.id, exercise.name);
-      const historicalReference = coachContext.loggingMode === "advanced_guided" && previous.lastSets.length === 0
+      const prescription = { ...configuredPrescription,
+        failureTarget: coachContext.loggingMode === "advanced_guided" ? "Never" : configuredPrescription.failureTarget ?? "Never" };
+      const effortHistory = coachEffortHistory(comparisonHistory, exercise.id, prescription);
+      const previous = getPreviousExercisePerformance(effortHistory, exercise.id, exercise.name);
+      const historicalReference = previous.lastSets.length === 0
         ? getPreviousExercisePerformance(history, exercise.id, exercise.name) : undefined;
 
       const primaryStimulus = primaryStimulusMuscle(exercise.stimulus);
@@ -1840,7 +1851,7 @@ export async function registerRoutes(
       const primaryMuscle = nameById.get(primaryMuscleId);
       const recovery = primaryMuscle ? getPrimaryRecovery(recoveryStates, primaryMuscle) : recoveryStates[0];
       const trend = evaluateExerciseTrend(
-        comparisonHistory,
+        effortHistory,
         exercise.id,
         coachContext.goal,
         exercise.trackingMode === "duration" ? "duration" : "reps",
@@ -1917,6 +1928,8 @@ export async function registerRoutes(
         targetWeight: suggestion.suggestedWeight ?? 0, targetRepsMin: suggestion.targetRepsMin ?? 8, targetRepsMax: suggestion.targetRepsMax ?? 12,
         targetDurationMinSeconds: suggestion.targetDurationMinSeconds ?? null, targetDurationMaxSeconds: suggestion.targetDurationMaxSeconds ?? null,
         targetRirMin: suggestion.targetRirMin ?? 2, targetRirMax: suggestion.targetRirMax ?? 3, restSeconds: suggestion.recommendedRestSeconds ?? 90,
+        failureTarget: suggestion.failureTarget as GuidedPlanExerciseInput["failureTarget"],
+        templateTargetRir: te?.targetRir,
         recommendation: suggestion.recommendation, recommendationReason: suggestion.reason, recoveryPercent: suggestion.recoveryPercent, fatiguePercent: suggestion.fatiguePercent };
     };
     const byTemplate = new Map<number, IntegratedSuggestion[]>();
@@ -1930,7 +1943,7 @@ export async function registerRoutes(
         const recent = history.find((session) => !session.plannedDeload && session.workoutTemplateId === id)?.exercises.find((row) => row.exerciseId === te.exerciseId);
         const suggestion = { ...evaluateForExercise(exercise, { targetSets: resolveWorkingSetCount(te, recent?.sets), targetRepsMin: te.targetRepsMin,
           targetRepsMax: te.targetRepsMax, targetDurationMinSeconds: te.targetDurationMinSeconds, targetDurationMaxSeconds: te.targetDurationMaxSeconds,
-          targetRir: te.targetRir, restSeconds: te.restSeconds }), sourceTemplateId: id, sourceTemplateName: template.name };
+          targetRir: te.targetRir, failureTarget: te.failureTarget, restSeconds: te.restSeconds }), sourceTemplateId: id, sourceTemplateName: template.name };
         return [{ suggestion, row: rowFor(suggestion, te) }];
       });
       const result = integrate(entries.map((entry) => entry.suggestion), entries.map((entry) => entry.row));
@@ -1965,7 +1978,7 @@ export async function registerRoutes(
     if (userId == null) return;
     const context = await getEffectiveCoachContext(userId, todayFor(req));
     res.json({ goal: context.goal, experience: context.experience, loggingMode: context.loggingMode, cycle: context.cycle,
-      settings: context.settings, recoverySettings: context.recoverySettings });
+      settings: context.settings, recoverySettings: context.recoverySettings, baselineRevision: context.baselineRevision });
   });
 
   // ---------------- Workout schedule (calendar-based) ----------------
@@ -2083,6 +2096,7 @@ export async function registerRoutes(
         trackingMode: dashboardExerciseMap.get(te.exerciseId)?.trackingMode === "duration" ? "duration" : "reps",
         targetRir: te.targetRir,
         warmupSets: te.warmupSets,
+        failureTarget: te.failureTarget,
         topSets: te.topSets,
         backoffSets: te.backoffSets,
         restSeconds: te.restSeconds,
@@ -2090,7 +2104,7 @@ export async function registerRoutes(
     }));
 
     const snapshot = getDashboardSnapshot({
-      comparisonHistory: coachComparisonHistory(history, coachContext.loggingMode, coachContext.cycle?.cycleId),
+      comparisonHistory: coachTemplateEffortHistory(coachComparisonHistory(fullHistory, coachContext.loggingMode, coachContext.cycle?.cycleId, coachContext.baselineRevision), templates),
       templates: dashboardTemplates,
       history,
       exerciseNameLookup,

@@ -6,6 +6,8 @@ import {
   checkLivePersonalRecord,
   evaluateFatigueTrend,
   coachComparisonHistory,
+  coachEffortHistory,
+  coachTemplateEffortHistory,
   evaluateRecovery,
   evaluateExerciseTrend,
   evaluateGoalAwareProgressionV2,
@@ -35,6 +37,7 @@ import { DEFAULT_ADVANCED_TRAINER_SETTINGS, DEFAULT_COACH_SETTINGS } from "./sch
 import {
   buildGuidedSessionPlan,
   evaluateGuidedSetAdjustment,
+  guidedSetRirTarget,
   type GuidedPlanExerciseInput,
 } from "./guided-workout";
 import {
@@ -551,6 +554,92 @@ test("current-cycle fatigue waits for repeated exercises and respects prescribed
   assert.doesNotMatch(signal.evidence!.join(" "), /reached RIR 0/);
   const unrelated = history.map((row) => ({ ...row, exercises: row.exercises.map((exercise) => ({ ...exercise, exerciseId: row.id })) }));
   assert.equal(evaluateFatigueTrend(coachComparisonHistory(unrelated, "advanced_guided", 100)).status, "Learning");
+});
+
+test("returning to normal mode starts a new effort block, not the old normal or cycle baseline", () => {
+  const oldNormal = { ...exposureHistory([[15, 15, 15]], 0)[0], coachBaselineRevision: 0 };
+  const meso = { ...exposureHistory([[7, 7]], 3)[0], advancedTrainerCycleId: 90, coachBaselineRevision: 1 };
+  const fresh = { ...exposureHistory([[10, 10, 10]], 2)[0], id: 40, coachBaselineRevision: 2 };
+  const history = [fresh, meso, oldNormal];
+  const block = coachComparisonHistory(history, "classic", 90, 2);
+  assert.deepEqual(block.map((row) => row.id), [40]);
+  assert.equal(block[0].currentModeComparison, true);
+  assert.equal(v2Result(block, "hypertrophy").rirAdherence.status, "on_target");
+  assert.equal(v2Result(block, "hypertrophy").trend, "Learning");
+  assert.equal(coachComparisonHistory(history, "guided", 90, 3).length, 0);
+});
+
+test("normal effort range requires the saved RIR and failure policy to match", () => {
+  const history = coachComparisonHistory(exposureHistory([[10], [10], [10]], 2), "classic", null, 0);
+  const prescription = { targetRir: 2, targetRepsMin: 8, targetRepsMax: 12, failureTarget: "Never" };
+  assert.equal(coachEffortHistory(history, 10, prescription).length, 3);
+  assert.equal(coachEffortHistory(history, 10, { ...prescription, targetRir: 3 }).length, 0);
+  assert.equal(coachEffortHistory(history, 10, { ...prescription, failureTarget: "Every Set" }).length, 0);
+  // Guided snapshots keep the original template effort context separately
+  // from the effective saved RIR range.
+  history[0].exercises[0] = { ...history[0].exercises[0], effortContextRir: 2,
+    prescription: { ...history[0].exercises[0].prescription!, targetRir: 1, targetRirMin: 1, targetRirMax: 3 } };
+  assert.equal(coachEffortHistory(history, 10, prescription).length, 3);
+  const templates = [{ id: 1, exercises: [{ ...prescription, exerciseId: 10 }] }];
+  assert.equal(coachTemplateEffortHistory(history, templates).length, 3);
+  assert.equal(coachTemplateEffortHistory(history, [{ id: 1, exercises: [{ ...prescription, exerciseId: 10, targetRir: 3 }] }]).length, 0);
+});
+
+test("normal mode projects reps and available starting loads at new RIR or failure without grading old effort", () => {
+  const reference = getPreviousExercisePerformance(exposureHistory([[7]], 3), 10, "Incline Press");
+  const trend = evaluateExerciseTrend([], 10, "hypertrophy", "reps", DEFAULT_COACH_SETTINGS);
+  const input = { goal: "hypertrophy" as const, experience: "intermediate" as const, trackingMode: "reps" as const,
+    prescription: { targetSets: 3, targetRepsMin: 8, targetRepsMax: 12, targetRir: 2, failureTarget: "Never" },
+    previous: getPreviousExercisePerformance([], 10, "Incline Press"), startingReference: reference, trend, settings: DEFAULT_COACH_SETTINGS,
+    recovery: { muscle: "UpperChest" as const, displayName: "Upper Chest", fatiguePercent: 10, recoveryPercent: 90, lastTrainedAt: null, hoursSinceLastTrained: 0, status: "Recovered" as const, summary: "" },
+    fatigue: { status: "Learning" as const, summary: "", riskScore: 10, deloadSuggested: false }, muscleContexts: [muscleContext()],
+    weightSettings: { equipment: "Dumbbell" as const, minWeight: 0, maxWeight: 150, weightIncrement: 5 } };
+  const normal = evaluateGoalAwareProgressionV2(input);
+  assert.equal(normal.suggestedWeight, 75);
+  assert.equal(normal.estimatedReps, 8);
+  assert.equal(normal.rirAdherence.status, "insufficient_data");
+  assert.equal(normal.trend, "Learning");
+  const failureInput = { ...input, prescription: { ...input.prescription, failureTarget: "Every Set" } };
+  const failure = evaluateGoalAwareProgressionV2(failureInput);
+  assert.equal(failure.suggestedWeight, 75);
+  assert.equal(failure.estimatedReps, 10);
+  assert.equal(failure.prescribedRirMin, 0);
+  assert.equal(failure.prescribedRirMax, 0);
+  assert.match(buildGoalAwareWorkoutSuggestion(failureInput, failure).estimateText!, /about 10 reps at RIR 0/);
+  const easierInput = { ...input, prescription: { ...input.prescription, targetRir: 4 } };
+  const easier = evaluateGoalAwareProgressionV2(easierInput);
+  assert.ok(easier.suggestedWeight < normal.suggestedWeight);
+  assert.equal(easier.suggestedWeight % 5, 0);
+  assert.ok(easier.estimatedReps! >= 8);
+  const unloaded = evaluateGoalAwareProgressionV2({ ...input,
+    startingReference: { ...reference, lastSets: reference.lastSets.map((set) => ({ ...set, weight: 0 })) } });
+  assert.equal(unloaded.suggestedWeight, 0);
+  assert.equal(unloaded.estimatedReps, 8);
+  const tired = evaluateGoalAwareProgressionV2({ ...failureInput, recovery: { ...input.recovery, fatiguePercent: 80 } });
+  assert.equal(tired.recommendation, "Reduce Or Delay");
+  assert.equal(tired.failureTarget, "Never");
+  assert.ok(tired.prescribedRirMin >= 2);
+});
+
+test("failure adherence distinguishes final-set and every-set targets rather than averaging them", () => {
+  const block = (policy: string, rirs: number[]) => coachComparisonHistory(exposureHistory([[10, 10, 10]], 2).map((row) => ({ ...row,
+    exercises: row.exercises.map((exercise) => ({ ...exercise, failureTarget: policy,
+      sets: exercise.sets.map((set, index) => ({ ...set, rir: rirs[index] })) })) })), "classic", null, 0);
+  assert.equal(v2Result(block("Last Set", [2, 2, 0]), "hypertrophy").rirAdherence.status, "on_target");
+  assert.equal(v2Result(block("Last Set", [0, 2, 2]), "hypertrophy").rirAdherence.status, "too_hard");
+  assert.equal(v2Result(block("Every Set", [0, 0, 0]), "hypertrophy").rirAdherence.status, "on_target");
+  assert.equal(v2Result(block("Every Set", [2, 2, 2]), "hypertrophy").rirAdherence.status, "too_easy");
+});
+
+test("standard Guided preserves per-set failure targets and does not call planned final-set failure too hard", () => {
+  const plan = buildGuidedSessionPlan({ workoutTemplateId: 1, workoutName: "Normal", timeBudgetMinutes: null,
+    exercises: [guidedExercise({ failureTarget: "Last Set", workingSets: 3, targetRirMin: 1, targetRirMax: 3, templateTargetRir: 2 })] });
+  const exercise = plan.exercises[0];
+  assert.deepEqual(guidedSetRirTarget(exercise, 1), { min: 1, max: 3 });
+  assert.deepEqual(guidedSetRirTarget(exercise, 3), { min: 0, max: 0 });
+  const response = evaluateGuidedSetAdjustment({ exercise, workingSetNumber: 3,
+    current: { weight: 100, reps: 10, rir: 0, isWarmup: false } });
+  assert.equal(response.status, "on_plan");
 });
 
 test("multi-muscle context constrains added volume without cancelling the compound", () => {
