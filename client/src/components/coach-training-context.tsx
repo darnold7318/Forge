@@ -29,6 +29,7 @@ export function CoachTrainingContext() {
       : cycle.phase === "review" ? `Cycle #${cycle.cycleId} is ready for review. Prepare and explicitly start your next cycle before training.`
       : `Cycle #${cycle.cycleId} · ${cycle.phase} week ${cycle.weekNumber}/${cycle.totalWeeks} · RIR ${targetRirForWeek(cycle.settings, cycle.weekNumber)}–${Math.min(5, targetRirForWeek(cycle.settings, cycle.weekNumber) + 1)} before recovery adjustments.`}</p>}
     {cycleActive && cycle && <p className="text-xs text-muted-foreground">Started {cycle.startedOn}. The active settings snapshot controls this block; changes saved for the next cycle do not alter it.</p>}
+    {cycleActive && <p className="text-xs text-muted-foreground">Effort, progress and performance-fatigue ratings use only workouts linked to this cycle. Earlier training is a starting-load reference, not a regression baseline. Actual recovery and logged volume still include all training. New cycle ratings stay Learning until enough comparable exposures are logged.</p>}
     <div className="flex gap-4 text-xs"><Link href="/settings" className="underline">Training settings</Link>{cycleActive && <Link href="/log" className="underline">Mesocycle and session plan</Link>}</div>
   </CardContent></Card>;
 }

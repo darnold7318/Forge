@@ -5,6 +5,7 @@ import { z } from "zod";
 import { storage, db } from "./storage";
 import { getEffectiveCoachContext } from "./coach-settings";
 import { integrateCycleSuggestions, type IntegratedSuggestion } from "./integrated-coach";
+import { coachComparisonHistory } from "@shared/coaching";
 import type { GuidedPlanExerciseInput } from "@shared/guided-workout";
 import type { SetWithExercise } from "./storage";
 import { hashPassword, verifyPassword, toPublicUser, requireAuth, requireAdmin, login as loginUser, issueTokenFor, logout as logoutToken } from "./auth";
@@ -349,6 +350,7 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
       workoutTemplateId: w.workoutTemplateId ?? null,
       workoutName: w.name ?? "Workout",
       plannedDeload: savedPlan?.advancedTrainer?.phase === "deload",
+      advancedTrainerCycleId: w.advancedTrainerCycleId,
       startedAt: workoutInstant(w, zone),
       exercises: exercisesForSession,
     };
@@ -1684,7 +1686,7 @@ export async function registerRoutes(
     if (userId == null) return;
     const history = await buildHistory(userId, zoneOf(req));
     const coachContext = await getEffectiveCoachContext(userId);
-    const signal = evaluateFatigueTrend(history, coachContext.settings.fatigueSensitivity);
+    const signal = evaluateFatigueTrend(coachComparisonHistory(history, coachContext.loggingMode, coachContext.cycle?.cycleId), coachContext.settings.fatigueSensitivity);
     res.json(signal);
   });
 
@@ -1713,7 +1715,8 @@ export async function registerRoutes(
       coachContext.recoverySettings,
       coachContext.recoveryOverrides,
     );
-    const fatigue = evaluateFatigueTrend(history, coachContext.settings.fatigueSensitivity);
+    const comparisonHistory = coachComparisonHistory(history, coachContext.loggingMode, coachContext.cycle?.cycleId);
+    const fatigue = evaluateFatigueTrend(comparisonHistory, coachContext.settings.fatigueSensitivity);
 
     const workoutsList = await storage.getWorkouts(userId);
     const workoutMap = new Map(workoutsList.map((workout) => [workout.id, workout]));
@@ -1828,14 +1831,16 @@ export async function registerRoutes(
         targetDurationMaxSeconds: 60,
         targetRir: 2,
       };
-      const previous = getPreviousExercisePerformance(history, exercise.id, exercise.name);
+      const previous = getPreviousExercisePerformance(comparisonHistory, exercise.id, exercise.name);
+      const historicalReference = coachContext.loggingMode === "advanced_guided" && previous.lastSets.length === 0
+        ? getPreviousExercisePerformance(history, exercise.id, exercise.name) : undefined;
 
       const primaryStimulus = primaryStimulusMuscle(exercise.stimulus);
       const primaryMuscleId = primaryStimulus?.muscleGroupId ?? exercise.primaryMuscleGroupId;
       const primaryMuscle = nameById.get(primaryMuscleId);
       const recovery = primaryMuscle ? getPrimaryRecovery(recoveryStates, primaryMuscle) : recoveryStates[0];
       const trend = evaluateExerciseTrend(
-        history,
+        comparisonHistory,
         exercise.id,
         coachContext.goal,
         exercise.trackingMode === "duration" ? "duration" : "reps",
@@ -1877,6 +1882,7 @@ export async function registerRoutes(
         trackingMode: exercise.trackingMode === "duration" ? "duration" as const : "reps" as const,
         prescription,
         previous,
+        startingReference: historicalReference?.lastSets.length ? historicalReference : undefined,
         trend,
         settings: coachContext.settings,
         recovery,
@@ -2084,6 +2090,7 @@ export async function registerRoutes(
     }));
 
     const snapshot = getDashboardSnapshot({
+      comparisonHistory: coachComparisonHistory(history, coachContext.loggingMode, coachContext.cycle?.cycleId),
       templates: dashboardTemplates,
       history,
       exerciseNameLookup,

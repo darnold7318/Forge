@@ -5,6 +5,7 @@ import {
   computeWeeklyVolumeByMuscleGroup,
   checkLivePersonalRecord,
   evaluateFatigueTrend,
+  coachComparisonHistory,
   evaluateRecovery,
   evaluateExerciseTrend,
   evaluateGoalAwareProgressionV2,
@@ -488,6 +489,69 @@ function v2Result(history: HistorySessionInput[], goal: "hypertrophy" | "strengt
     muscleContexts: [muscleContext()],
   });
 }
+
+test("cycle comparisons exclude manual and other-cycle failure training without deleting recovery history", () => {
+  const manual = exposureHistory([[15, 15, 15]], 0)[0];
+  const oldCycle = { ...manual, id: 20, advancedTrainerCycleId: 99 };
+  const current: HistorySessionInput = { ...exposureHistory([[10, 9]], 3)[0], id: 30, advancedTrainerCycleId: 100,
+    exercises: exposureHistory([[10, 9]], 3)[0].exercises.map((row) => ({ ...row,
+      prescription: { ...row.prescription!, targetSets: 2, targetRir: 3, targetRirMin: 3, targetRirMax: 4 } })) };
+  const history = [current, { ...current, id: 40, plannedDeload: true }, oldCycle, manual];
+  const scoped = coachComparisonHistory(history, "advanced_guided", 100);
+  assert.deepEqual(scoped.map((row) => row.id), [30]);
+  assert.equal(coachComparisonHistory(history, "advanced_guided", null).length, 0);
+  assert.equal(coachComparisonHistory(history, "classic", 100), history);
+  const result = v2Result(scoped, "hypertrophy");
+  assert.equal(result.trend, "Learning");
+  assert.equal(result.rirAdherence.status, "on_target");
+  assert.notEqual(result.status, "Regressing");
+  assert.equal(evaluateFatigueTrend(scoped).status, "Learning");
+  assert.equal(history.length, 4);
+  assert.equal(current.currentCycleComparison, undefined);
+});
+
+test("current-cycle capacity recognizes RIR changes and set-count trims without false regression", () => {
+  const history = historyWithRirs([[12, 12, 12], [10, 10], [9]], [0, 2, 3]).map((row) => ({ ...row, advancedTrainerCycleId: 100 }));
+  const scoped = coachComparisonHistory(history, "advanced_guided", 100);
+  const result = v2Result(scoped, "hypertrophy");
+  assert.equal(result.trend, "Stable");
+  assert.equal(result.effortNormalizedStatus, "stable");
+  assert.equal(evaluateFatigueTrend(scoped).status, "Stable");
+  assert.equal(evaluateFatigueTrend(scoped).deloadSuggested, false);
+  // Normal modes retain their previous scoring policy, including historical advanced sessions.
+  assert.equal(v2Result(history, "hypertrophy").trend, "Regressing");
+});
+
+test("current-cycle comparisons still detect real declining and improving capacity", () => {
+  for (const [reps, expected] of [[[12, 9, 6], "Regressing"], [[6, 9, 12], "Improving"]] as const) {
+    const history = exposureHistory(reps.map((value) => [value]), 3).map((row) => ({ ...row, advancedTrainerCycleId: 100 }));
+    const scoped = coachComparisonHistory(history, "advanced_guided", 100);
+    assert.equal(v2Result(scoped, "hypertrophy").trend, expected);
+    if (expected === "Regressing") assert.match(evaluateFatigueTrend(scoped).evidence!.join(" "), /Repeated exercise regression/);
+  }
+});
+
+test("missing current-cycle RIR stays Learning instead of inventing comparable effort", () => {
+  const history = exposureHistory([[12], [10], [8]], 3).map((row) => ({ ...row, advancedTrainerCycleId: 100,
+    exercises: row.exercises.map((exercise) => ({ ...exercise, sets: exercise.sets.map((set) => ({ ...set, rir: null })) })) }));
+  const scoped = coachComparisonHistory(history, "advanced_guided", 100);
+  assert.equal(v2Result(scoped, "hypertrophy").trend, "Learning");
+  assert.equal(evaluateFatigueTrend(scoped).status, "Learning");
+  const partlyKnown = exposureHistory([[8], [10], [12]], 3).map((row) => ({ ...row, advancedTrainerCycleId: 100 }));
+  partlyKnown[0].exercises[0].sets[0].rir = null;
+  assert.equal(v2Result(coachComparisonHistory(partlyKnown, "advanced_guided", 100), "hypertrophy").trend, "Learning");
+});
+
+test("current-cycle fatigue waits for repeated exercises and respects prescribed late-cycle failure", () => {
+  const history = exposureHistory([[10], [10], [10]], 0).map((row) => ({ ...row, advancedTrainerCycleId: 100,
+    exercises: row.exercises.map((exercise) => ({ ...exercise,
+      prescription: { ...exercise.prescription!, targetRir: 0, targetRirMin: 0, targetRirMax: 1 } })) }));
+  const signal = evaluateFatigueTrend(coachComparisonHistory(history, "advanced_guided", 100));
+  assert.equal(signal.status, "Stable");
+  assert.doesNotMatch(signal.evidence!.join(" "), /reached RIR 0/);
+  const unrelated = history.map((row) => ({ ...row, exercises: row.exercises.map((exercise) => ({ ...exercise, exerciseId: row.id })) }));
+  assert.equal(evaluateFatigueTrend(coachComparisonHistory(unrelated, "advanced_guided", 100)).status, "Learning");
+});
 
 test("multi-muscle context constrains added volume without cancelling the compound", () => {
   const contexts = [

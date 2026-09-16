@@ -169,7 +169,7 @@ test("v4.1 preserves used legacy cycles, retires only unused auto starts, and sa
       warmupSets: 0, topSets: 0, backoffSets: 0, backoffReductionPercent: 0, targetDurationMinSeconds: null,
       targetDurationMaxSeconds: null, tempo: null, failureTarget: "Last Set", intensityTechnique: "None", restSeconds: 120, notes: null });
     const prior = await storage.createWorkout({ userId: unifiedUser.id, date: addCivilDays(today, -10), name: "Manual Push A", workoutTemplateId: push.id });
-    await storage.createSet({ workoutId: prior.id, exerciseId: bench.id, setNumber: 1, weight: 100, reps: 10, rir: 3, isWarmup: false });
+    await storage.createSet({ workoutId: prior.id, exerciseId: bench.id, setNumber: 1, weight: 100, reps: 10, rir: 0, isWarmup: false });
     const suggestionsPath = `/api/coach/suggestions?templateId=${push.id}`;
     const awaitingTargets = await (await coachRequest(suggestionsPath)).json();
     assert.equal(awaitingTargets[0].sessionAvailable, false);
@@ -182,6 +182,11 @@ test("v4.1 preserves used legacy cycles, retires only unused auto starts, and sa
     assert.equal(weekOne[0].prescribedRirMin, 3);
     assert.equal(weekOne[0].recommendedWorkingSets, weekOne[0].prescribedSets);
     assert.equal(weekOne[0].sourceTemplateId, push.id);
+    assert.equal(weekOne[0].trend, "Learning");
+    assert.equal(weekOne[0].rirAdherence.status, "insufficient_data");
+    assert.ok(weekOne[0].suggestedWeight > 0 && weekOne[0].suggestedWeight <= 100);
+    assert.match(weekOne[0].lastPerformance, /load reference/);
+    assert.equal((await (await coachRequest("/api/coach/fatigue-trend")).json()).status, "Learning");
     assert.match(weekOne[0].suggestedGoal, /RIR 3-4/);
     assert.ok(weekOne[0].recommendedWorkingSets <= DEFAULT_ADVANCED_TRAINER_SETTINGS.maxSetsPerExercise);
     const allTargets = await (await coachRequest("/api/coach/suggestions")).json();
@@ -227,6 +232,31 @@ test("v4.1 preserves used legacy cycles, retires only unused auto starts, and sa
     const nextDeload = await (await coachRequest(suggestionsPath)).json();
     assert.equal(nextDeload[0].suggestedWeight, deload[0].suggestedWeight);
     assert.equal((await storage.getWorkout(prior.id))?.advancedTrainerCycleId, null);
+    // Resume week one in this isolated test database and record the first
+    // accumulation exposure. A separate manual failure workout cannot become
+    // the cycle's RIR/progress baseline, even when it happened the same day.
+    inspection.prepare("UPDATE advanced_trainer_cycles SET started_on = ? WHERE id = ?").run(today, unifiedCycle.cycleId);
+    const accumulationPlan = JSON.parse(savedPlan(unifiedCycle.cycleId, bench.id));
+    accumulationPlan.workoutTemplateId = push.id;
+    accumulationPlan.advancedTrainer = weekOne[0].mesocycle;
+    accumulationPlan.exercises[0] = { ...accumulationPlan.exercises[0], targetWeight: weekOne[0].suggestedWeight,
+      workingSets: weekOne[0].recommendedWorkingSets, targetRirMin: 3, targetRirMax: 4 };
+    const accumulationStarted = await coachRequest("/api/workout-sessions", "POST", { date: today,
+      workoutTemplateId: push.id, name: "First mesocycle Push A", timeBudgetMinutes: null, sessionPlan: accumulationPlan });
+    assert.equal(accumulationStarted.status, 201);
+    const accumulationSession = await accumulationStarted.json();
+    await coachRequest("/api/sets", "POST", { workoutId: accumulationSession.id, exerciseId: bench.id,
+      setNumber: 1, weight: weekOne[0].suggestedWeight, reps: 7, rir: 3, isWarmup: false });
+    assert.equal((await coachRequest(`/api/workout-sessions/${accumulationSession.id}/complete`, "POST")).status, 200);
+    const extraManual = await storage.createWorkout({ userId: unifiedUser.id, date: today, name: "Manual failure work", workoutTemplateId: push.id });
+    await storage.createSet({ workoutId: extraManual.id, exerciseId: bench.id, setNumber: 1, weight: 100, reps: 15, rir: 0, isWarmup: false });
+    const firstCycleTargets = await (await coachRequest(suggestionsPath)).json();
+    assert.equal(firstCycleTargets[0].trend, "Learning");
+    assert.equal(firstCycleTargets[0].rirAdherence.status, "on_target");
+    assert.match(firstCycleTargets[0].lastPerformance, /7 total reps/);
+    assert.equal((await (await coachRequest("/api/coach/fatigue-trend")).json()).status, "Learning");
+    assert.equal((await (await coachRequest("/api/dashboard")).json()).fatigueStatus, "Learning");
+    assert.equal((await storage.getWorkout(extraManual.id))?.advancedTrainerCycleId, null);
     await storage.updateUserPreferences(unifiedUser.id, { workoutLoggingMode: "classic", trainingGoal: "strength" });
     const classic = await (await coachRequest(suggestionsPath)).json();
     assert.equal(classic[0].mesocycle, undefined);
