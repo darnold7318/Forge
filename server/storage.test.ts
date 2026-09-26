@@ -35,6 +35,10 @@ test("default stimulus, complete user overrides, and reset are isolated per user
   assert.ok(columns("workouts").has("status"));
   assert.ok(columns("workouts").has("completed_at"));
   assert.ok(columns("workouts").has("session_plan"));
+  assert.ok(columns("workouts").has("planned_working_sets"));
+  assert.ok(columns("workouts").has("completed_working_sets"));
+  assert.ok(columns("workouts").has("completion_reason"));
+  assert.ok(columns("training_absences").has("cycle_behavior"));
   assert.ok(columns("sets").has("logged_at"));
   assert.ok(columns("sets").has("client_request_id"));
   assert.ok(columns("user_coach_settings").has("progression_style"));
@@ -171,6 +175,17 @@ test("default stimulus, complete user overrides, and reset are isolated per user
     validWeekCount: 6,
     explanation: "Stable or improving across six completed weeks.",
   });
+
+  const absence = await storage.createTrainingAbsence(newUser.id, {
+    startDate: "2026-08-20", endDate: "2026-08-24", reason: "travel", note: "Vacation", cycleBehavior: "keep_running",
+  });
+  assert.equal((await storage.getTrainingAbsences(newUser.id, "2026-08-01", "2026-08-31"))[0].id, absence.id);
+  const correctedAbsence = await storage.updateTrainingAbsence(newUser.id, absence.id, {
+    startDate: "2026-08-20", endDate: "2026-08-25", reason: "time", note: "Travel prep", cycleBehavior: "keep_running",
+  });
+  assert.equal(correctedAbsence?.reason, "time");
+  assert.equal(await storage.deleteTrainingAbsence(newUser.id, absence.id), true);
+  assert.equal((await storage.getTrainingAbsences(newUser.id)).length, 0);
 
   const defaults = await storage.getEffectiveExerciseStimulus(users[0].id, bench.id);
   assert.equal(defaults.length, 4);

@@ -20,6 +20,7 @@ import {
   workoutTemplateExercises,
   workoutSchedules,
   scheduleDays,
+  trainingAbsences,
   splitRotationCycles,
   exerciseMuscleStimulus,
   userExerciseMuscleStimulusOverrides,
@@ -57,6 +58,9 @@ import type {
   InsertWorkoutTemplateExercise,
   WorkoutSchedule,
   ScheduleDay,
+  TrainingAbsence,
+  PlannedAbsenceInput,
+  WorkoutCompletionReasonId,
   GenerateScheduleInput,
   SetWeeklyRestDaysInput,
   MoveScheduleDayInput,
@@ -303,7 +307,12 @@ function ensureTables() {
       time_budget_minutes INTEGER,
       planned_duration_minutes INTEGER,
       session_plan TEXT,
-      advanced_trainer_cycle_id INTEGER REFERENCES advanced_trainer_cycles(id)
+      advanced_trainer_cycle_id INTEGER REFERENCES advanced_trainer_cycles(id),
+      coach_baseline_revision INTEGER NOT NULL DEFAULT 0,
+      planned_working_sets INTEGER,
+      completed_working_sets INTEGER,
+      completion_reason TEXT,
+      completion_note TEXT
     );
 
     CREATE TABLE IF NOT EXISTS workout_exercise_snapshots (
@@ -398,6 +407,21 @@ function ensureTables() {
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_days_schedule_date ON schedule_days(schedule_id, date);
+
+    CREATE TABLE IF NOT EXISTS training_absences (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      start_date TEXT NOT NULL,
+      end_date TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      note TEXT,
+      cycle_behavior TEXT NOT NULL DEFAULT 'keep_running',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_training_absences_user_dates
+      ON training_absences(user_id, start_date, end_date);
   `);
 
   // Migration: category-only equipment settings become named profiles. Keep
@@ -537,6 +561,10 @@ function ensureTables() {
     ["session_plan", "ALTER TABLE workouts ADD COLUMN session_plan TEXT"],
     ["advanced_trainer_cycle_id", "ALTER TABLE workouts ADD COLUMN advanced_trainer_cycle_id INTEGER REFERENCES advanced_trainer_cycles(id)"],
     ["coach_baseline_revision", "ALTER TABLE workouts ADD COLUMN coach_baseline_revision INTEGER NOT NULL DEFAULT 0"],
+    ["planned_working_sets", "ALTER TABLE workouts ADD COLUMN planned_working_sets INTEGER"],
+    ["completed_working_sets", "ALTER TABLE workouts ADD COLUMN completed_working_sets INTEGER"],
+    ["completion_reason", "ALTER TABLE workouts ADD COLUMN completion_reason TEXT"],
+    ["completion_note", "ALTER TABLE workouts ADD COLUMN completion_note TEXT"],
   ] as const) {
     if (!workoutColumns.has(column)) {
       try {
@@ -942,6 +970,7 @@ export interface WorkoutTemplateWithExercises extends WorkoutTemplate {
 
 export interface WorkoutScheduleWithDays extends WorkoutSchedule {
   days: ScheduleDay[];
+  absences: TrainingAbsence[];
 }
 
 export interface ExerciseWithEffectiveStimulus extends ExerciseWithParsedMuscles {
@@ -991,6 +1020,10 @@ export interface IStorage {
   deleteExerciseEquipmentProfile(userId: number, exerciseId: number): Promise<void>;
   getLearnedVolumeRanges(userId: number): Promise<LearnedVolumeRange[]>;
   setLearnedVolumeRanges(userId: number, values: LearnedVolumeRange[]): Promise<LearnedVolumeRange[]>;
+  getTrainingAbsences(userId: number, startDate?: string, endDate?: string): Promise<TrainingAbsence[]>;
+  createTrainingAbsence(userId: number, input: PlannedAbsenceInput): Promise<TrainingAbsence>;
+  updateTrainingAbsence(userId: number, id: number, input: PlannedAbsenceInput): Promise<TrainingAbsence | undefined>;
+  deleteTrainingAbsence(userId: number, id: number): Promise<boolean>;
 
   // Muscle groups (shared/global)
   getMuscleGroups(): Promise<MuscleGroup[]>;
@@ -1039,7 +1072,7 @@ export interface IStorage {
   createWorkout(workout: InsertWorkout): Promise<Workout>;
   getWorkoutExerciseSnapshots(userId: number): Promise<WorkoutExerciseSnapshot[]>;
   updateWorkout(id: number, workout: Partial<InsertWorkout>): Promise<Workout | undefined>;
-  completeWorkout(id: number, completedAt: string): Promise<Workout | undefined>;
+  completeWorkout(id: number, completedAt: string, context?: { completedWorkingSets: number; reason?: WorkoutCompletionReasonId | null; note?: string | null }): Promise<Workout | undefined>;
   deleteWorkout(id: number): Promise<void>;
 
   // Sets (scope inherited via workoutId -> workouts.userId)
@@ -1481,6 +1514,41 @@ export class DatabaseStorage implements IStorage {
       }
     });
     return values;
+  }
+
+  async getTrainingAbsences(userId: number, startDate?: string, endDate?: string): Promise<TrainingAbsence[]> {
+    return db.select().from(trainingAbsences).where(eq(trainingAbsences.userId, userId)).all()
+      .filter((row) => (!startDate || row.endDate >= startDate) && (!endDate || row.startDate <= endDate))
+      .sort((a, b) => b.startDate.localeCompare(a.startDate) || b.id - a.id);
+  }
+
+  async createTrainingAbsence(userId: number, input: PlannedAbsenceInput): Promise<TrainingAbsence> {
+    const now = new Date().toISOString();
+    return db.insert(trainingAbsences).values({
+      userId,
+      startDate: input.startDate,
+      endDate: input.endDate,
+      reason: input.reason,
+      note: input.note?.trim() || null,
+      cycleBehavior: input.cycleBehavior,
+      createdAt: now,
+      updatedAt: now,
+    }).returning().get();
+  }
+
+  async updateTrainingAbsence(userId: number, id: number, input: PlannedAbsenceInput): Promise<TrainingAbsence | undefined> {
+    return db.update(trainingAbsences).set({
+      startDate: input.startDate,
+      endDate: input.endDate,
+      reason: input.reason,
+      note: input.note?.trim() || null,
+      cycleBehavior: input.cycleBehavior,
+      updatedAt: new Date().toISOString(),
+    }).where(and(eq(trainingAbsences.id, id), eq(trainingAbsences.userId, userId))).returning().get();
+  }
+
+  async deleteTrainingAbsence(userId: number, id: number): Promise<boolean> {
+    return db.delete(trainingAbsences).where(and(eq(trainingAbsences.id, id), eq(trainingAbsences.userId, userId))).returning().get() != null;
   }
 
   // ---------------- Muscle groups (shared) ----------------
@@ -1950,10 +2018,16 @@ export class DatabaseStorage implements IStorage {
     return db.update(workouts).set(workout).where(eq(workouts.id, id)).returning().get();
   }
 
-  async completeWorkout(id: number, completedAt: string): Promise<Workout | undefined> {
+  async completeWorkout(id: number, completedAt: string, context?: { completedWorkingSets: number; reason?: WorkoutCompletionReasonId | null; note?: string | null }): Promise<Workout | undefined> {
     return db
       .update(workouts)
-      .set({ status: "completed", completedAt })
+      .set({
+        status: "completed",
+        completedAt,
+        completedWorkingSets: context?.completedWorkingSets ?? null,
+        completionReason: context?.reason ?? null,
+        completionNote: context?.note?.trim() || null,
+      })
       .where(and(eq(workouts.id, id), eq(workouts.status, "in_progress")))
       .returning()
       .get();
@@ -2144,8 +2218,11 @@ export class DatabaseStorage implements IStorage {
 
   async getWorkoutSchedule(userId: number, startDate: string, endDate: string): Promise<WorkoutScheduleWithDays> {
     const schedule = this.getOrCreateScheduleRow(userId);
-    const days = await this.getDaysInRange(schedule.id, startDate, endDate);
-    return { ...schedule, days };
+    const [days, absences] = await Promise.all([
+      this.getDaysInRange(schedule.id, startDate, endDate),
+      this.getTrainingAbsences(userId, startDate, endDate),
+    ]);
+    return { ...schedule, days, absences };
   }
 
   async setWeeklyRestDays(userId: number, days: number[]): Promise<WorkoutSchedule> {
@@ -2282,7 +2359,8 @@ export class DatabaseStorage implements IStorage {
     const [startDate, endDate] = monthBounds(yearMonth);
     const days = await this.getDaysInRange(schedule.id, startDate, endDate);
     const refreshed = db.select().from(workoutSchedules).where(eq(workoutSchedules.id, schedule.id)).get()!;
-    return { ...refreshed, days };
+    const absences = await this.getTrainingAbsences(userId, startDate, endDate);
+    return { ...refreshed, days, absences };
   }
 
   /** Fill in every day of yearMonth that isn't manually overridden. For rotating-cycle splits

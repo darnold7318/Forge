@@ -33,6 +33,7 @@ import {
   userExerciseEquipmentProfiles as userExerciseEquipmentProfilesTable,
   workoutExerciseSnapshots as workoutExerciseSnapshotsTable,
   userMuscleLearnedRanges as userMuscleLearnedRangesTable,
+  trainingAbsences as trainingAbsencesTable,
 } from "@shared/schema";
 import {
   CLIENT_TZ_HEADER,
@@ -69,6 +70,8 @@ import {
   moveScheduleDaySchema,
   setScheduleDaySchema,
   setCoreAddonSchema,
+  plannedAbsenceInputSchema,
+  workoutCompletionContextSchema,
   muscleGroupNames,
   muscleGroupDisplayNames,
   primaryStimulusMuscle,
@@ -353,6 +356,10 @@ async function buildHistory(userId: number, zone: string = "UTC"): Promise<Histo
       plannedDeload: savedPlan?.advancedTrainer?.phase === "deload",
       advancedTrainerCycleId: w.advancedTrainerCycleId,
       coachBaselineRevision: w.coachBaselineRevision,
+      completionReason: w.completionReason as HistorySessionInput["completionReason"],
+      completionNote: w.completionNote,
+      plannedWorkingSets: w.plannedWorkingSets,
+      completedWorkingSets: w.completedWorkingSets,
       startedAt: workoutInstant(w, zone),
       exercises: exercisesForSession,
     };
@@ -1214,6 +1221,10 @@ export async function registerRoutes(
       advancedTrainerCycleId: advancedMetadata?.cycleId ?? null,
       timeBudgetMinutes: body.data.timeBudgetMinutes,
       plannedDurationMinutes: body.data.sessionPlan.estimatedMinutes,
+      plannedWorkingSets: body.data.sessionPlan.exercises.reduce((sum, exercise) => sum + (exercise.skipped ? 0 : exercise.workingSets), 0),
+      completedWorkingSets: null,
+      completionReason: null,
+      completionNote: null,
       sessionPlan: JSON.stringify(body.data.sessionPlan),
     });
     res.status(201).json(guidedSessionResponse(await storage.getWorkoutWithSets(created.id)));
@@ -1261,9 +1272,25 @@ export async function registerRoutes(
     if (workout.userId !== userId) return res.status(403).json({ message: "Workout does not belong to the active user" });
     if (workout.status === "completed") return res.json(guidedSessionResponse(workout));
     if (workout.sets.length === 0) return res.status(400).json({ message: "Log at least one set before finishing" });
+    const completedWorkingSets = workout.sets.filter((set) => !set.isWarmup).length;
+    let plannedWorkingSets = workout.plannedWorkingSets;
+    if (plannedWorkingSets == null && workout.sessionPlan) {
+      try {
+        const parsedPlan = guidedSessionPlanSchema.safeParse(JSON.parse(workout.sessionPlan));
+        if (parsedPlan.success) plannedWorkingSets = parsedPlan.data.exercises.reduce((sum, exercise) => sum + (exercise.skipped ? 0 : exercise.workingSets), 0);
+      } catch { /* Legacy malformed plan: completion still remains possible. */ }
+    }
+    const incomplete = plannedWorkingSets != null && completedWorkingSets < plannedWorkingSets;
+    const context = req.body?.reason == null ? null : workoutCompletionContextSchema.safeParse(req.body);
+    if (context && !context.success) return res.status(400).json({ message: context.error.issues[0]?.message ?? "Invalid completion reason" });
+    if (incomplete && !context) return res.status(400).json({ message: "Choose why planned working sets were not completed" });
     // Conditional completion makes retries safe: exactly one request advances
     // the schedule even if the client repeats the finish call.
-    const updated = await storage.completeWorkout(id, new Date().toISOString());
+    const updated = await storage.completeWorkout(id, new Date().toISOString(), {
+      completedWorkingSets,
+      reason: context?.data.reason ?? null,
+      note: context?.data.note ?? null,
+    });
     if (!updated) {
       const alreadyCompleted = await storage.getWorkoutWithSets(id);
       return res.json(guidedSessionResponse(alreadyCompleted));
@@ -1724,6 +1751,12 @@ export async function registerRoutes(
     const fatigue = evaluateFatigueTrend(comparisonHistory, coachContext.settings.fatigueSensitivity);
 
     const workoutsList = await storage.getWorkouts(userId);
+    const recentAbsences = await storage.getTrainingAbsences(userId, addCivilDays(today, -14), today);
+    const latestWorkoutDate = workoutsList[0]?.date ?? null;
+    const returnAbsence = recentAbsences.find((absence) => absence.endDate < today && (!latestWorkoutDate || latestWorkoutDate <= absence.endDate));
+    const returnAbsenceDays = returnAbsence
+      ? Math.round((Date.parse(`${returnAbsence.endDate}T00:00:00Z`) - Date.parse(`${returnAbsence.startDate}T00:00:00Z`)) / DAY_MS) + 1
+      : 0;
     const workoutMap = new Map(workoutsList.map((workout) => [workout.id, workout]));
     const allSets = await storage.getAllSets(userId);
     const { start: weekStart, end: weekEnd } = startOfWeekWindow(new Date(), 0);
@@ -1919,6 +1952,38 @@ export async function registerRoutes(
     const equipmentById = new Map(exercisesList.map((exercise) => [exercise.id, exercise.equipmentSettings]));
     const integrate = (suggestions: IntegratedSuggestion[], rows: GuidedPlanExerciseInput[]) => integrateCycleSuggestions({ context: coachContext,
       suggestions, exercises: rows, allTemplateExercises, volumeProfiles, equipmentById });
+    const applyExceptionContext = (suggestions: IntegratedSuggestion[], sourceTemplateId?: number): IntegratedSuggestion[] => {
+      const latestTemplateSession = sourceTemplateId == null ? undefined : history.find((session) => session.workoutTemplateId === sourceTemplateId);
+      const reason = latestTemplateSession?.completionReason;
+      const recoveryReason = reason === "fatigue" || reason === "pain";
+      const neutralReason = reason === "time" || reason === "equipment" || reason === "intentional" || reason === "other";
+      const returningFromBreak = returnAbsenceDays >= 3;
+      if (!returningFromBreak && !recoveryReason && !neutralReason) return suggestions;
+      return suggestions.map((suggestion) => {
+        if (neutralReason) {
+          const explanation = `The previous session ended early for ${reason === "time" ? "a time limit" : reason === "equipment" ? "equipment availability" : reason === "intentional" ? "an intentional volume cut" : "a recorded exception"}. Missing sets are not treated as lost performance.`;
+          return { ...suggestion, reason: `${suggestion.reason} ${explanation}`, plainLanguageReason: `${suggestion.plainLanguageReason ?? suggestion.reason} ${explanation}` };
+        }
+        const equipment = equipmentById.get(suggestion.exerciseId);
+        const workingSets = Math.max(1, (suggestion.recommendedWorkingSets ?? suggestion.prescribedSets ?? 3) - 1);
+        const currentWeight = suggestion.suggestedWeight ?? 0;
+        const nextWeight = equipment && currentWeight > 0
+          ? Math.max(equipment.minWeight, Math.round((currentWeight - equipment.weightIncrement) * 100) / 100)
+          : currentWeight;
+        const rirMin = Math.min(5, (suggestion.targetRirMin ?? 2) + 1);
+        const rirMax = Math.min(5, Math.max(rirMin, (suggestion.targetRirMax ?? 3) + 1));
+        const context = returningFromBreak
+          ? `First session after a ${returnAbsenceDays}-day ${returnAbsence?.reason === "travel" ? "travel break" : "planned absence"}: use one fewer working set, one equipment increment less load, and about one more rep in reserve.`
+          : `The previous workout ended because of ${reason === "pain" ? "pain or discomfort" : "fatigue"}; use a conservative recovery target instead of forcing progression.`;
+        const goal = suggestion.trackingMode === "duration"
+          ? `${workingSets} holds x ${suggestion.targetDurationMinSeconds ?? 20}-${suggestion.targetDurationMaxSeconds ?? 60} sec`
+          : `${workingSets} sets x ${suggestion.targetRepsMin ?? 8}-${suggestion.targetRepsMax ?? 12} @ RIR ${rirMin}-${rirMax}${nextWeight > 0 ? ` at ${nextWeight} lb` : ""}`;
+        return { ...suggestion, recommendation: "Recovery Return", recommendedWorkingSets: workingSets, prescribedSets: workingSets,
+          suggestedWeight: nextWeight, targetRirMin: rirMin, targetRirMax: rirMax, prescribedRirMin: rirMin, prescribedRirMax: rirMax,
+          suggestedGoal: goal, nextGoalText: `Next session: ${goal}. Reassess after the first working set.`, effortGuidance: `Stop with ${rirMin}-${rirMax} good reps in reserve.`,
+          setRecommendation: "Reduce Set", reason: context, plainLanguageReason: context, estimatedReps: null, estimatedFailureReps: null, estimateText: null };
+      });
+    };
     const rowFor = (suggestion: IntegratedSuggestion, te?: (typeof allTemplates)[number]["exercises"][number]): GuidedPlanExerciseInput => {
       const exercise = exerciseMap.get(suggestion.exerciseId)!;
       return { exerciseId: exercise.id, exerciseName: exercise.name, exerciseOrder: te?.exerciseOrder ?? 0, exerciseRole: te?.exerciseRole ?? "Accessory",
@@ -1946,7 +2011,7 @@ export async function registerRoutes(
           targetRir: te.targetRir, failureTarget: te.failureTarget, restSeconds: te.restSeconds }), sourceTemplateId: id, sourceTemplateName: template.name };
         return [{ suggestion, row: rowFor(suggestion, te) }];
       });
-      const result = integrate(entries.map((entry) => entry.suggestion), entries.map((entry) => entry.row));
+      const result = applyExceptionContext(integrate(entries.map((entry) => entry.suggestion), entries.map((entry) => entry.row)), id);
       byTemplate.set(id, result);
       return result;
     };
@@ -1956,7 +2021,7 @@ export async function registerRoutes(
       const source = sourceTemplateByExercise.get(exercise.id);
       if (source != null) return forTemplate(source).filter((suggestion) => suggestion.exerciseId === exercise.id);
       const suggestion = evaluateForExercise(exercise);
-      return integrate([suggestion], [rowFor(suggestion)]);
+      return applyExceptionContext(integrate([suggestion], [rowFor(suggestion)]));
     });
   }
 
@@ -1971,6 +2036,23 @@ export async function registerRoutes(
       if (template.userId !== userId) return res.status(403).json({ message: "You do not own this template" });
     }
     res.json(await buildIntegratedCoachSuggestions(userId, zoneOf(req), todayFor(req), templateId));
+  });
+
+  app.patch("/api/workouts/:id/completion-context", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const id = Number(req.params.id);
+    const existing = await storage.getWorkout(id);
+    if (!existing) return res.status(404).json({ message: "Workout not found" });
+    if (existing.userId !== userId) return res.status(403).json({ message: "Workout does not belong to the active user" });
+    if (existing.status !== "completed") return res.status(409).json({ message: "Finish the workout before editing its completion reason" });
+    const parsed = workoutCompletionContextSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message ?? "Invalid completion reason" });
+    const updated = await storage.updateWorkout(id, {
+      completionReason: parsed.data.reason,
+      completionNote: parsed.data.note?.trim() || null,
+    });
+    res.json(updated);
   });
 
   app.get("/api/coach/training-context", async (req, res) => {
@@ -1992,6 +2074,42 @@ export async function registerRoutes(
     const [startDate, endDate] = monthBounds(month);
     const result = await storage.getWorkoutSchedule(userId, startDate, endDate);
     res.json(result);
+  });
+
+  app.get("/api/training-exceptions", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const bounds = z.object({
+      start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    }).safeParse(req.query);
+    if (!bounds.success) return res.status(400).json({ message: "Invalid exception date range" });
+    res.json(await storage.getTrainingAbsences(userId, bounds.data.start, bounds.data.end));
+  });
+
+  app.post("/api/training-exceptions/planned-absence", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = plannedAbsenceInputSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message ?? "Invalid planned absence" });
+    res.status(201).json(await storage.createTrainingAbsence(userId, parsed.data));
+  });
+
+  app.patch("/api/training-exceptions/planned-absence/:id", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    const parsed = plannedAbsenceInputSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message ?? "Invalid planned absence" });
+    const updated = await storage.updateTrainingAbsence(userId, Number(req.params.id), parsed.data);
+    if (!updated) return res.status(404).json({ message: "Planned absence not found" });
+    res.json(updated);
+  });
+
+  app.delete("/api/training-exceptions/planned-absence/:id", async (req, res) => {
+    const userId = getUserId(req, res);
+    if (userId == null) return;
+    if (!(await storage.deleteTrainingAbsence(userId, Number(req.params.id)))) return res.status(404).json({ message: "Planned absence not found" });
+    res.status(204).end();
   });
 
   app.post("/api/schedule/generate", async (req, res) => {
@@ -2080,7 +2198,10 @@ export async function registerRoutes(
     await storage.continueGeneration(userId, todayIso.slice(0, 7));
     const scheduleRow = await storage.getWorkoutSchedule(userId, monthStart, monthEnd);
     const todayDay = scheduleRow.days.find((d) => d.date === todayIso);
-    const scheduleForDashboard = todayDay ? { workoutTemplateId: todayDay.workoutTemplateId, label: todayDay.label } : null;
+    const todayAbsence = scheduleRow.absences.find((absence) => todayIso >= absence.startDate && todayIso <= absence.endDate);
+    const scheduleForDashboard = todayAbsence
+      ? { workoutTemplateId: null, label: `Planned absence · ${todayAbsence.reason}` }
+      : todayDay ? { workoutTemplateId: todayDay.workoutTemplateId, label: todayDay.label } : null;
 
     const dashboardTemplates: DashboardTemplateInput[] = templates.map((t) => ({
       id: t.id,
@@ -2198,6 +2319,7 @@ export async function registerRoutes(
       db.delete(workoutSchedulesTable).where(eq(workoutSchedulesTable.id, schedule.id)).run();
     }
     db.delete(bodyweightLogsTable).where(eq(bodyweightLogsTable.userId, userId)).run();
+    db.delete(trainingAbsencesTable).where(eq(trainingAbsencesTable.userId, userId)).run();
     db.delete(userExerciseMuscleStimulusOverridesTable)
       .where(eq(userExerciseMuscleStimulusOverridesTable.userId, userId))
       .run();

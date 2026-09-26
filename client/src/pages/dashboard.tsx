@@ -2,7 +2,6 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { useActiveUser } from "@/lib/user-context";
 import { apiRequest } from "@/lib/queryClient";
-import { CoachTrainingContext } from "@/components/coach-training-context";
 import { AlertTriangle, Plus, ChevronRight, Dumbbell, Flame, TrendingUp, Trophy, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -74,7 +73,6 @@ export default function Dashboard() {
 
       {!isLoading && snapshot && (
         <>
-          <CoachTrainingContext />
           {snapshot.workoutStatus === "Deload Suggested" && (
             <Card className="border-destructive/40 bg-destructive/10" data-testid="banner-deload-alert">
               <CardContent className="p-4 flex gap-3">

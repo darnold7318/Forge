@@ -6,6 +6,7 @@ import type { QueryClient } from "@tanstack/react-query";
 // show calculations from a workout that was edited or deleted.
 const trainingHistoryQueryRoots = [
   "/api/workouts",
+  "/api/training-exceptions",
   "/api/advanced-trainer/state",
   "/api/dashboard",
   "/api/recovery",

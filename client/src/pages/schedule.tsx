@@ -11,7 +11,7 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { CalendarDays, ChevronLeft, ChevronRight, Moon, Sparkles, Dumbbell, X } from "lucide-react";
+import { CalendarDays, ChevronLeft, ChevronRight, Moon, Plane, ShieldCheck, Sparkles, Dumbbell, X } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -33,11 +33,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Link, useLocation } from "wouter";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useActiveUser } from "@/lib/user-context";
 import { useToast } from "@/hooks/use-toast";
-import { workoutSplitIds, workoutSplitLabels, type WorkoutSplitId } from "@shared/schema";
+import { workoutSplitIds, workoutSplitLabels, type PlannedAbsenceReasonId, type WorkoutSplitId } from "@shared/schema";
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const DAY_NAMES_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -70,7 +73,28 @@ interface ScheduleResponse {
   lastGeneratedMonth: string | null;
   customWeeklyTemplate: string; // JSON array of 7 slots, index 0=Sun..6=Sat
   days: ScheduleDay[];
+  absences: TrainingAbsence[];
 }
+
+interface TrainingAbsence {
+  id: number;
+  startDate: string;
+  endDate: string;
+  reason: PlannedAbsenceReasonId;
+  note: string | null;
+  cycleBehavior: "keep_running";
+}
+
+const ABSENCE_REASONS: Array<{ id: PlannedAbsenceReasonId; label: string }> = [
+  { id: "travel", label: "Travel / vacation" },
+  { id: "time", label: "Time or schedule" },
+  { id: "fatigue", label: "Fatigue / recovery" },
+  { id: "illness", label: "Illness" },
+  { id: "pain", label: "Pain / injury" },
+  { id: "equipment", label: "No equipment" },
+  { id: "deload", label: "Intentional recovery" },
+  { id: "other", label: "Other" },
+];
 
 const LABEL_COLORS: Record<string, string> = {
   Push: "bg-chart-1/15 border-chart-1/40 text-chart-1",
@@ -261,6 +285,7 @@ function CalendarCell({
   isCurrentMonth,
   onClearDay,
   onStartWorkout,
+  absence,
 }: {
   date: string;
   day: ScheduleDay | undefined;
@@ -268,6 +293,7 @@ function CalendarCell({
   isCurrentMonth: boolean;
   onClearDay: (date: string) => void;
   onStartWorkout: (workoutTemplateId: number | null) => void;
+  absence?: TrainingAbsence;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `cell:${date}`, data: { type: "cell", date } });
   const dayNum = Number(date.slice(8, 10));
@@ -277,7 +303,7 @@ function CalendarCell({
       ref={setNodeRef}
       className={`min-h-[64px] sm:min-h-[76px] rounded-md border p-1.5 flex flex-col gap-1 transition-colors ${
         isCurrentMonth ? "" : "opacity-40"
-      } ${isToday ? "ring-2 ring-ring" : ""} ${isOver ? "bg-accent" : ""}`}
+      } ${isToday ? "ring-2 ring-ring" : ""} ${isOver ? "bg-accent" : ""} ${absence ? "border-primary/50 bg-primary/5" : ""}`}
       data-testid={`cell-day-${date}`}
     >
       <div className="flex items-center gap-1 px-0.5">
@@ -291,6 +317,7 @@ function CalendarCell({
       ) : (
         <div className="h-[26px]" />
       )}
+      {absence && <div className="mt-auto flex items-center gap-1 rounded-sm bg-primary/15 px-1 py-0.5 text-[9px] font-medium text-primary" title={absence.note ?? undefined}><Plane className="h-2.5 w-2.5" />Planned skip</div>}
     </div>
   );
 }
@@ -306,6 +333,11 @@ export default function SchedulePage() {
   const [pendingSplit, setPendingSplit] = useState<WorkoutSplitId | null>(null);
   const [dragDay, setDragDay] = useState<ScheduleDay | null>(null);
   const [pendingRestDrop, setPendingRestDrop] = useState<string | null>(null); // target date that already has a training day
+  const [absenceOpen, setAbsenceOpen] = useState(false);
+  const [absenceStart, setAbsenceStart] = useState(todayIso());
+  const [absenceEnd, setAbsenceEnd] = useState(todayIso());
+  const [absenceReason, setAbsenceReason] = useState<PlannedAbsenceReasonId>("travel");
+  const [absenceNote, setAbsenceNote] = useState("");
 
   const yearMonth = monthKey(viewYear, viewMonth);
 
@@ -381,6 +413,24 @@ export default function SchedulePage() {
     onError: () => toast({ title: "Couldn't update day", variant: "destructive" }),
   });
 
+  const absenceMutation = useMutation({
+    mutationFn: async () => (await apiRequest("POST", "/api/training-exceptions/planned-absence", {
+      startDate: absenceStart,
+      endDate: absenceEnd,
+      reason: absenceReason,
+      note: absenceNote.trim() || null,
+      cycleBehavior: "keep_running",
+    })).json(),
+    onSuccess: () => {
+      invalidate();
+      queryClient.invalidateQueries({ queryKey: ["/api/training-exceptions"] });
+      setAbsenceOpen(false);
+      setAbsenceNote("");
+      toast({ title: "Planned absence saved", description: "Coach will not score these dates as failed workouts." });
+    },
+    onError: (error: Error) => toast({ title: "Couldn't save planned absence", description: error.message, variant: "destructive" }),
+  });
+
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
   const days = data?.days ?? [];
@@ -421,6 +471,15 @@ export default function SchedulePage() {
     const sixthWeekHasCurrentMonth = cells.slice(lastRowStart).some((c) => c.isCurrentMonth);
     return sixthWeekHasCurrentMonth ? cells : cells.slice(0, 35);
   }, [viewYear, viewMonth]);
+
+  const absenceByDate = useMemo(() => {
+    const result = new Map<string, TrainingAbsence>();
+    for (const cell of gridCells) {
+      const match = data?.absences?.find((absence) => cell.date >= absence.startDate && cell.date <= absence.endDate);
+      if (match) result.set(cell.date, match);
+    }
+    return result;
+  }, [data?.absences, gridCells]);
 
   const goPrevMonth = () => {
     if (viewMonth === 0) {
@@ -537,16 +596,10 @@ export default function SchedulePage() {
             Drag bubbles to rearrange your training calendar
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="gap-1.5 shrink-0"
-          onClick={() => setShowSetup((s) => !s)}
-          data-testid="button-toggle-setup"
-        >
-          <Sparkles className="h-3.5 w-3.5" />
-          {hasActiveSplit ? "Change Split" : "Auto-generate"}
-        </Button>
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setAbsenceOpen(true)} data-testid="button-planned-absence"><Plane className="h-3.5 w-3.5" />Planned absence</Button>
+          <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setShowSetup((s) => !s)} data-testid="button-toggle-setup"><Sparkles className="h-3.5 w-3.5" />{hasActiveSplit ? "Change Split" : "Auto-generate"}</Button>
+        </div>
       </div>
 
       {(showSetup || !hasActiveSplit) && (
@@ -639,6 +692,7 @@ export default function SchedulePage() {
                   isCurrentMonth={cell.isCurrentMonth}
                   onClearDay={clearDay}
                   onStartWorkout={startWorkout}
+                  absence={absenceByDate.get(cell.date)}
                 />
               ))}
             </div>
@@ -695,6 +749,19 @@ export default function SchedulePage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <Dialog open={absenceOpen} onOpenChange={setAbsenceOpen}>
+        <DialogContent className="sm:max-w-xl" data-testid="dialog-planned-absence">
+          <DialogHeader><DialogTitle>Mark planned absence</DialogTitle><DialogDescription>Tell Coach what happened without turning scheduled sessions into failed workouts.</DialogDescription></DialogHeader>
+          <div className="space-y-5 py-2">
+            <div className="grid gap-3 sm:grid-cols-2"><div className="space-y-1.5"><label className="text-sm font-medium" htmlFor="absence-start">Start date</label><Input id="absence-start" type="date" value={absenceStart} onChange={(event) => { setAbsenceStart(event.target.value); if (event.target.value > absenceEnd) setAbsenceEnd(event.target.value); }} /></div><div className="space-y-1.5"><label className="text-sm font-medium" htmlFor="absence-end">End date</label><Input id="absence-end" type="date" min={absenceStart} value={absenceEnd} onChange={(event) => setAbsenceEnd(event.target.value)} /></div></div>
+            <div className="space-y-2"><p className="text-sm font-medium">Why?</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{ABSENCE_REASONS.map((reason) => <Button key={reason.id} type="button" size="sm" variant={absenceReason === reason.id ? "default" : "outline"} className="h-auto min-h-10 whitespace-normal" onClick={() => setAbsenceReason(reason.id)}>{reason.label}</Button>)}</div></div>
+            <div className="rounded-md border border-primary/40 bg-primary/5 p-3"><div className="flex items-start gap-2"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" /><div><p className="text-sm font-medium">Keep the cycle calendar running</p><p className="mt-1 text-xs text-muted-foreground">The mesocycle week does not pause. These dates stay visible as planned skips, create no workouts or zero sets, and are not scored as regressions.</p></div></div></div>
+            <div className="space-y-1.5"><label className="text-sm font-medium" htmlFor="absence-note">Optional note</label><Textarea id="absence-note" value={absenceNote} onChange={(event) => setAbsenceNote(event.target.value)} maxLength={500} placeholder="Anything Coach should remember about this break" /></div>
+          </div>
+          <DialogFooter><Button variant="outline" onClick={() => setAbsenceOpen(false)}>Cancel</Button><Button disabled={absenceMutation.isPending || !absenceStart || !absenceEnd || absenceEnd < absenceStart} onClick={() => absenceMutation.mutate()}>{absenceMutation.isPending ? "Saving…" : "Save planned absence"}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

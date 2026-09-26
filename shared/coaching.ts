@@ -22,6 +22,7 @@ import {
   type TrainingLevelId,
   type CoachSettings,
   type EquipmentWeightSettings,
+  type WorkoutCompletionReasonId,
 } from "./schema";
 import { civilDateInZone } from "./timezone";
 
@@ -76,6 +77,10 @@ export interface HistorySessionInput {
   advancedTrainerCycleId?: number | null;
   currentCycleComparison?: boolean;
   plannedDeload?: boolean;
+  completionReason?: WorkoutCompletionReasonId | null;
+  completionNote?: string | null;
+  plannedWorkingSets?: number | null;
+  completedWorkingSets?: number | null;
   id: number;
   workoutTemplateId: number | null;
   workoutName: string;
@@ -1710,11 +1715,13 @@ export function evaluateFatigueTrend(
   }
 
   const templateRegressions: string[] = [];
+  const performanceNeutralReasons = new Set<WorkoutCompletionReasonId>(["time", "equipment", "intentional", "other"]);
   const byTemplate = new Map<number, HistorySessionInput[]>();
   for (const session of history) {
     // Current-cycle fatigue compares repeated exercises, not averages of
     // changing template contents or prescribed set counts.
     if (session.currentCycleComparison || session.currentModeComparison) continue;
+    if (session.completionReason && performanceNeutralReasons.has(session.completionReason)) continue;
     if (session.workoutTemplateId == null) continue;
     const list = byTemplate.get(session.workoutTemplateId) ?? [];
     list.push(session);
@@ -1756,14 +1763,16 @@ export function evaluateFatigueTrend(
     : 0;
 
   const evidence: string[] = [];
+  const fatigueReported = history.slice(0, 3).some((session) => session.completionReason === "fatigue");
   if (regressing.length) evidence.push(`Repeated exercise regression: ${regressing.slice(0, 3).join(", ")}.`);
   if (worseningEffort.length) evidence.push(`RIR worsened while performance declined: ${worseningEffort.slice(0, 3).join(", ")}.`);
   if (templateRegressions.length) evidence.push(`Repeated template regression: ${templateRegressions.slice(0, 2).join(", ")}.`);
   if (lowRirRate >= 0.3) evidence.push(`${Math.round(lowRirRate * 100)}% of recent working sets reached RIR 0.`);
+  if (fatigueReported) evidence.push("A recent workout was ended early because of reported fatigue.");
   if (!evidence.length) evidence.push("No repeated same-exercise or same-template decline detected.");
 
   const sensitivityMultiplier = sensitivity === "low" ? 0.8 : sensitivity === "high" ? 1.2 : 1;
-  let riskScore = 15 + Math.min(45, regressing.length * 18) + Math.min(20, templateRegressions.length * 20) + Math.min(15, worseningEffort.length * 8) + (lowRirRate >= 0.3 ? 15 : 0);
+  let riskScore = 15 + Math.min(45, regressing.length * 18) + Math.min(20, templateRegressions.length * 20) + Math.min(15, worseningEffort.length * 8) + (lowRirRate >= 0.3 ? 15 : 0) + (fatigueReported ? 15 : 0);
   riskScore = Math.min(100, Math.round(riskScore * sensitivityMultiplier));
 
   if (riskScore >= 70) {

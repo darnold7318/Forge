@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -47,7 +48,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import type { DashboardSnapshot, WorkoutExerciseSuggestion } from "@shared/coaching";
 import { resolveWorkingSetCount } from "@shared/coaching";
-import type { ExerciseView, MuscleGroupName, Set as LoggedSet, Workout } from "@shared/schema";
+import type { ExerciseView, MuscleGroupName, Set as LoggedSet, Workout, WorkoutCompletionReasonId } from "@shared/schema";
 import {
   buildGuidedSessionPlan,
   estimateGuidedSessionMinutes,
@@ -108,6 +109,15 @@ const BUDGETS: Array<{ value: string; label: string }> = [
   { value: "30", label: "30 min" },
   { value: "45", label: "45 min" },
   { value: "60", label: "60 min" },
+];
+
+const COMPLETION_REASONS: Array<{ id: WorkoutCompletionReasonId; label: string; coach: string }> = [
+  { id: "time", label: "Time limit", coach: "Time-limited omissions are neutral. Completed sets still count, and missing sets will not lower your performance trend." },
+  { id: "fatigue", label: "Too fatigued", coach: "Fatigue is a recovery signal. Coach may hold or reduce the next target instead of treating this as a normal regression." },
+  { id: "pain", label: "Pain / discomfort", coach: "Coach treats pain conservatively and avoids forcing progression on the affected training pattern." },
+  { id: "equipment", label: "Equipment unavailable", coach: "Equipment constraints are neutral and do not count as lost performance." },
+  { id: "intentional", label: "Intentional cut", coach: "Coach keeps the completed work but excludes the omitted volume from regression scoring." },
+  { id: "other", label: "Other", coach: "Coach records the exception without assuming that missing volume means lost performance." },
 ];
 
 function formatElapsed(seconds: number): string {
@@ -255,6 +265,8 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
   const [rir, setRir] = useState("");
   const [adjustment, setAdjustment] = useState<GuidedSetAdjustment | null>(null);
   const [finishOpen, setFinishOpen] = useState(false);
+  const [completionReason, setCompletionReason] = useState<WorkoutCompletionReasonId | "">("");
+  const [completionNote, setCompletionNote] = useState("");
   const [discardOpen, setDiscardOpen] = useState(false);
   const [finishedSession, setFinishedSession] = useState<GuidedWorkoutRecord | null>(null);
   const [clockNow, setClockNow] = useState(Date.now());
@@ -425,6 +437,10 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
   });
 
   const session = activeSession;
+  const completedWorkingSets = session?.sets.filter((set) => !set.isWarmup).length ?? 0;
+  const plannedWorkingSets = session?.plannedWorkingSets ?? session?.sessionPlan?.exercises.reduce((sum, exercise) => sum + (exercise.skipped ? 0 : exercise.workingSets), 0) ?? 0;
+  const omittedWorkingSets = Math.max(0, plannedWorkingSets - completedWorkingSets);
+  const requiresCompletionReason = omittedWorkingSets > 0;
   const activeExercise = session ? nextExerciseFor(session) : undefined;
   const activeCompletedSets = session && activeExercise ? completedSetsFor(session, activeExercise.exerciseId) : [];
   const nextSetIndex = activeCompletedSets.length;
@@ -529,12 +545,17 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
   const finishMutation = useMutation({
     mutationFn: async () => {
       if (!session) throw new Error("No active workout");
-      const response = await apiRequest("POST", `/api/workout-sessions/${session.id}/complete`);
+      const response = await apiRequest("POST", `/api/workout-sessions/${session.id}/complete`, requiresCompletionReason ? {
+        reason: completionReason,
+        note: completionNote.trim() || null,
+      } : {});
       return response.json() as Promise<GuidedWorkoutRecord>;
     },
     onSuccess: async (completed) => {
       setFinishedSession(completed);
       setFinishOpen(false);
+      setCompletionReason("");
+      setCompletionNote("");
       queryClient.setQueryData(["/api/workout-sessions/active", activeUserId], null);
       await invalidateTrainingHistoryQueries(queryClient);
       await queryClient.invalidateQueries({ queryKey: ["/api/advanced-trainer/state", activeUserId] });
@@ -756,7 +777,15 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
       )}
 
       <AlertDialog open={finishOpen} onOpenChange={setFinishOpen}>
-        <AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Finish {session.name}?</AlertDialogTitle><AlertDialogDescription>This completes the session with {session.sets.length} logged sets and updates recovery, volume, history, and your schedule.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep training</AlertDialogCancel><AlertDialogAction disabled={finishMutation.isPending || session.sets.length === 0} onClick={() => finishMutation.mutate()}>{finishMutation.isPending ? "Finishing…" : "Finish Workout"}</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
+        <AlertDialogContent>
+          <AlertDialogHeader><AlertDialogTitle>{requiresCompletionReason ? `Finish with ${omittedWorkingSets} planned ${omittedWorkingSets === 1 ? "set" : "sets"} incomplete?` : `Finish ${session.name}?`}</AlertDialogTitle><AlertDialogDescription>{requiresCompletionReason ? "Choose a reason so Coach interprets the completed work correctly." : `This completes the session with ${session.sets.length} logged sets and updates recovery, volume, history, and your schedule.`}</AlertDialogDescription></AlertDialogHeader>
+          {requiresCompletionReason && <div className="space-y-4 py-2">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{COMPLETION_REASONS.map((reason) => <Button key={reason.id} type="button" size="sm" variant={completionReason === reason.id ? "default" : "outline"} className="h-auto min-h-10 whitespace-normal" onClick={() => setCompletionReason(reason.id)}>{reason.label}</Button>)}</div>
+            {completionReason && <div className="rounded-md border border-primary/40 bg-primary/5 p-3"><p className="text-xs font-medium text-primary">Coach interpretation</p><p className="mt-1 text-xs text-muted-foreground">{COMPLETION_REASONS.find((reason) => reason.id === completionReason)?.coach}</p></div>}
+            <Textarea value={completionNote} onChange={(event) => setCompletionNote(event.target.value)} maxLength={500} placeholder="Optional note" />
+          </div>}
+          <AlertDialogFooter><AlertDialogCancel>Keep training</AlertDialogCancel><AlertDialogAction disabled={finishMutation.isPending || session.sets.length === 0 || (requiresCompletionReason && !completionReason)} onClick={() => finishMutation.mutate()}>{finishMutation.isPending ? "Finishing…" : requiresCompletionReason ? "Finish & save reason" : "Finish Workout"}</AlertDialogAction></AlertDialogFooter>
+        </AlertDialogContent>
       </AlertDialog>
       <AlertDialog open={discardOpen} onOpenChange={setDiscardOpen}>
         <AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Discard this workout?</AlertDialogTitle><AlertDialogDescription>This deletes the in-progress workout and all {session.sets.length} saved sets. It cannot be undone.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={discardMutation.isPending} onClick={() => discardMutation.mutate()}>Discard Workout</AlertDialogAction></AlertDialogFooter></AlertDialogContent>

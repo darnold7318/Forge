@@ -130,7 +130,9 @@ test("v4.1 preserves used legacy cycles, retires only unused auto starts, and sa
     const invalidPatch = await request(`/api/workout-sessions/${session.id}/plan`, "PATCH", { sessionPlan: { ...apiPlan, advancedTrainer: { ...apiPlan.advancedTrainer, weekNumber: 2 } } });
     assert.equal(invalidPatch.status, 409);
     assert.equal((await request("/api/sets", "POST", { workoutId: session.id, exerciseId: bench.id, setNumber: 1, weight: 100, reps: 10, rir: 3, isWarmup: false })).status, 201);
-    assert.equal((await request(`/api/workout-sessions/${session.id}/complete`, "POST")).status, 200);
+    assert.equal((await request(`/api/workout-sessions/${session.id}/complete`, "POST")).status, 400);
+    assert.equal((await request(`/api/workout-sessions/${session.id}/complete`, "POST", { reason: "time", note: "Ran out of time" })).status, 200);
+    assert.equal((await storage.getWorkout(session.id))?.completionReason, "time");
     const overview = await (await request("/api/advanced-trainer/state")).json();
     assert.equal(overview.workouts.length, 1);
     assert.equal(overview.workouts.some((workout: {id:number}) => workout.id === manual.id), false);
@@ -228,7 +230,7 @@ test("v4.1 preserves used legacy cycles, retires only unused auto starts, and sa
     const deloadSession = await deloadStarted.json();
     await coachRequest("/api/sets", "POST", { workoutId: deloadSession.id, exerciseId: bench.id, setNumber: 1,
       weight: deload[0].suggestedWeight, reps: 10, rir: 4, isWarmup: false });
-    assert.equal((await coachRequest(`/api/workout-sessions/${deloadSession.id}/complete`, "POST")).status, 200);
+    assert.equal((await coachRequest(`/api/workout-sessions/${deloadSession.id}/complete`, "POST", { reason: "time" })).status, 200);
     const nextDeload = await (await coachRequest(suggestionsPath)).json();
     assert.equal(nextDeload[0].suggestedWeight, deload[0].suggestedWeight);
     assert.equal((await storage.getWorkout(prior.id))?.advancedTrainerCycleId, null);
@@ -247,7 +249,7 @@ test("v4.1 preserves used legacy cycles, retires only unused auto starts, and sa
     const accumulationSession = await accumulationStarted.json();
     await coachRequest("/api/sets", "POST", { workoutId: accumulationSession.id, exerciseId: bench.id,
       setNumber: 1, weight: weekOne[0].suggestedWeight, reps: 7, rir: 3, isWarmup: false });
-    assert.equal((await coachRequest(`/api/workout-sessions/${accumulationSession.id}/complete`, "POST")).status, 200);
+    assert.equal((await coachRequest(`/api/workout-sessions/${accumulationSession.id}/complete`, "POST", { reason: "time" })).status, 200);
     const extraManual = await storage.createWorkout({ userId: unifiedUser.id, date: today, name: "Manual failure work", workoutTemplateId: push.id });
     await storage.createSet({ workoutId: extraManual.id, exerciseId: bench.id, setNumber: 1, weight: 100, reps: 15, rir: 0, isWarmup: false });
     const firstCycleTargets = await (await coachRequest(suggestionsPath)).json();

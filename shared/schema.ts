@@ -755,6 +755,13 @@ export const workouts = sqliteTable("workouts", {
   sessionPlan: text("session_plan"),
   advancedTrainerCycleId: integer("advanced_trainer_cycle_id").references(() => advancedTrainerCycles.id),
   coachBaselineRevision: integer("coach_baseline_revision").notNull().default(0),
+  // Frozen at Guided-session start so later plan trims cannot erase what was
+  // originally prescribed. Completed counts/reasons are written atomically
+  // when the session finishes; classic workouts leave these null.
+  plannedWorkingSets: integer("planned_working_sets"),
+  completedWorkingSets: integer("completed_working_sets"),
+  completionReason: text("completion_reason"),
+  completionNote: text("completion_note"),
 });
 
 export const workoutStatusIds = ["in_progress", "completed"] as const;
@@ -816,6 +823,14 @@ export const insertWorkoutSchema = createInsertSchema(workouts).omit({
 
 export type InsertWorkout = z.infer<typeof insertWorkoutSchema>;
 export type Workout = typeof workouts.$inferSelect;
+
+export const workoutCompletionReasonIds = ["time", "fatigue", "pain", "equipment", "intentional", "other"] as const;
+export type WorkoutCompletionReasonId = (typeof workoutCompletionReasonIds)[number];
+export const workoutCompletionContextSchema = z.object({
+  reason: z.enum(workoutCompletionReasonIds),
+  note: z.string().trim().max(500).nullable().optional(),
+});
+export type WorkoutCompletionContextInput = z.infer<typeof workoutCompletionContextSchema>;
 
 // ---------------------------------------------------------------------------
 // Sets
@@ -919,6 +934,37 @@ export const scheduleDays = sqliteTable("schedule_days", {
 export const insertScheduleDaySchema = createInsertSchema(scheduleDays).omit({ id: true });
 export type InsertScheduleDay = z.infer<typeof insertScheduleDaySchema>;
 export type ScheduleDay = typeof scheduleDays.$inferSelect;
+
+// Calendar exceptions are annotations over the generated schedule. They do
+// not replace schedule rows, advance rotation, or create zero-set workouts.
+export const plannedAbsenceReasonIds = ["travel", "time", "fatigue", "illness", "pain", "equipment", "deload", "other"] as const;
+export type PlannedAbsenceReasonId = (typeof plannedAbsenceReasonIds)[number];
+
+export const trainingAbsences = sqliteTable("training_absences", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  startDate: text("start_date").notNull(),
+  endDate: text("end_date").notNull(),
+  reason: text("reason").notNull(),
+  note: text("note"),
+  cycleBehavior: text("cycle_behavior").notNull().default("keep_running"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const plannedAbsenceInputSchema = z.object({
+  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  reason: z.enum(plannedAbsenceReasonIds),
+  note: z.string().trim().max(500).nullable().optional(),
+  cycleBehavior: z.literal("keep_running").default("keep_running"),
+}).superRefine((value, ctx) => {
+  if (value.endDate < value.startDate) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endDate"], message: "End date must be on or after start date" });
+  const days = Math.round((Date.parse(`${value.endDate}T00:00:00Z`) - Date.parse(`${value.startDate}T00:00:00Z`)) / 86_400_000);
+  if (days > 60) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endDate"], message: "Planned absences may cover at most 61 days" });
+});
+export type PlannedAbsenceInput = z.infer<typeof plannedAbsenceInputSchema>;
+export type TrainingAbsence = typeof trainingAbsences.$inferSelect;
 
 // Maps a split to its ordered rotation of label keys. Used to auto-generate calendar days.
 export const splitRotationCycles: Record<Exclude<WorkoutSplitId, "custom">, string[]> = {

@@ -22,7 +22,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { apiRequest } from "@/lib/queryClient";
-import { CoachTrainingContext } from "@/components/coach-training-context";
 import { useActiveUser } from "@/lib/user-context";
 import type { WorkoutExerciseSuggestion, FatigueSignal } from "@shared/coaching";
 
@@ -123,7 +122,6 @@ export default function Coach() {
         </h1>
         <p className="text-sm text-muted-foreground">Next-session targets for {suggestions?.[0]?.goalLabel ?? "your training goal"}</p>
       </div>
-      <CoachTrainingContext />
 
       {!fatigueLoading && fatigue && (
         <Card
