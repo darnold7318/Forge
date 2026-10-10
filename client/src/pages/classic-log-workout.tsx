@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronDown, ChevronsUpDown, Plus, Trash2, X, Trophy, Flame, TimerIcon, Calculator, Sparkles } from "lucide-react";
+import { Check, ChevronDown, ChevronsUpDown, Plus, Trash2, X, Flame, TimerIcon, Calculator, Sparkles } from "lucide-react";
 import { WorkoutNamePicker } from "@/components/workout-name-picker";
 import { apiRequest, queryClient as qc } from "@/lib/queryClient";
 import { invalidateTrainingHistoryQueries } from "@/lib/training-history-cache";
@@ -8,6 +8,7 @@ import { useActiveUser } from "@/lib/user-context";
 import { useRestTimer } from "@/lib/rest-timer-context";
 import { WarmupCalculator } from "@/components/warmup-calculator";
 import { RepCalculator } from "@/components/rep-calculator";
+import { ExerciseHistory } from "@/components/exercise-history";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -46,7 +47,7 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { formatDate, todayIso } from "@/lib/format";
+import { todayIso } from "@/lib/format";
 import type {
   ExerciseView,
   MuscleGroup,
@@ -178,85 +179,6 @@ function newSet(exercise?: Exercise): DraftSet {
     rir: "",
     isWarmup: false,
   };
-}
-
-interface HistorySet {
-  id: number;
-  workoutId: number;
-  weight: number;
-  reps: number;
-  durationSeconds: number | null;
-  rir: number | null;
-  isWarmup: boolean;
-  workoutDate: string;
-  isPr?: boolean;
-}
-
-function ExerciseHistory({ exercise }: { exercise: Exercise }) {
-  const exerciseId = exercise.id;
-  const { activeUserId } = useActiveUser();
-  const { data, isLoading } = useQuery<HistorySet[]>({
-    queryKey: ["/api/exercises", String(exerciseId), "sets", activeUserId],
-    queryFn: async () => {
-      const res = await apiRequest("GET", `/api/exercises/${exerciseId}/sets`);
-      return res.json();
-    },
-    enabled: activeUserId != null,
-  });
-
-  if (isLoading) return <Skeleton className="h-16 w-full" />;
-  if (!data || data.length === 0) {
-    return (
-      <p className="text-xs text-muted-foreground" data-testid="text-no-history">
-        No previous sessions for this exercise yet.
-      </p>
-    );
-  }
-
-  // Group by workoutId, take last 3 sessions (most recent first)
-  const byWorkout = new Map<number, HistorySet[]>();
-  for (const s of data) {
-    if (!byWorkout.has(s.workoutId)) byWorkout.set(s.workoutId, []);
-    byWorkout.get(s.workoutId)!.push(s);
-  }
-  const sessions = Array.from(byWorkout.entries())
-    .sort((a, b) => (b[1][0]?.workoutDate ?? "").localeCompare(a[1][0]?.workoutDate ?? ""))
-    .slice(0, 3);
-
-  return (
-    <div className="space-y-2" data-testid="section-exercise-history">
-      <p className="text-xs font-medium text-muted-foreground">Last 3 sessions</p>
-      {sessions.map(([workoutId, sets]) => (
-        <div key={workoutId} className="flex items-start justify-between gap-2 text-xs">
-          <span className="text-muted-foreground shrink-0">{formatDate(sets[0].workoutDate)}</span>
-          <div className="flex flex-wrap justify-end gap-1">
-            {sets
-              .filter((s) => !s.isWarmup)
-              .map((s) => (
-                <span
-                  key={s.id}
-                  className={cn(
-                    "tabular-nums font-mono rounded px-1.5 py-0.5 inline-flex items-center gap-1",
-                    s.isPr ? "bg-primary/15 text-primary font-semibold" : "bg-muted",
-                  )}
-                  data-testid={`text-history-set-${s.id}`}
-                >
-                  {s.isPr && <Trophy className="h-3 w-3" data-testid={`icon-pr-badge-${s.id}`} />}
-                  {exercise.trackingMode === "duration"
-                    ? `${s.durationSeconds ?? 0} sec${
-                        s.weight > 0
-                          ? exercise.equipment === "Bodyweight" ? ` @ +${s.weight} lb` : ` @ ${s.weight} lb`
-                          : ""
-                      }`
-                    : `${s.weight}×${s.reps}`}
-                  {s.rir != null ? ` @${s.rir}RIR` : ""}
-                </span>
-              ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
 }
 
 function ExercisePicker({

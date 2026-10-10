@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   ArrowLeftRight,
   Check,
+  ChevronDown,
   ChevronRight,
   Clock,
   Dumbbell,
@@ -26,6 +27,7 @@ import { useActiveUser } from "@/lib/user-context";
 import { useRestTimer } from "@/lib/rest-timer-context";
 import { useToast } from "@/hooks/use-toast";
 import { AdvancedTrainerCyclePanel } from "@/components/advanced-trainer-cycle-panel";
+import { ExerciseHistory } from "@/components/exercise-history";
 import { todayIso } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -35,6 +37,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   AlertDialog,
@@ -268,6 +271,7 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
   const [completionReason, setCompletionReason] = useState<WorkoutCompletionReasonId | "">("");
   const [completionNote, setCompletionNote] = useState("");
   const [discardOpen, setDiscardOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [finishedSession, setFinishedSession] = useState<GuidedWorkoutRecord | null>(null);
   const [clockNow, setClockNow] = useState(Date.now());
 
@@ -748,6 +752,20 @@ export default function GuidedWorkout({ advanced = false }: { advanced?: boolean
               </div>
             </CardHeader>
             <CardContent className="space-y-5">
+              <Collapsible open={historyOpen} onOpenChange={setHistoryOpen} className="rounded-md border">
+                <CollapsibleTrigger asChild>
+                  <Button type="button" variant="ghost" className="w-full justify-between px-3" data-testid="button-guided-exercise-history">
+                    <span className="flex items-center gap-2"><History className="h-4 w-4" />Last 3 workouts</span>
+                    <ChevronDown className={`h-4 w-4 transition-transform ${historyOpen ? "rotate-180" : ""}`} />
+                  </Button>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="border-t p-3">
+                  {historyOpen && <ExerciseHistory
+                    exercise={{ id: activeExercise.exerciseId, trackingMode: activeExercise.trackingMode, equipment: activeExercise.equipment }}
+                    excludeWorkoutId={session.id}
+                  />}
+                </CollapsibleContent>
+              </Collapsible>
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5"><Label htmlFor="guided-weight">{activeExercise.equipment === "Bodyweight" ? "Added weight" : "Weight"}</Label><Input id="guided-weight" type="number" inputMode="decimal" min={currentExerciseDetails?.equipmentSettings.minWeight ?? 0} max={currentExerciseDetails?.equipmentSettings.maxWeight} step={currentExerciseDetails?.equipmentSettings.weightIncrement ?? 5} value={weight} onChange={(event) => setWeight(event.target.value)} /></div>
                 <div className="space-y-1.5"><Label htmlFor="guided-performance">{activeExercise.trackingMode === "duration" ? "Seconds" : "Reps"}</Label><Input id="guided-performance" autoFocus type="number" inputMode="numeric" min={1} placeholder={activeExercise.trackingMode === "duration" ? String(activeExercise.targetDurationMinSeconds ?? "") : `${activeExercise.targetRepsMin}-${activeExercise.targetRepsMax}`} value={activeExercise.trackingMode === "duration" ? durationSeconds : reps} onChange={(event) => activeExercise.trackingMode === "duration" ? setDurationSeconds(event.target.value) : setReps(event.target.value)} /></div>
